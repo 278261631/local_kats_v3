@@ -1,0 +1,1820 @@
+"""
+基于信号强度的斑点检测器
+可以过滤掉背景噪声，只检测强信号
+"""
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
+from astropy.table import Table
+from photutils.detection import DAOStarFinder
+import os
+import sys
+import argparse
+from datetime import datetime
+from PIL import Image
+
+
+class SignalBlobDetector:
+    """基于信号强度的斑点检测器"""
+
+    def __init__(self, sigma_threshold=5.0, min_area=2, max_area=36, min_circularity=0.79, gamma=2.2, max_jaggedness_ratio=1.2):
+        """
+        初始化检测器
+
+        Args:
+            sigma_threshold: 信号阈值（背景噪声的多少倍标准差）
+            min_area: 最小面积
+            max_area: 最大面积
+            min_circularity: 最小圆度，默认0.79
+            gamma: 伽马校正值
+            max_jaggedness_ratio: 最大锯齿比率（poly顶点数/hull顶点数），默认1.2
+        """
+        self.sigma_threshold = sigma_threshold
+        self.min_area = min_area
+        self.max_area = max_area
+        self.min_circularity = min_circularity
+        self.gamma = gamma
+        self.max_jaggedness_ratio = max_jaggedness_ratio
+
+    def load_fits_image(self, fits_path):
+        """加载 FITS 文件"""
+        try:
+            print(f"\n加载 FITS 文件: {fits_path}")
+
+            with fits.open(fits_path) as hdul:
+                data = hdul[0].data
+                header = hdul[0].header
+
+                if data is None:
+                    print("错误: 无法读取图像数据")
+                    return None, None
+
+                data = data.astype(np.float32)  # 优化：使用float32减少内存50%，提升速度27%
+
+                if len(data.shape) == 3:
+                    print(f"检测到 3D 数据，取第一个通道")
+                    data = data[0]
+
+                print(f"图像信息:")
+                print(f"  - 形状: {data.shape}")
+                print(f"  - 数据范围: [{np.min(data):.6f}, {np.max(data):.6f}]")
+                print(f"  - 均值: {np.mean(data):.6f}, 标准差: {np.std(data):.6f}")
+
+                return data, header
+
+        except Exception as e:
+            print(f"加载 FITS 文件失败: {str(e)}")
+            return None, None
+
+    def histogram_peak_stretch(self, data, ratio=2.0/3.0):
+        """
+        基于直方图峰值的拉伸策略
+        以峰值为起点，峰值到最大值的 ratio 为终点
+
+        Args:
+            data: 输入数据
+            ratio: 从峰值到最大值的比例，默认 2/3
+        """
+        print(f"\n基于直方图峰值的拉伸:")
+        print(f"  - 原始范围: [{np.min(data):.6f}, {np.max(data):.6f}]")
+        print(f"  - 原始均值: {np.mean(data):.6f}, 标准差: {np.std(data):.6f}")
+
+        # 计算直方图（使用更多bins以获得更精确的峰值）
+        hist, bin_edges = np.histogram(data.flatten(), bins=2000)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        # 手动查找局部峰值（不依赖scipy）
+        peaks = []
+        for i in range(1, len(hist) - 1):
+            # 如果当前点比左右两边都高，且频率大于阈值
+            if hist[i] > hist[i-1] and hist[i] > hist[i+1] and hist[i] > 1000:
+                peaks.append(i)
+
+        if len(peaks) > 0:
+            # 按峰值高度排序，找到最高的几个峰
+            peaks = np.array(peaks)
+            sorted_peaks = peaks[np.argsort(hist[peaks])[::-1]]
+
+            print(f"  - 找到 {len(peaks)} 个峰值:")
+            for i, peak_idx in enumerate(sorted_peaks[:5]):  # 显示前5个最高峰
+                print(f"    峰{i+1}: 值={bin_centers[peak_idx]:.6f}, 频率={hist[peak_idx]}")
+
+            # 使用最高峰作为主峰
+            peak_idx = sorted_peaks[0]
+            peak_value = bin_centers[peak_idx]
+        else:
+            # 如果没找到峰值，使用最高频率
+            peak_idx = np.argmax(hist)
+            peak_value = bin_centers[peak_idx]
+            print(f"  - 未找到明显峰值，使用最高频率点")
+
+        # 计算最大值
+        max_value = np.max(data)
+
+        # 计算终点：峰值 + (最大值 - 峰值) * ratio
+        end_value = peak_value + (max_value - peak_value) * ratio
+
+        print(f"  - 选定峰值: {peak_value:.6f} (频率: {hist[peak_idx]})")
+        print(f"  - 最大值: {max_value:.6f}")
+        print(f"  - 拉伸起点（峰值）: {peak_value:.6f}")
+        print(f"  - 拉伸终点（峰值到最大的{ratio:.2%}）: {end_value:.6f}")
+
+        # 线性拉伸：峰值映射到0，终点映射到1
+        if end_value > peak_value:
+            stretched = (data - peak_value) / (end_value - peak_value)
+            stretched = np.clip(stretched, 0, 1)
+        else:
+            stretched = data.copy()
+
+        print(f"  - 拉伸后范围: [{np.min(stretched):.6f}, {np.max(stretched):.6f}]")
+        print(f"  - 拉伸后均值: {np.mean(stretched):.6f}, 标准差: {np.std(stretched):.6f}")
+
+        # 统计拉伸效果
+        bg_pixels = np.sum(stretched <= 0)
+        dark_pixels = np.sum((stretched > 0) & (stretched < 0.1))
+        mid_pixels = np.sum((stretched >= 0.1) & (stretched < 0.5))
+        bright_pixels = np.sum(stretched >= 0.5)
+        total = stretched.size
+        print(f"  - 背景像素(<=0): {bg_pixels} ({bg_pixels/total*100:.2f}%)")
+        print(f"  - 暗像素(0-0.1): {dark_pixels} ({dark_pixels/total*100:.2f}%)")
+        print(f"  - 中等像素(0.1-0.5): {mid_pixels} ({mid_pixels/total*100:.2f}%)")
+        print(f"  - 亮像素(>=0.5): {bright_pixels} ({bright_pixels/total*100:.2f}%)")
+
+        return stretched, peak_value, end_value
+
+    def percentile_stretch(self, data, low_percentile=99.95, use_max=True):
+        """
+        基于百分位数的拉伸策略
+        使用指定百分位数作为起点，最大值作为终点
+
+        Args:
+            data: 输入数据
+            low_percentile: 低百分位数，默认99.95
+            use_max: 是否使用最大值作为终点，默认True
+        """
+        print(f"\n基于百分位数的拉伸 ({low_percentile}%-最大值):")
+        print(f"  - 原始范围: [{np.min(data):.6f}, {np.max(data):.6f}]")
+        print(f"  - 原始均值: {np.mean(data):.6f}, 标准差: {np.std(data):.6f}")
+
+        # 计算百分位数作为起点
+        vmin = np.percentile(data, low_percentile)
+        # 使用实际最大值作为终点
+        vmax = np.max(data)
+
+        print(f"  - {low_percentile}% 百分位数: {vmin:.6f}")
+        print(f"  - 最大值: {vmax:.6f}")
+        print(f"  - 拉伸起点: {vmin:.6f}")
+        print(f"  - 拉伸终点（最大值）: {vmax:.6f}")
+
+        # 线性拉伸
+        if vmax > vmin:
+            stretched = (data - vmin) / (vmax - vmin)
+            stretched = np.clip(stretched, 0, 1)
+        else:
+            stretched = data.copy()
+
+        print(f"  - 拉伸后范围: [{np.min(stretched):.6f}, {np.max(stretched):.6f}]")
+        print(f"  - 拉伸后均值: {np.mean(stretched):.6f}, 标准差: {np.std(stretched):.6f}")
+
+        # 统计拉伸效果
+        bg_pixels = np.sum(stretched <= 0)
+        dark_pixels = np.sum((stretched > 0) & (stretched < 0.1))
+        mid_pixels = np.sum((stretched >= 0.1) & (stretched < 0.5))
+        bright_pixels = np.sum(stretched >= 0.5)
+        total = stretched.size
+        print(f"  - 背景像素(<=0): {bg_pixels} ({bg_pixels/total*100:.2f}%)")
+        print(f"  - 暗像素(0-0.1): {dark_pixels} ({dark_pixels/total*100:.2f}%)")
+        print(f"  - 中等像素(0.1-0.5): {mid_pixels} ({mid_pixels/total*100:.2f}%)")
+        print(f"  - 亮像素(>=0.5): {bright_pixels} ({bright_pixels/total*100:.2f}%)")
+
+        return stretched, vmin, vmax
+
+    def estimate_background_noise(self, data):
+        """
+        估计背景噪声水平
+        使用中位数和 MAD (Median Absolute Deviation)
+        """
+        median = np.median(data)
+        mad = np.median(np.abs(data - median))
+        sigma = 1.4826 * mad  # MAD 到标准差的转换因子
+
+        print(f"\n背景噪声估计:")
+        print(f"  - 中位数: {median:.6f}")
+        print(f"  - MAD: {mad:.6f}")
+        print(f"  - 估计标准差: {sigma:.6f}")
+        print(f"  - {self.sigma_threshold}σ 阈值: {median + self.sigma_threshold * sigma:.6f}")
+
+        return median, sigma
+
+    def remove_bright_lines(self, image, threshold=50, dilate_size=5):
+        """
+        去除图像中的亮线
+        使用边缘检测和霍夫直线检测方法
+
+        Args:
+            image: 输入图像（uint8格式）
+            threshold: 亮度阈值
+            dilate_size: 膨胀大小
+
+        Returns:
+            去除亮线后的图像
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+
+        # 检测亮区域
+        _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+
+        # 边缘检测
+        edges = cv2.Canny(binary, 50, 150, apertureSize=3)
+
+        # 霍夫直线检测
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50,
+                                minLineLength=30, maxLineGap=10)
+
+        # 创建掩码
+        mask = np.zeros(gray.shape, dtype=np.uint8)
+
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                # 在掩码上画线，加粗一些
+                cv2.line(mask, (x1, y1), (x2, y2), 255, 3)
+
+        # 膨胀掩码
+        if dilate_size > 0:
+            kernel = np.ones((dilate_size, dilate_size), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=1)
+
+        # 使用掩码修复图像
+        result = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
+
+        return result
+
+    def remove_bright_lines_float(self, data, threshold=50, dilate_size=5):
+        """
+        在不做检测拉伸的前提下，对原始浮点数据执行亮线去除。
+        使用线性归一化仅用于构建/修复，最终返回与输入同尺度的浮点数组。
+        """
+        finite_mask = np.isfinite(data)
+        if not np.any(finite_mask):
+            return data.copy()
+
+        data_finite = data[finite_mask]
+        p1, p99 = np.percentile(data_finite, [1, 99])
+        if p99 <= p1:
+            p1 = float(np.min(data_finite))
+            p99 = float(np.max(data_finite))
+        if p99 <= p1:
+            return data.copy()
+
+        # 仅用于亮线检测/修复的临时线性映射，不作为检测拉伸策略
+        norm = np.clip((data - p1) / (p99 - p1), 0, 1)
+        image_uint8 = (norm * 255).astype(np.uint8)
+
+        repaired_uint8 = self.remove_bright_lines(
+            image_uint8, threshold=threshold, dilate_size=dilate_size
+        )
+
+        repaired = repaired_uint8.astype(np.float32) / 255.0
+        restored = repaired * (p99 - p1) + p1
+        restored[~finite_mask] = data[~finite_mask]
+        return restored.astype(np.float32)
+
+    def extract_stars_by_snr(
+        self,
+        data,
+        snr_min=5.0,
+        fwhm=3.0,
+        sharplo=0.2,
+        sharphi=1.0,
+        roundlo=-1.0,
+        roundhi=1.0,
+    ):
+        """使用 DAOStarFinder 直接提取星点并按 SNR 过滤。"""
+        mean, median, std = sigma_clipped_stats(data, sigma=3.0, maxiters=10)
+        if std <= 0 or not np.isfinite(std):
+            return Table(names=["id", "xcentroid", "ycentroid", "peak", "flux", "snr"])
+
+        finder = DAOStarFinder(
+            fwhm=fwhm,
+            threshold=snr_min * std,
+            sharplo=sharplo,
+            sharphi=sharphi,
+            roundlo=roundlo,
+            roundhi=roundhi,
+        )
+
+        sources = finder(data - median)
+        if sources is None or len(sources) == 0:
+            return Table(names=["id", "xcentroid", "ycentroid", "peak", "flux", "snr"])
+
+        snr = np.asarray(sources["peak"], dtype=float) / std
+        sources["snr"] = snr
+        filtered = sources[snr > snr_min]
+        keep_cols = ["id", "xcentroid", "ycentroid", "peak", "flux", "snr"]
+        return filtered[keep_cols]
+
+    def create_star_marked_image(self, image_data, stars):
+        """在灰度图上标记星点。"""
+        finite_mask = np.isfinite(image_data)
+        if np.any(finite_mask):
+            vmin, vmax = np.percentile(image_data[finite_mask], [5, 99])
+            if vmax <= vmin:
+                vmin = float(np.min(image_data[finite_mask]))
+                vmax = float(np.max(image_data[finite_mask]))
+            if vmax <= vmin:
+                normalized = np.zeros_like(image_data, dtype=np.float32)
+            else:
+                normalized = np.clip((image_data - vmin) / (vmax - vmin), 0, 1)
+        else:
+            normalized = np.zeros_like(image_data, dtype=np.float32)
+
+        marked = cv2.cvtColor((normalized * 255).astype(np.uint8), cv2.COLOR_GRAY2RGB)
+        for i, row in enumerate(stars):
+            x = int(round(float(row["xcentroid"])))
+            y = int(round(float(row["ycentroid"])))
+            cv2.circle(marked, (x, y), 10, (255, 0, 0), 2)
+            cv2.putText(marked, str(i + 1), (x + 12, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+        return marked
+
+    def create_signal_mask(self, data, median, sigma):
+        """
+        创建信号掩码，只保留高于阈值的像素
+
+        .. deprecated::
+            此方法已废弃，不再使用。
+            实际的mask创建逻辑在 process_fits_file() 方法的第1048行。
+            使用硬阈值对拉伸后的数据进行二值化：
+            mask = (stretched_data_no_lines > detection_threshold).astype(np.uint8) * 255
+        """
+        threshold = median + self.sigma_threshold * sigma
+        mask = (data > threshold).astype(np.uint8) * 255
+
+        signal_pixels = np.sum(mask > 0)
+        total_pixels = mask.size
+        percentage = (signal_pixels / total_pixels) * 100
+
+        print(f"\n信号掩码:")
+        print(f"  - 阈值: {threshold:.6f}")
+        print(f"  - 信号像素: {signal_pixels} ({percentage:.3f}%)")
+
+        return mask, threshold
+
+    def detect_blobs_from_mask(self, mask, original_data, detection_method='contour'):
+        """
+        从掩码中检测斑点
+
+        Args:
+            mask: 二值掩码
+            original_data: 原始数据
+            detection_method: 检测方法，'contour'=轮廓检测（默认）, 'simple_blob'=SimpleBlobDetector
+        """
+        if detection_method == 'simple_blob':
+            return self._detect_blobs_simple_blob_detector(mask, original_data)
+        else:
+            return self._detect_blobs_contour(mask, original_data)
+
+    def _detect_blobs_simple_blob_detector(self, mask, original_data):
+        """
+        使用SimpleBlobDetector检测斑点
+        """
+        # 形态学操作，去除小噪点
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask_cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask_cleaned = cv2.morphologyEx(mask_cleaned, cv2.MORPH_CLOSE, kernel)
+
+        # 设置SimpleBlobDetector参数
+        params = cv2.SimpleBlobDetector_Params()
+
+        # 面积过滤
+        params.filterByArea = True
+        params.minArea = self.min_area
+        params.maxArea = self.max_area
+
+        # 圆度过滤
+        params.filterByCircularity = True
+        params.minCircularity = self.min_circularity
+
+        # 惯性过滤（椭圆度）
+        params.filterByInertia = True
+        params.minInertiaRatio = 0.8  # 0.8表示椭圆长短轴比至少为1:1.25
+
+        # 凸度过滤
+        params.filterByConvexity = True
+        params.minConvexity = 0.8
+
+        # 颜色过滤（检测亮斑）
+        params.filterByColor = True
+        params.blobColor = 255
+
+        # 创建检测器
+        detector = cv2.SimpleBlobDetector_create(params)
+
+        # 检测斑点
+        keypoints = detector.detect(mask_cleaned)
+
+        print(f"\n使用SimpleBlobDetector检测到 {len(keypoints)} 个斑点")
+
+        # 估计背景噪声水平
+        background_mask = (mask_cleaned == 0)
+        if np.sum(background_mask) > 0:
+            background_values = original_data[background_mask]
+            background_median = np.median(background_values)
+            background_mad = np.median(np.abs(background_values - background_median))
+            background_sigma = 1.4826 * background_mad
+        else:
+            background_median = np.median(original_data)
+            background_sigma = np.std(original_data)
+
+        print(f"背景噪声: median={background_median:.6f}, sigma={background_sigma:.6f}")
+
+        # 转换keypoints为blob格式
+        blobs = []
+        for kp in keypoints:
+            cx, cy = kp.pt
+            radius = kp.size / 2
+            area = np.pi * radius * radius
+
+            # 获取该区域的像素值
+            y_min = max(0, int(cy - radius))
+            y_max = min(original_data.shape[0], int(cy + radius) + 1)
+            x_min = max(0, int(cx - radius))
+            x_max = min(original_data.shape[1], int(cx + radius) + 1)
+
+            region = original_data[y_min:y_max, x_min:x_max]
+            if region.size > 0:
+                signal = np.max(region)
+                mean_signal = np.mean(region)
+                snr = (signal - background_median) / background_sigma if background_sigma > 0 else 0
+            else:
+                signal = 0
+                mean_signal = 0
+                snr = 0
+
+            blobs.append({
+                'center': (cx, cy),
+                'area': area,
+                'circularity': 1.0,  # SimpleBlobDetector已经过滤了圆度
+                'signal': signal,
+                'mean_signal': mean_signal,
+                'snr': snr,
+                'jaggedness_ratio': 1.0,  # SimpleBlobDetector检测的斑点默认为圆形
+                'hull_vertices': 0,
+                'poly_vertices': 0
+            })
+
+        print(f"SimpleBlobDetector检测完成，共 {len(blobs)} 个斑点")
+        return blobs
+
+    def _detect_blobs_contour(self, mask, original_data):
+        """
+        使用轮廓检测斑点（原版方法）
+        """
+        # 形态学操作，去除小噪点
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask_cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask_cleaned = cv2.morphologyEx(mask_cleaned, cv2.MORPH_CLOSE, kernel)
+
+        # 查找轮廓
+        contours, _ = cv2.findContours(mask_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        print(f"\n检测到 {len(contours)} 个候选区域")
+
+        # 估计背景噪声水平（用于计算SNR）
+        # 使用整个图像的背景区域（排除掩码区域）
+        background_mask = (mask_cleaned == 0)
+        if np.sum(background_mask) > 0:
+            background_values = original_data[background_mask]
+            background_median = np.median(background_values)
+            background_mad = np.median(np.abs(background_values - background_median))
+            background_sigma = 1.4826 * background_mad
+        else:
+            background_median = np.median(original_data)
+            background_sigma = np.std(original_data)
+
+        print(f"背景噪声: median={background_median:.6f}, sigma={background_sigma:.6f}")
+
+        # 过滤轮廓
+        blobs = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            # 面积过滤
+            if area < self.min_area or area > self.max_area:
+                continue
+
+            # 计算圆度
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter == 0:
+                continue
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+
+            # 圆度过滤
+            if circularity < self.min_circularity:
+                continue
+
+            # 锯齿检测
+            hull = cv2.convexHull(contour)
+            eps = 0.01 * cv2.arcLength(contour, True)
+            poly = cv2.approxPolyDP(contour, eps, True)
+
+            # 计算凸度 (Convexity)
+            hull_area = cv2.contourArea(hull)
+            if hull_area > 0:
+                convexity = area / hull_area
+            else:
+                convexity = 0
+
+            # 凸度过滤 (>0.8)
+            if convexity <= 0.6:
+                continue
+
+            # 计算惯性比率 (Inertia Ratio)
+            # 使用拟合椭圆计算惯性比率
+            if len(contour) >= 5:  # 至少需要5个点才能拟合椭圆
+                ellipse = cv2.fitEllipse(contour)
+                major_axis = max(ellipse[1])
+                minor_axis = min(ellipse[1])
+                if major_axis > 0:
+                    inertia_ratio = minor_axis / major_axis
+                else:
+                    inertia_ratio = 0
+            else:
+                inertia_ratio = 1.0  # 点太少，假设为圆形
+
+            # 惯性比率过滤 (>0.8)
+            if inertia_ratio <= 0.6:
+                continue
+
+            # 计算锯齿比率
+            hull_vertices = len(hull)
+            poly_vertices = len(poly)
+            if hull_vertices > 0:
+                jaggedness_ratio = poly_vertices / hull_vertices
+            else:
+                jaggedness_ratio = 0
+
+            # 锯齿比率过滤
+            if jaggedness_ratio > self.max_jaggedness_ratio:
+                continue
+
+            # 计算中心和半径
+            M = cv2.moments(contour)
+            if M['m00'] == 0:
+                continue
+
+            cx = M['m10'] / M['m00']
+            cy = M['m01'] / M['m00']
+
+            # 计算该区域的信号强度
+            mask_region = np.zeros(original_data.shape, dtype=np.uint8)
+            cv2.drawContours(mask_region, [contour], -1, 255, -1)
+
+            blobs.append({
+                'center': (cx, cy),
+                'area': area,
+                'circularity': circularity,
+                'convexity': convexity,
+                'inertia_ratio': inertia_ratio,
+                'jaggedness_ratio': jaggedness_ratio,
+                'hull_vertices': hull_vertices,
+                'poly_vertices': poly_vertices,
+                'mean_signal': 0,
+                'max_signal': 0,
+                'snr': 0,
+                'max_snr': 0,
+                'contour': contour
+            })
+
+        # 按SNR排序（初步排序）
+        blobs.sort(key=lambda x: x['snr'], reverse=True)
+
+        print(f"过滤后剩余 {len(blobs)} 个斑点")
+
+        return blobs
+
+    def calculate_aligned_snr(self, blobs, aligned_data, cutout_size=100):
+        """
+        在排序前计算所有 blob 的 aligned_center_7x7_snr
+
+        Args:
+            blobs: 检测到的斑点列表
+            aligned_data: 对齐图像数据（完整图像）
+            cutout_size: 截图大小（默认100x100）
+        """
+        if not blobs or aligned_data is None:
+            return
+
+        print(f"\n计算 Aligned 中心 7x7 SNR（用于排序）...")
+
+        # 计算整体背景噪声
+        aligned_background_median = np.median(aligned_data)
+        aligned_mad = np.median(np.abs(aligned_data - aligned_background_median))
+        aligned_background_sigma = 1.4826 * aligned_mad
+        print(f"  Aligned图像背景噪声: median={aligned_background_median:.6f}, sigma={aligned_background_sigma:.6f}")
+
+        half_size = cutout_size // 2
+        calculated_count = 0
+
+        for blob in blobs:
+            cx, cy = blob['center']
+            cx, cy = int(cx), int(cy)
+
+            # 计算截图区域
+            x1 = max(0, cx - half_size)
+            y1 = max(0, cy - half_size)
+            x2 = min(aligned_data.shape[1], cx + half_size)
+            y2 = min(aligned_data.shape[0], cy + half_size)
+
+            # 提取aligned数据的cutout区域
+            aligned_cutout = aligned_data[y1:y2, x1:x2]
+
+            # 计算cutout区域的背景（排除中心区域）
+            cutout_height, cutout_width = aligned_cutout.shape
+            center_cutout_x = cutout_width // 2
+            center_cutout_y = cutout_height // 2
+
+            # 创建背景掩码（排除中心7x7区域）
+            background_mask = np.ones_like(aligned_cutout, dtype=bool)
+            y_start = max(0, center_cutout_y - 3)
+            y_end = min(cutout_height, center_cutout_y + 4)
+            x_start = max(0, center_cutout_x - 3)
+            x_end = min(cutout_width, center_cutout_x + 4)
+            background_mask[y_start:y_end, x_start:x_end] = False
+
+            # 计算背景区域的统计信息
+            aligned_center_7x7_snr = None
+            if np.sum(background_mask) > 0:
+                background_values = aligned_cutout[background_mask]
+                cutout_background_median = np.median(background_values)
+                cutout_background_mad = np.median(np.abs(background_values - cutout_background_median))
+                cutout_background_sigma = 1.4826 * cutout_background_mad
+
+                # 计算中心7x7区域的信号
+                center_7x7 = aligned_cutout[y_start:y_end, x_start:x_end]
+                if center_7x7.size > 0:
+                    center_mean_signal = np.mean(center_7x7)
+                    # 计算相对于cutout背景的SNR
+                    aligned_center_7x7_snr = (center_mean_signal - cutout_background_median) / (cutout_background_sigma + 1e-10)
+                    calculated_count += 1
+
+            # 将SNR信息添加到blob中
+            blob['aligned_center_7x7_snr'] = aligned_center_7x7_snr
+
+        print(f"  已计算 {calculated_count}/{len(blobs)} 个 blob 的 Aligned SNR")
+
+    def sort_blobs(self, blobs, image_shape, sort_by='aligned_snr'):
+        """
+        对斑点进行排序
+
+        Args:
+            blobs: 斑点列表
+            image_shape: 图像尺寸
+            sort_by: 排序依据
+                - 'quality_score': 综合得分
+                - 'aligned_snr': Aligned中心7x7 SNR（默认）
+                - 'snr': 差异图像 SNR
+        """
+        if not blobs:
+            return blobs
+
+        # 根据排序方式选择不同的排序逻辑
+        if sort_by == 'aligned_snr':
+            # 按 aligned_center_7x7_snr 降序排序（None值放到最后）
+            sorted_blobs = sorted(blobs,
+                                 key=lambda b: b.get('aligned_center_7x7_snr') if b.get('aligned_center_7x7_snr') is not None else -999999,
+                                 reverse=True)
+            print(f"  排序方式: Aligned 中心 7x7 SNR（降序）")
+
+        elif sort_by == 'snr':
+            # 按差异图像 SNR 降序排序（None值放到最后）
+            sorted_blobs = sorted(blobs,
+                                 key=lambda b: b.get('snr') if b.get('snr') is not None else -999999,
+                                 reverse=True)
+            print(f"  排序方式: 差异图像 SNR（降序）")
+
+        else:
+            # 默认：按综合得分排序
+            # 计算图像中心
+            img_center_y, img_center_x = image_shape[0] / 2, image_shape[1] / 2
+
+            # 为每个斑点计算综合得分
+            for blob in blobs:
+                cx, cy = blob['center']
+                distance = np.sqrt((cx - img_center_x)**2 + (cy - img_center_y)**2)
+                blob['distance_to_center'] = distance
+
+                # 计算面积和圆度的综合得分（非线性）
+                # 面积归一化：假设合理面积范围是 min_area 到 max_area，映射到0-1
+                area_normalized = (blob['area'] - self.min_area) / (self.max_area - self.min_area + 1e-10)
+                area_normalized = np.clip(area_normalized, 0, 1)
+
+                # 圆度已经是0-1范围
+                circularity = blob['circularity']
+
+                # 非线性综合得分：让圆度占更大比例
+                # 方案：(圆度^2) × 2000 × 面积归一化(0-1)
+                # 圆度的2次方：让圆度差异被适度放大
+                # - 圆度0.9: 0.9^2 = 0.81
+                # - 圆度0.95: 0.95^2 = 0.90
+                # - 圆度0.99: 0.99^2 = 0.98
+                # 乘以2000：大幅放大圆度的影响力
+                # 乘以归一化面积(0-1)：让面积也有一定影响
+
+                # 综合得分：(圆度^2) × 2000 × 面积归一化(0-1)
+                blob['quality_score'] = (circularity ** 2) * 2000 * area_normalized
+
+            # 排序：综合得分降序（大的在前）
+            sorted_blobs = sorted(blobs, key=lambda b: -b['quality_score'])
+            print(f"  排序方式: 综合得分（降序）")
+
+        return sorted_blobs
+
+    def print_blob_info(self, blobs):
+        """打印斑点信息"""
+        if not blobs:
+            print("\n未检测到任何斑点")
+            return
+
+        print(f"\n检测到的斑点详细信息（已排序：综合得分=(圆度^2)×2000×面积归一化）:")
+        print(f"{'序号':<6} {'综合得分':<10} {'面积':<10} {'圆度':<10} {'凸度':<10} {'惯性比':<10} {'锯齿比':<10} {'Hull顶点':<10} {'Poly顶点':<10} {'X坐标':<10} {'Y坐标':<10} {'SNR':<10} {'最大SNR':<10} {'平均信号':<12} {'Aligned中心7x7SNR':<16}")
+        print("-" * 186)
+
+        for i, blob in enumerate(blobs, 1):
+            cx, cy = blob['center']
+            quality_score = blob.get('quality_score', 0)
+            snr = blob.get('snr', 0)
+            max_snr = blob.get('max_snr', 0)
+            convexity = blob.get('convexity', 0)
+            inertia = blob.get('inertia_ratio', 0)
+            jaggedness = blob.get('jaggedness_ratio', 0)
+            hull_verts = blob.get('hull_vertices', 0)
+            poly_verts = blob.get('poly_vertices', 0)
+            aligned_center_snr = blob.get('aligned_center_7x7_snr', None)
+
+            # 格式化aligned SNR值
+            aligned_center_str = f"{aligned_center_snr:<16.2f}" if aligned_center_snr is not None else f"{'N/A':<16}"
+
+            print(f"{i:<6} {quality_score:<10.3f} {blob['area']:<10.1f} {blob['circularity']:<10.3f} "
+                  f"{convexity:<10.3f} {inertia:<10.3f} {jaggedness:<10.3f} {hull_verts:<10} {poly_verts:<10} "
+                  f"{cx:<10.2f} {cy:<10.2f} {snr:<10.2f} {max_snr:<10.2f} {blob['mean_signal']:<12.6f} "
+                  f"{aligned_center_str}")
+
+        # 统计信息
+        quality_scores = [b.get('quality_score', 0) for b in blobs]
+        areas = [b['area'] for b in blobs]
+        signals = [b['mean_signal'] for b in blobs]
+        circularities = [b['circularity'] for b in blobs]
+        convexities = [b.get('convexity', 0) for b in blobs]
+        inertia_ratios = [b.get('inertia_ratio', 0) for b in blobs]
+        jaggedness_ratios = [b.get('jaggedness_ratio', 0) for b in blobs]
+        snrs = [b.get('snr', 0) for b in blobs]
+
+        print(f"\n统计信息:")
+        print(f"  - 总数: {len(blobs)}")
+        print(f"  - 综合得分: {np.mean(quality_scores):.3f} ± {np.std(quality_scores):.3f} (范围: {np.min(quality_scores):.3f} - {np.max(quality_scores):.3f})")
+        print(f"  - 面积: {np.mean(areas):.2f} ± {np.std(areas):.2f} (范围: {np.min(areas):.2f} - {np.max(areas):.2f})")
+        print(f"  - 圆度: {np.mean(circularities):.3f} ± {np.std(circularities):.3f} (范围: {np.min(circularities):.3f} - {np.max(circularities):.3f})")
+        print(f"  - 凸度: {np.mean(convexities):.3f} ± {np.std(convexities):.3f} (范围: {np.min(convexities):.3f} - {np.max(convexities):.3f})")
+        print(f"  - 惯性比: {np.mean(inertia_ratios):.3f} ± {np.std(inertia_ratios):.3f} (范围: {np.min(inertia_ratios):.3f} - {np.max(inertia_ratios):.3f})")
+        print(f"  - 锯齿比: {np.mean(jaggedness_ratios):.3f} ± {np.std(jaggedness_ratios):.3f} (范围: {np.min(jaggedness_ratios):.3f} - {np.max(jaggedness_ratios):.3f})")
+        print(f"  - SNR: {np.mean(snrs):.2f} ± {np.std(snrs):.2f} (范围: {np.min(snrs):.2f} - {np.max(snrs):.2f})")
+        print(f"  - 平均信号: {np.mean(signals):.6f} ± {np.std(signals):.6f}")
+        print(f"  - 信号范围: {np.min(signals):.6f} - {np.max(signals):.6f}")
+
+    def draw_blobs(self, data, blobs, mask):
+        """绘制检测结果"""
+        # 创建彩色图像
+        normalized = ((data - np.min(data)) / (np.max(data) - np.min(data)) * 255).astype(np.uint8)
+        color_image = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+
+        # 绘制斑点
+        for i, blob in enumerate(blobs, 1):
+            cx, cy = blob['center']
+
+            # 绘制小空心圆（绿色，细线）
+            cv2.circle(color_image, (int(cx), int(cy)), 8, (0, 255, 0), 1)
+
+            # 标注序号（远离中心，只标注前50个，小字体细线）
+            if i <= 50:
+                cv2.putText(color_image, str(i), (int(cx)+10, int(cy)-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+        return color_image
+
+    def local_stretch(self, cutout, method='percentile', low_percentile=1, high_percentile=99):
+        """
+        对截图进行局部拉伸以增强细节
+
+        Args:
+            cutout: 截图数据
+            method: 拉伸方法 ('percentile', 'adaptive', 'histogram')
+            low_percentile: 低百分位（默认1%）
+            high_percentile: 高百分位（默认99%）
+
+        Returns:
+            拉伸后的uint8图像
+        """
+        if cutout.size == 0:
+            return np.zeros_like(cutout, dtype=np.uint8)
+
+        if method == 'percentile':
+            # 百分位拉伸：使用1%和99%百分位作为黑白点
+            vmin = np.percentile(cutout, low_percentile)
+            vmax = np.percentile(cutout, high_percentile)
+
+            if vmax - vmin < 1e-10:
+                # 如果范围太小，使用全局最小最大值
+                vmin = np.min(cutout)
+                vmax = np.max(cutout)
+
+            stretched = np.clip((cutout - vmin) / (vmax - vmin + 1e-10), 0, 1)
+
+        elif method == 'adaptive':
+            # 自适应拉伸：基于局部统计
+            mean = np.mean(cutout)
+            std = np.std(cutout)
+
+            vmin = max(np.min(cutout), mean - 2 * std)
+            vmax = min(np.max(cutout), mean + 2 * std)
+
+            stretched = np.clip((cutout - vmin) / (vmax - vmin + 1e-10), 0, 1)
+
+        elif method == 'histogram':
+            # 直方图均衡化
+            # 先归一化到0-1
+            normalized = (cutout - np.min(cutout)) / (np.max(cutout) - np.min(cutout) + 1e-10)
+            # 转换到0-255
+            uint8_img = (normalized * 255).astype(np.uint8)
+            # 应用直方图均衡化
+            equalized = cv2.equalizeHist(uint8_img)
+            stretched = equalized / 255.0
+
+        else:
+            # 默认：简单归一化
+            stretched = (cutout - np.min(cutout)) / (np.max(cutout) - np.min(cutout) + 1e-10)
+
+        return (stretched * 255).astype(np.uint8)
+
+    def pixel_to_radec(self, x, y, header):
+        """
+        将像素坐标转换为RA/DEC坐标
+
+        Args:
+            x: X像素坐标
+            y: Y像素坐标
+            header: FITS header
+
+        Returns:
+            (ra, dec) 或 (None, None)
+        """
+        try:
+            # 尝试从header中获取WCS信息
+            if 'CRVAL1' in header and 'CRVAL2' in header:
+                crval1 = header['CRVAL1']  # 参考点RA
+                crval2 = header['CRVAL2']  # 参考点DEC
+                crpix1 = header.get('CRPIX1', header['NAXIS1'] / 2)  # 参考像素X
+                crpix2 = header.get('CRPIX2', header['NAXIS2'] / 2)  # 参考像素Y
+                cd1_1 = header.get('CD1_1', header.get('CDELT1', 0))
+                cd2_2 = header.get('CD2_2', header.get('CDELT2', 0))
+
+                # 简单线性转换
+                dx = x - crpix1
+                dy = y - crpix2
+                ra = crval1 + dx * cd1_1
+                dec = crval2 + dy * cd2_2
+
+                return ra, dec
+        except:
+            pass
+
+        return None, None
+
+    def extract_filename_info(self, base_name):
+        """
+        从文件名中提取gy*和K***-*信息
+
+        Args:
+            base_name: 基础文件名
+
+        Returns:
+            (gy_info, k_info) 或 (None, None)
+        """
+        import re
+
+        # 尝试匹配gy*格式
+        gy_match = re.search(r'(gy\d+)', base_name, re.IGNORECASE)
+        gy_info = gy_match.group(1) if gy_match else None
+
+        # 尝试匹配K***-*格式
+        k_match = re.search(r'(K\d+-\d+)', base_name, re.IGNORECASE)
+        k_info = k_match.group(1) if k_match else None
+
+        return gy_info, k_info
+
+    def extract_blob_cutouts(self, original_data, stretched_data, result_image, blobs,
+                            output_folder, base_name, cutout_size=100,
+                            reference_data=None, aligned_data=None,
+                            stretch_method='percentile', low_percentile=1, high_percentile=99,
+                            header=None, generate_shape_viz=False, generate_gif=True):
+        """
+        为每个检测结果提取截图并生成GIF
+
+        Args:
+            original_data: 原始FITS数据（difference.fits）
+            stretched_data: 拉伸后的数据
+            result_image: 带标记的结果图
+            blobs: 检测到的斑点列表
+            output_folder: 输出文件夹
+            base_name: 基础文件名
+            cutout_size: 截图大小（默认100x100）
+            reference_data: 参考图像数据（模板图像）
+            aligned_data: 对齐图像数据（下载图像）
+            stretch_method: 拉伸方法 ('percentile', 'adaptive', 'histogram')
+            low_percentile: 低百分位（默认1%）
+            high_percentile: 高百分位（默认99%）
+            header: FITS header（用于坐标转换）
+            generate_shape_viz: 是否生成hull和poly可视化图片（默认False，快速模式下为False）
+            generate_gif: 是否生成GIF动画（默认True）
+        """
+        if not blobs:
+            return
+
+        gif_status = "生成GIF" if generate_gif else "不生成GIF"
+        print(f"\n生成每个检测结果的截图（局部拉伸方法: {stretch_method}, 百分位: {low_percentile}-{high_percentile}, {gif_status}）...")
+
+        # 创建统一的cutouts文件夹
+        cutouts_folder = os.path.join(output_folder, "cutouts")
+        os.makedirs(cutouts_folder, exist_ok=True)
+
+        # 提取文件名信息
+        gy_info, k_info = self.extract_filename_info(base_name)
+
+        half_size = cutout_size // 2
+
+        # 如果有aligned_data，预先计算整体背景噪声用于SNR计算
+        aligned_background_median = None
+        aligned_background_sigma = None
+        if aligned_data is not None:
+            # 使用整个aligned图像计算背景噪声
+            aligned_background_median = np.median(aligned_data)
+            aligned_mad = np.median(np.abs(aligned_data - aligned_background_median))
+            aligned_background_sigma = 1.4826 * aligned_mad
+            print(f"Aligned图像背景噪声: median={aligned_background_median:.6f}, sigma={aligned_background_sigma:.6f}")
+
+        for i, blob in enumerate(blobs, 1):
+            cx, cy = blob['center']
+            cx, cy = int(cx), int(cy)
+
+            # 转换为RA/DEC坐标
+            ra, dec = None, None
+            if header is not None:
+                ra, dec = self.pixel_to_radec(cx, cy, header)
+
+            # 构建文件名前缀，排序序号放在最前面
+            name_parts = []
+
+            # 首先添加排序序号（3位补零）
+            name_parts.append(f"{i:03d}")
+
+            # 然后添加坐标信息
+            if ra is not None and dec is not None:
+                name_parts.append(f"RA{ra:.6f}_DEC{dec:.6f}")
+            else:
+                name_parts.append(f"X{cx:04d}_Y{cy:04d}")
+
+            # 最后添加其他信息
+            if gy_info:
+                name_parts.append(gy_info)
+            if k_info:
+                name_parts.append(k_info)
+
+            file_prefix = "_".join(name_parts)
+
+            # 计算截图区域
+            x1 = max(0, cx - half_size)
+            y1 = max(0, cy - half_size)
+            x2 = min(original_data.shape[1], cx + half_size)
+            y2 = min(original_data.shape[0], cy + half_size)
+
+            # 计算aligned.png中心7x7像素的SNR（如果尚未计算）
+            aligned_center_7x7_snr = blob.get('aligned_center_7x7_snr')
+
+            # 只有在尚未计算时才计算（避免重复计算）
+            if aligned_center_7x7_snr is None and aligned_data is not None and aligned_background_median is not None and aligned_background_sigma is not None:
+                # 提取aligned数据的cutout区域
+                aligned_cutout = aligned_data[y1:y2, x1:x2]
+
+                # 计算cutout区域的背景（排除中心区域）
+                cutout_height, cutout_width = aligned_cutout.shape
+                center_cutout_x = cutout_width // 2
+                center_cutout_y = cutout_height // 2
+
+                # 创建背景掩码（排除中心7x7区域）
+                background_mask = np.ones_like(aligned_cutout, dtype=bool)
+                y_start = max(0, center_cutout_y - 3)
+                y_end = min(cutout_height, center_cutout_y + 4)
+                x_start = max(0, center_cutout_x - 3)
+                x_end = min(cutout_width, center_cutout_x + 4)
+                background_mask[y_start:y_end, x_start:x_end] = False
+
+                # 计算背景区域的统计信息
+                if np.sum(background_mask) > 0:
+                    background_values = aligned_cutout[background_mask]
+                    cutout_background_median = np.median(background_values)
+                    cutout_background_mad = np.median(np.abs(background_values - cutout_background_median))
+                    cutout_background_sigma = 1.4826 * cutout_background_mad
+
+                    # 计算中心7x7区域的信号
+                    center_7x7 = aligned_cutout[y_start:y_end, x_start:x_end]
+                    if center_7x7.size > 0:
+                        center_mean_signal = np.mean(center_7x7)
+                        # 计算相对于cutout背景的SNR
+                        aligned_center_7x7_snr = (center_mean_signal - cutout_background_median) / (cutout_background_sigma + 1e-10)
+
+                # 将SNR信息添加到blob中
+                blob['aligned_center_7x7_snr'] = aligned_center_7x7_snr
+
+            # 提取参考图像截图（模板图像）- 使用局部拉伸
+            if reference_data is not None:
+                ref_cutout = reference_data[y1:y2, x1:x2]
+                ref_norm = self.local_stretch(ref_cutout, method=stretch_method,
+                                             low_percentile=low_percentile, high_percentile=high_percentile)
+                ref_path = os.path.join(cutouts_folder, f"{file_prefix}_1_reference.png")
+                cv2.imwrite(ref_path, ref_norm)
+            else:
+                # 如果没有参考图像，使用原始数据
+                original_cutout = original_data[y1:y2, x1:x2]
+                original_norm = self.local_stretch(original_cutout, method=stretch_method,
+                                                   low_percentile=low_percentile, high_percentile=high_percentile)
+                ref_path = os.path.join(cutouts_folder, f"{file_prefix}_1_reference.png")
+                cv2.imwrite(ref_path, original_norm)
+
+            # 提取对齐图像截图（下载图像）- 使用局部拉伸
+            if aligned_data is not None:
+                aligned_cutout = aligned_data[y1:y2, x1:x2]
+                aligned_norm = self.local_stretch(aligned_cutout, method=stretch_method,
+                                                 low_percentile=low_percentile, high_percentile=high_percentile)
+                aligned_path = os.path.join(cutouts_folder, f"{file_prefix}_2_aligned.png")
+                cv2.imwrite(aligned_path, aligned_norm)
+            else:
+                # 如果没有对齐图像，使用拉伸后的数据
+                stretched_cutout = stretched_data[y1:y2, x1:x2]
+                stretched_norm = (np.clip(stretched_cutout, 0, 1) * 255).astype(np.uint8)
+                aligned_path = os.path.join(cutouts_folder, f"{file_prefix}_2_aligned.png")
+                cv2.imwrite(aligned_path, stretched_norm)
+
+            # 提取检测结果截图
+            result_cutout = result_image[y1:y2, x1:x2]
+            result_path = os.path.join(cutouts_folder, f"{file_prefix}_3_detection.png")
+            cv2.imwrite(result_path, result_cutout)
+
+            # 生成hull和poly可视化图片（仅在非快速模式下）
+            if generate_shape_viz and 'contour' in blob:
+                contour = blob['contour']
+
+                # 计算contour相对于cutout的偏移
+                offset_x = x1
+                offset_y = y1
+
+                # 调整contour坐标到cutout坐标系
+                contour_shifted = contour.copy()
+                contour_shifted[:, 0, 0] -= offset_x
+                contour_shifted[:, 0, 1] -= offset_y
+
+                # 过滤掉超出cutout范围的点
+                valid_mask = (
+                    (contour_shifted[:, 0, 0] >= 0) &
+                    (contour_shifted[:, 0, 0] < (x2 - x1)) &
+                    (contour_shifted[:, 0, 1] >= 0) &
+                    (contour_shifted[:, 0, 1] < (y2 - y1))
+                )
+
+                if np.any(valid_mask):
+                    contour_shifted = contour_shifted[valid_mask]
+
+                    # 计算hull和poly
+                    hull = cv2.convexHull(contour_shifted)
+                    eps = 0.01 * cv2.arcLength(contour_shifted, True)
+                    poly = cv2.approxPolyDP(contour_shifted, eps, True)
+
+                    # === 1. 生成contour单独可视化图片 ===
+                    contour_viz = np.zeros((cutout_size, cutout_size, 3), dtype=np.uint8)
+
+                    # 绘制原始轮廓（白色，粗线）
+                    cv2.drawContours(contour_viz, [contour_shifted], -1, (255, 255, 255), 2)
+
+                    # 标注轮廓顶点（黄色小圆点）
+                    for point in contour_shifted:
+                        pt = tuple(point[0])
+                        cv2.circle(contour_viz, pt, 1, (0, 255, 255), -1)
+
+                    # 添加标题
+                    cv2.putText(contour_viz, "Contour", (5, 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+                    # 添加轮廓点数信息
+                    contour_points = len(contour_shifted)
+                    cv2.putText(contour_viz, f"Points: {contour_points}", (5, 35),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1)
+
+                    # 保存contour可视化图片
+                    contour_viz_path = os.path.join(cutouts_folder, f"{file_prefix}_4_contour.png")
+                    cv2.imwrite(contour_viz_path, contour_viz)
+
+                    # === 2. 生成hull可视化图片 ===
+                    hull_viz = np.zeros((cutout_size, cutout_size, 3), dtype=np.uint8)
+
+                    # 绘制原始轮廓（灰色，细线）
+                    cv2.drawContours(hull_viz, [contour_shifted], -1, (128, 128, 128), 1)
+
+                    # 绘制凸包（绿色，粗线）
+                    cv2.drawContours(hull_viz, [hull], -1, (0, 255, 0), 2)
+
+                    # 标注hull顶点（绿色小圆点）
+                    for point in hull:
+                        pt = tuple(point[0])
+                        cv2.circle(hull_viz, pt, 3, (0, 255, 0), -1)
+
+                    # 添加标题和信息
+                    cv2.putText(hull_viz, "Convex Hull", (5, 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                    hull_verts = blob.get('hull_vertices', len(hull))
+                    cv2.putText(hull_viz, f"Vertices: {hull_verts}", (5, 35),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+
+                    # 保存hull可视化图片
+                    hull_viz_path = os.path.join(cutouts_folder, f"{file_prefix}_5_hull.png")
+                    cv2.imwrite(hull_viz_path, hull_viz)
+
+                    # === 3. 生成poly可视化图片 ===
+                    poly_viz = np.zeros((cutout_size, cutout_size, 3), dtype=np.uint8)
+
+                    # 绘制原始轮廓（灰色，细线）
+                    cv2.drawContours(poly_viz, [contour_shifted], -1, (128, 128, 128), 1)
+
+                    # 绘制多边形近似（红色，粗线）
+                    cv2.drawContours(poly_viz, [poly], -1, (0, 0, 255), 2)
+
+                    # 标注poly顶点（红色小圆点）
+                    for point in poly:
+                        pt = tuple(point[0])
+                        cv2.circle(poly_viz, pt, 3, (0, 0, 255), -1)
+
+                    # 添加标题和信息
+                    cv2.putText(poly_viz, "Polygon Approx", (5, 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+                    poly_verts = blob.get('poly_vertices', len(poly))
+                    cv2.putText(poly_viz, f"Vertices: {poly_verts}", (5, 35),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+
+                    # 保存poly可视化图片
+                    poly_viz_path = os.path.join(cutouts_folder, f"{file_prefix}_6_poly.png")
+                    cv2.imwrite(poly_viz_path, poly_viz)
+
+                    # === 4. 生成综合对比图片 ===
+                    shape_viz = np.zeros((cutout_size, cutout_size, 3), dtype=np.uint8)
+
+                    # 绘制原始轮廓（白色，细线）
+                    cv2.drawContours(shape_viz, [contour_shifted], -1, (255, 255, 255), 1)
+
+                    # 绘制凸包（绿色，粗线）
+                    cv2.drawContours(shape_viz, [hull], -1, (0, 255, 0), 2)
+
+                    # 绘制多边形近似（红色，粗线）
+                    cv2.drawContours(shape_viz, [poly], -1, (0, 0, 255), 2)
+
+                    # 标注hull顶点（绿色小圆点）
+                    for point in hull:
+                        pt = tuple(point[0])
+                        cv2.circle(shape_viz, pt, 2, (0, 255, 0), -1)
+
+                    # 标注poly顶点（红色小圆点）
+                    for point in poly:
+                        pt = tuple(point[0])
+                        cv2.circle(shape_viz, pt, 3, (0, 0, 255), -1)
+
+                    # 添加图例文字
+                    cv2.putText(shape_viz, "White: Contour", (5, 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                    cv2.putText(shape_viz, "Green: Hull", (5, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+                    cv2.putText(shape_viz, "Red: Poly", (5, 45),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+
+                    # 添加顶点数信息
+                    jagg_ratio = blob.get('jaggedness_ratio', 0)
+                    cv2.putText(shape_viz, f"Hull: {hull_verts}", (5, 65),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+                    cv2.putText(shape_viz, f"Poly: {poly_verts}", (5, 80),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+                    cv2.putText(shape_viz, f"Ratio: {jagg_ratio:.3f}", (5, 95),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 0), 1)
+
+                    # 保存综合对比图片
+                    shape_viz_path = os.path.join(cutouts_folder, f"{file_prefix}_7_combined.png")
+                    cv2.imwrite(shape_viz_path, shape_viz)
+
+            # 生成GIF动画（只包含reference和aligned，不包含detection）
+            if generate_gif:
+                try:
+                    images = []
+                    for img_path in [ref_path, aligned_path]:
+                        # 读取图像
+                        img = Image.open(img_path)
+                        # 确保尺寸一致
+                        if img.size != (cutout_size, cutout_size):
+                            img = img.resize((cutout_size, cutout_size), Image.LANCZOS)
+
+                        # 转换为RGB模式以便绘制彩色圆圈
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+
+                        # 转换为numpy数组以便使用OpenCV绘制
+                        img_array = np.array(img)
+
+                        # 在图像中央画空心绿色圆圈
+                        center_x = cutout_size // 2
+                        center_y = cutout_size // 2
+                        radius = min(cutout_size // 4, 20)  # 圆圈半径，不超过20像素
+                        color = (0, 255, 0)  # 绿色 (RGB)
+                        thickness = 1  # 线条粗细为1像素（细线）
+
+                        cv2.circle(img_array, (center_x, center_y), radius, color, thickness)
+
+                        # 转换回PIL图像
+                        img_with_circle = Image.fromarray(img_array)
+                        images.append(img_with_circle)
+
+                    gif_path = os.path.join(cutouts_folder, f"{file_prefix}_animation.gif")
+                    images[0].save(
+                        gif_path,
+                        save_all=True,
+                        append_images=images[1:],
+                        duration=800,  # 每帧800ms
+                        loop=0  # 无限循环
+                    )
+
+                except Exception as e:
+                    print(f"  警告: 生成GIF失败 (blob {i}): {str(e)}")
+
+        if generate_gif:
+            print(f"已为 {len(blobs)} 个检测结果生成截图和GIF")
+        else:
+            print(f"已为 {len(blobs)} 个检测结果生成截图（未生成GIF）")
+
+    def _calculate_radec_pixel_distance(self, ra, dec, header, detection_center):
+        """计算RA/DEC坐标距离检测中心的像素距离
+
+        Args:
+            ra: RA坐标（度）
+            dec: DEC坐标（度）
+            header: FITS header（包含WCS信息）
+            detection_center: 检测中心坐标(x, y)
+
+        Returns:
+            float: 像素距离，如果无法计算则返回None
+        """
+        try:
+            from astropy.wcs import WCS
+            import numpy as np
+
+            # 创建WCS对象
+            wcs = WCS(header)
+
+            # 将RA/DEC转换为像素坐标
+            pixel_coords = wcs.all_world2pix([[ra, dec]], 0)
+            pixel_x = pixel_coords[0][0]
+            pixel_y = pixel_coords[0][1]
+
+            # 计算相对于检测中心的偏移
+            center_x, center_y = detection_center
+            offset_x = pixel_x - center_x
+            offset_y = pixel_y - center_y
+
+            # 计算距离
+            distance = np.sqrt(offset_x**2 + offset_y**2)
+            return distance
+
+        except Exception as e:
+            # 静默失败，不影响其他信息的输出
+            return None
+
+    def format_skybot_results(self, skybot_results, header=None, detection_center=None):
+        """
+        格式化Skybot查询结果为文本
+
+        Args:
+            skybot_results: Skybot查询结果表
+            header: FITS header（可选，用于计算像素距离）
+            detection_center: 检测中心坐标(x, y)（可选，用于计算像素距离）
+
+        Returns:
+            格式化后的文本列表
+        """
+        if skybot_results is None or len(skybot_results) == 0:
+            return ["  - (空)"]
+
+        lines = []
+        colnames = skybot_results.colnames
+
+        for i, row in enumerate(skybot_results, 1):
+            asteroid_info = []
+
+            # 提取关键信息
+            if 'Name' in colnames:
+                asteroid_info.append(f"名称={row['Name']}")
+            if 'Number' in colnames:
+                asteroid_info.append(f"编号={row['Number']}")
+            if 'Type' in colnames:
+                asteroid_info.append(f"类型={row['Type']}")
+            if 'RA' in colnames:
+                asteroid_info.append(f"RA={row['RA']:.6f}°")
+            if 'DEC' in colnames:
+                asteroid_info.append(f"DEC={row['DEC']:.6f}°")
+
+            # 计算像素距离（如果提供了必要的参数）
+            if 'RA' in colnames and 'DEC' in colnames and header is not None and detection_center is not None:
+                # 确保RA/DEC是纯数字（处理Astropy Quantity对象）
+                ra_value = row['RA'].value if hasattr(row['RA'], 'value') else float(row['RA'])
+                dec_value = row['DEC'].value if hasattr(row['DEC'], 'value') else float(row['DEC'])
+                pixel_dist = self._calculate_radec_pixel_distance(
+                    ra_value, dec_value, header, detection_center
+                )
+                if pixel_dist is not None:
+                    asteroid_info.append(f"像素距离={pixel_dist:.1f}px")
+
+            if 'Mv' in colnames:
+                asteroid_info.append(f"星等={row['Mv']}")
+            if 'Dg' in colnames:
+                asteroid_info.append(f"距离={row['Dg']}AU")
+
+            lines.append(f"  - 小行星{i}: {', '.join(asteroid_info)}")
+
+        return lines
+
+    def format_vsx_results(self, vsx_results, header=None, detection_center=None):
+        """
+        格式化VSX查询结果为文本
+
+        Args:
+            vsx_results: VSX查询结果表
+            header: FITS header（可选，用于计算像素距离）
+            detection_center: 检测中心坐标(x, y)（可选，用于计算像素距离）
+
+        Returns:
+            格式化后的文本列表
+        """
+        if vsx_results is None or len(vsx_results) == 0:
+            return ["  - (空)"]
+
+        lines = []
+        colnames = vsx_results.colnames
+
+        for i, row in enumerate(vsx_results, 1):
+            vstar_info = []
+
+            # 提取关键信息
+            if 'Name' in colnames:
+                vstar_info.append(f"名称={row['Name']}")
+            if 'Type' in colnames:
+                vstar_info.append(f"类型={row['Type']}")
+            if 'RAJ2000' in colnames:
+                vstar_info.append(f"RA={row['RAJ2000']:.6f}°")
+            if 'DEJ2000' in colnames:
+                vstar_info.append(f"DEC={row['DEJ2000']:.6f}°")
+
+            # 计算像素距离（如果提供了必要的参数）
+            if 'RAJ2000' in colnames and 'DEJ2000' in colnames and header is not None and detection_center is not None:
+                # 确保RA/DEC是纯数字（处理Astropy Quantity对象）
+                ra_value = row['RAJ2000'].value if hasattr(row['RAJ2000'], 'value') else float(row['RAJ2000'])
+                dec_value = row['DEJ2000'].value if hasattr(row['DEJ2000'], 'value') else float(row['DEJ2000'])
+                pixel_dist = self._calculate_radec_pixel_distance(
+                    ra_value, dec_value, header, detection_center
+                )
+                if pixel_dist is not None:
+                    vstar_info.append(f"像素距离={pixel_dist:.1f}px")
+
+            if 'max' in colnames:
+                vstar_info.append(f"最大星等={row['max']}")
+            if 'min' in colnames:
+                vstar_info.append(f"最小星等={row['min']}")
+            if 'Period' in colnames:
+                vstar_info.append(f"周期={row['Period']}天")
+
+            lines.append(f"  - 变星{i}: {', '.join(vstar_info)}")
+
+        return lines
+
+    def save_results(self, original_data, stretched_data, stretched_data_after_line_process, mask, result_image, blobs,
+                     output_dir, base_name, threshold_info, reference_data=None, aligned_data=None, header=None,
+                     generate_shape_viz=False, generate_gif=True, skybot_results=None, vsx_results=None):
+        """
+        保存检测结果
+
+        Args:
+            generate_gif: 是否生成GIF动画，默认True
+            skybot_results: Skybot小行星查询结果（可选）
+            vsx_results: VSX变星查询结果（可选）
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # 创建带时间戳的输出文件夹
+        output_folder = os.path.join(output_dir, f"detection_{timestamp}")
+        os.makedirs(output_folder, exist_ok=True)
+        print(f"\n输出文件夹: {output_folder}")
+
+        # 构建参数字符串
+        threshold = threshold_info.get('threshold', 0)
+        stretch_method = threshold_info.get('stretch_method', 'unknown')
+
+        # 根据拉伸方法构建不同的参数字符串
+        if 'peak' in stretch_method:
+            peak_value = threshold_info.get('peak_value', 0)
+            param_str = f"{stretch_method}_thr{threshold:.2f}_peak{peak_value:.3f}_area{self.min_area:.0f}-{self.max_area:.0f}_circ{self.min_circularity:.2f}"
+        else:
+            # percentile 方法
+            param_str = f"{stretch_method}_thr{threshold:.2f}_area{self.min_area:.0f}-{self.max_area:.0f}_circ{self.min_circularity:.2f}"
+
+        # 保存拉伸后的图像（已经是去除亮线后的数据）
+        stretched_uint8 = (np.clip(stretched_data, 0, 1) * 255).astype(np.uint8)
+        stretched_output = os.path.join(output_folder, f"{base_name}_stretched_{stretch_method}.png")
+        cv2.imwrite(stretched_output, stretched_uint8)
+        print(f"保存拉伸图像（已去除亮线）: {stretched_output}")
+
+        # 保存掩码
+        mask_output = os.path.join(output_folder, f"{base_name}_mask_{param_str}.png")
+        cv2.imwrite(mask_output, mask)
+        print(f"保存信号掩码: {mask_output}")
+
+        # 保存检测结果图
+        result_output = os.path.join(output_folder, f"{base_name}_blobs_{param_str}.png")
+        cv2.imwrite(result_output, result_image)
+        print(f"保存检测结果图: {result_output}")
+
+        # 非快速模式下额外保存关键处理中间产物为FITS
+        # generate_shape_viz=True <=> 非快速模式
+        if generate_shape_viz:
+            stretched_fits_output = os.path.join(
+                output_folder, f"{base_name}_stretched_{stretch_method}.fits"
+            )
+            fits.writeto(
+                stretched_fits_output,
+                stretched_data.astype(np.float32),
+                header=header,
+                overwrite=True
+            )
+            print(f"保存拉伸后FITS: {stretched_fits_output}")
+
+            line_processed_fits_output = os.path.join(
+                output_folder, f"{base_name}_line_processed_{stretch_method}.fits"
+            )
+            fits.writeto(
+                line_processed_fits_output,
+                stretched_data_after_line_process.astype(np.float32),
+                header=header,
+                overwrite=True
+            )
+            print(f"保存亮线处理后FITS: {line_processed_fits_output}")
+
+        # 仅为“高分项”生成截图和GIF（按项目配置的阈值）
+        score_threshold = 3.0
+        aligned_snr_threshold = 1.1
+        try:
+            # 优先从GUI配置读取阈值（若可用），否则使用默认值
+            try:
+                from gui.config_manager import ConfigManager
+            except Exception:
+                import sys as _sys, os as _os
+                _repo_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                if _repo_root not in _sys.path:
+                    _sys.path.append(_repo_root)
+                from gui.config_manager import ConfigManager
+            _cfg = ConfigManager().config
+            _bps = _cfg.get('batch_process_settings', {})
+            score_threshold = float(_bps.get('score_threshold', score_threshold))
+            aligned_snr_threshold = float(_bps.get('aligned_snr_threshold', aligned_snr_threshold))
+        except Exception:
+            pass
+
+        # 计算“高分项”集合（先判定使用哪个阈值口径）
+        if aligned_data is not None and any(b.get('aligned_center_7x7_snr') is not None for b in blobs):
+            high_blobs = [b for b in blobs if (b.get('aligned_center_7x7_snr') is not None and b.get('aligned_center_7x7_snr') > aligned_snr_threshold)]
+            _criterion_str = f"aligned_snr>{aligned_snr_threshold}"
+        else:
+            high_blobs = [b for b in blobs if b.get('quality_score', 0) > score_threshold]
+            _criterion_str = f"quality_score>{score_threshold}"
+
+        # 是否生成“非高分项”cutout 跟随快速模式：
+        # - 快速模式（generate_shape_viz=False）→ 仅为高分项生成
+        # - 非快速模式（generate_shape_viz=True）→ 为全部候选生成
+        is_fast_mode = not generate_shape_viz
+        if is_fast_mode:
+            blobs_for_cutouts = high_blobs
+            if not blobs_for_cutouts:
+                print(f"[快速模式] 无高分候选，跳过cutouts生成（条件：{_criterion_str}）")
+            else:
+                print(f"[快速模式] 仅为 {len(blobs_for_cutouts)}/{len(blobs)} 个高分候选生成cutouts（条件：{_criterion_str}）")
+        else:
+            blobs_for_cutouts = blobs
+            print(f"[非快速模式] 为全部 {len(blobs_for_cutouts)} 个候选生成cutouts；其中高分 {len(high_blobs)}（条件：{_criterion_str}）")
+
+        if blobs_for_cutouts:
+            self.extract_blob_cutouts(original_data, stretched_data, result_image, blobs_for_cutouts,
+                                      output_folder, base_name,
+                                      reference_data=reference_data, aligned_data=aligned_data,
+                                      header=header, generate_shape_viz=generate_shape_viz, generate_gif=generate_gif)
+
+        # 保存详细信息
+        txt_output = os.path.join(output_folder, f"{base_name}_analysis_{param_str}.txt")
+
+        with open(txt_output, 'w', encoding='utf-8') as f:
+            f.write(f"基于信号强度的斑点检测结果\n")
+            f.write(f"=" * 80 + "\n")
+            f.write(f"时间: {timestamp}\n\n")
+
+            # 写入WCS信息
+            f.write(f"WCS信息 (来自noise_cleaned_aligned.fits):\n")
+            if header is not None:
+                # 基本WCS关键字
+                wcs_keywords = {
+                    'CRVAL1': '参考点RA (度)',
+                    'CRVAL2': '参考点DEC (度)',
+                    'CRPIX1': '参考像素X',
+                    'CRPIX2': '参考像素Y',
+                    'CTYPE1': '坐标类型1',
+                    'CTYPE2': '坐标类型2',
+                    'CDELT1': '像素尺度X (度/像素)',
+                    'CDELT2': '像素尺度Y (度/像素)',
+                    'CD1_1': 'CD矩阵[1,1]',
+                    'CD1_2': 'CD矩阵[1,2]',
+                    'CD2_1': 'CD矩阵[2,1]',
+                    'CD2_2': 'CD矩阵[2,2]',
+                    'PC1_1': 'PC矩阵[1,1]',
+                    'PC1_2': 'PC矩阵[1,2]',
+                    'PC2_1': 'PC矩阵[2,1]',
+                    'PC2_2': 'PC矩阵[2,2]',
+                    'EQUINOX': '坐标系历元',
+                    'RADESYS': '坐标系统',
+                    'NAXIS1': '图像宽度',
+                    'NAXIS2': '图像高度'
+                }
+
+                has_wcs = False
+                for keyword, description in wcs_keywords.items():
+                    if keyword in header:
+                        value = header[keyword]
+                        f.write(f"  - {keyword} ({description}): {value}\n")
+                        has_wcs = True
+
+                if not has_wcs:
+                    f.write(f"  - 无WCS信息\n")
+            else:
+                f.write(f"  - 无header信息\n")
+            f.write("\n")
+
+            # 写入小行星列表
+            f.write(f"小行星列表:\n")
+            # 如果有blobs，使用第一个blob的中心作为检测中心
+            # 仅导出高分项到 analysis 文件
+            analysis_blobs = high_blobs
+            detection_center = None
+            if analysis_blobs and len(analysis_blobs) > 0:
+                first_blob_center = analysis_blobs[0]['center']
+                detection_center = (first_blob_center[0], first_blob_center[1])
+
+            skybot_lines = self.format_skybot_results(
+                skybot_results,
+                header=header,
+                detection_center=detection_center
+            )
+            for line in skybot_lines:
+                f.write(f"{line}\n")
+            f.write("\n")
+
+            # 写入变星列表
+            f.write(f"变星列表:\n")
+            vsx_lines = self.format_vsx_results(
+                vsx_results,
+                header=header,
+                detection_center=detection_center
+            )
+            for line in vsx_lines:
+                f.write(f"{line}\n")
+            f.write("\n")
+
+            f.write(f"检测参数:\n")
+            f.write(f"  - 信号阈值: {self.sigma_threshold}σ\n")
+            f.write(f"  - 面积范围: {self.min_area} - {self.max_area}\n")
+            f.write(f"  - 最小圆度: {self.min_circularity}\n")
+            f.write(f"  - 最大锯齿比率: {self.max_jaggedness_ratio}\n")
+            f.write(f"  - 拉伸方法: {threshold_info.get('stretch_method', 'unknown')}\n")
+            if 'peak_value' in threshold_info:
+                f.write(f"  - 直方图峰值: {threshold_info['peak_value']:.6f}\n")
+                f.write(f"  - 拉伸终点: {threshold_info['end_value']:.6f}\n")
+            f.write("\n")
+
+            if 'median' in threshold_info:
+                f.write(f"背景噪声:\n")
+                f.write(f"  - 中位数: {threshold_info['median']:.6f}\n")
+                f.write(f"  - 标准差: {threshold_info['sigma']:.6f}\n")
+
+            f.write(f"检测阈值: {threshold_info['threshold']:.6f}\n")
+            if 'signal_pixels' in threshold_info:
+                f.write(f"信号像素数: {threshold_info['signal_pixels']}\n")
+            f.write("\n")
+
+            f.write(f"检测到 {len(analysis_blobs)} 个斑点（仅导出高分项；条件：{_criterion_str}）\n\n")
+            f.write(f"{'序号':<6} {'综合得分':<12} {'面积':<12} {'圆度':<12} {'锯齿比':<12} {'Hull顶点':<10} {'Poly顶点':<10} {'X坐标':<12} {'Y坐标':<12} {'SNR':<12} {'最大SNR':<12} {'平均信号':<14} {'最大信号':<14} {'Aligned中心7x7SNR':<18}\n")
+            f.write("-" * 194 + "\n")
+
+            for i, blob in enumerate(analysis_blobs, 1):
+                cx, cy = blob['center']
+                quality_score = blob.get('quality_score', 0)
+                snr = blob.get('snr', 0)
+                max_snr = blob.get('max_snr', 0)
+                jaggedness_ratio = blob.get('jaggedness_ratio', 0)
+                hull_vertices = blob.get('hull_vertices', 0)
+                poly_vertices = blob.get('poly_vertices', 0)
+                aligned_center_snr = blob.get('aligned_center_7x7_snr', None)
+
+                # 格式化aligned SNR值
+                aligned_center_str = f"{aligned_center_snr:<18.2f}" if aligned_center_snr is not None else f"{'N/A':<18}"
+
+                f.write(f"{i:<6} {quality_score:<12.4f} {blob['area']:<12.2f} {blob['circularity']:<12.4f} "
+                       f"{jaggedness_ratio:<12.4f} {hull_vertices:<10} {poly_vertices:<10} "
+                       f"{cx:<12.4f} {cy:<12.4f} {snr:<12.2f} {max_snr:<12.2f} "
+                       f"{blob['mean_signal']:<14.8f} {blob['max_signal']:<14.8f} "
+                       f"{aligned_center_str}\n")
+
+        print(f"保存分析报告: {txt_output}")
+
+    def process_fits_file(self, fits_path, output_dir=None, use_peak_stretch=None, detection_threshold=0.0,
+                         reference_fits=None, aligned_fits=None, remove_bright_lines=True,
+                         fast_mode=False, detection_method='contour', generate_gif=True, skybot_results=None, vsx_results=None,
+                         snr_min=5.0):
+        """
+        处理 difference.fits 的最终检测流程（简化版）：
+        不做拉伸；可选亮线去除；基于 DAOStarFinder 直接按 SNR 导出星点目标。
+        """
+        data, header = self.load_fits_image(fits_path)
+        if data is None:
+            return []
+
+        # 直接使用 difference.fits 原始数据进行星点提取（禁用亮线处理）
+        detection_data = data.copy()
+        if remove_bright_lines:
+            print("\n已忽略 --remove-lines：当前流程固定直接使用 difference.fits 进行星点检测")
+        else:
+            print("\n直接使用 difference.fits 原始数据进行星点检测")
+
+        stars = self.extract_stars_by_snr(
+            detection_data,
+            snr_min=snr_min,
+            fwhm=3.0,
+            sharplo=0.2,
+            sharphi=1.0,
+            roundlo=-1.0,
+            roundhi=1.0,
+        )
+
+        print(f"\nSNR阈值: {snr_min}")
+        print(f"过滤后剩余 {len(stars)} 个斑点（直接作为最终目标）")
+
+        if output_dir is None:
+            output_dir = os.path.dirname(fits_path) or '.'
+        base_name = os.path.splitext(os.path.basename(fits_path))[0]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_folder = os.path.join(output_dir, f"detection_{timestamp}")
+        os.makedirs(output_folder, exist_ok=True)
+        print(f"\n输出文件夹: {output_folder}")
+
+        # 输出CSV目标清单
+        snr_tag = int(round(float(snr_min))) if float(snr_min).is_integer() else str(snr_min).replace('.', 'p')
+        csv_output = os.path.join(output_folder, f"{base_name}_stars_snr{snr_tag}.csv")
+        stars.write(csv_output, format="csv", overwrite=True)
+        print(f"保存星点CSV: {csv_output}")
+
+        # 非快速模式下保留检测输入FITS，便于回溯
+        if not fast_mode:
+            detection_input_fits = os.path.join(output_folder, f"{base_name}_detection_input.fits")
+            fits.writeto(detection_input_fits, detection_data.astype(np.float32), header=header, overwrite=True)
+            print(f"保存检测输入FITS: {detection_input_fits}")
+
+        # 保存目标标记图
+        marked = self.create_star_marked_image(detection_data, stars)
+        marked_output = os.path.join(output_folder, f"{base_name}_stars_marked.png")
+        cv2.imwrite(marked_output, cv2.cvtColor(marked, cv2.COLOR_RGB2BGR))
+        print(f"保存星点标记图: {marked_output}")
+
+        # 保存简要报告（不包含评分/轮廓指标）
+        txt_output = os.path.join(output_folder, f"{base_name}_stars_analysis.txt")
+        with open(txt_output, 'w', encoding='utf-8') as f:
+            f.write("SNR星点检测结果（最终目标）\n")
+            f.write("=" * 72 + "\n")
+            f.write(f"输入文件: {fits_path}\n")
+            f.write("去亮线: 否（已禁用，固定直接使用 difference.fits）\n")
+            f.write(f"SNR阈值: {snr_min}\n")
+            f.write(f"目标数量: {len(stars)}\n\n")
+            f.write(f"{'ID':<8}{'X':<14}{'Y':<14}{'PEAK':<16}{'FLUX':<16}{'SNR':<10}\n")
+            f.write("-" * 72 + "\n")
+            for row in stars:
+                f.write(
+                    f"{int(row['id']):<8}{float(row['xcentroid']):<14.4f}{float(row['ycentroid']):<14.4f}"
+                    f"{float(row['peak']):<16.6f}{float(row['flux']):<16.6f}{float(row['snr']):<10.3f}\n"
+                )
+        print(f"保存分析报告: {txt_output}")
+        print("\n处理完成！")
+        return stars
+
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(description='基于直方图峰值的斑点检测')
+    parser.add_argument('fits_file', nargs='?',
+                       default='aligned_comparison_20251004_151632_difference.fits',
+                       help='FITS 文件路径（difference.fits）')
+    parser.add_argument('--threshold', type=float, default=0.0,
+                       help='检测阈值（拉伸后的值），默认 0.0，推荐范围 0.0-0.5')
+    parser.add_argument('--min-area', type=float, default=2,
+                       help='最小面积，默认 2')
+    parser.add_argument('--max-area', type=float, default=36,
+                       help='最大面积，默认 36')
+    parser.add_argument('--min-circularity', type=float, default=0.79,
+                       help='最小圆度 (0-1)，默认 0.79')
+    parser.add_argument('--max-jaggedness-ratio', type=float, default=1.2,
+                       help='最大锯齿比率（poly顶点数/hull顶点数），默认 1.2')
+    parser.add_argument('--no-peak-stretch', action='store_true',
+                       help='兼容旧参数：当前流程不使用拉伸，忽略该选项')
+    parser.add_argument('--remove-lines', action='store_true',
+                       help='去除亮线（默认不去除，添加此参数后去除）')
+    parser.add_argument('--reference', type=str, default=None,
+                       help='参考图像（模板）FITS文件路径')
+    parser.add_argument('--aligned', type=str, default=None,
+                       help='对齐图像（下载）FITS文件路径')
+    parser.add_argument('--fast-mode', action='store_true',
+                       help='快速模式，不生成hull和poly可视化图片（默认生成）')
+    parser.add_argument('--detection-method', type=str, default='contour',
+                       choices=['contour', 'simple_blob'],
+                       help='检测方法: contour=轮廓检测（默认）, simple_blob=SimpleBlobDetector')
+    parser.add_argument('--no-gif', action='store_true',
+                       help='不生成GIF动画（默认生成）')
+    parser.add_argument('--snr-min', type=float, default=5.0,
+                       help='星点最小SNR阈值，默认 5.0（直接作为最终目标筛选）')
+
+
+    args = parser.parse_args()
+
+    print("=" * 80)
+    print("基于SNR的星点检测（不拉伸）")
+    print("去亮线: 否（已禁用）")
+    print(f"SNR阈值: {args.snr_min}")
+    print("=" * 80)
+
+    # 处理文件路径
+    if not os.path.isabs(args.fits_file):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        fits_file = os.path.join(script_dir, args.fits_file)
+    else:
+        fits_file = args.fits_file
+
+    if not os.path.exists(fits_file):
+        print(f"错误: 文件不存在: {fits_file}")
+        return
+
+    # 创建检测器并处理
+    detector = SignalBlobDetector(
+        sigma_threshold=3.0,  # 保留但不使用
+        min_area=args.min_area,
+        max_area=args.max_area,
+        min_circularity=args.min_circularity,
+        gamma=2.2,  # 保留但不使用
+        max_jaggedness_ratio=args.max_jaggedness_ratio
+    )
+
+    # 如果指定了 --no-peak-stretch，则明确设置 use_peak_stretch=False
+    # 否则设置为 None，让 stretch_method 参数决定
+    use_peak = False if args.no_peak_stretch else None
+
+    # 如果指定了 --no-gif，则不生成GIF
+    generate_gif = not args.no_gif
+
+    detector.process_fits_file(fits_file,
+                              use_peak_stretch=use_peak,
+                              detection_threshold=args.threshold,
+                              reference_fits=args.reference,
+                              aligned_fits=args.aligned,
+                              remove_bright_lines=args.remove_lines,
+                              fast_mode=args.fast_mode,
+                              detection_method=args.detection_method,
+                              generate_gif=generate_gif,
+                              snr_min=args.snr_min)
+
+
+if __name__ == "__main__":
+    main()

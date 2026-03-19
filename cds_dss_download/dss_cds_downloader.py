@@ -1,0 +1,166 @@
+import requests
+import shutil
+import urllib3
+import certifi
+import os
+import ssl
+from datetime import datetime
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+
+# 禁用SSL警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 设置SSL证书环境变量
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
+# 创建自定义SSL适配器，支持更多SSL版本
+class SSLAdapter(HTTPAdapter):
+    def __init__(self, verify_ssl=True, *args, **kwargs):
+        self.verify_ssl = verify_ssl
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context()
+        if self.verify_ssl:
+            context.load_default_certs()
+        else:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        context.set_ciphers('DEFAULT@SECLEVEL=1')
+        kwargs['ssl_context'] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        context = create_urllib3_context()
+        if self.verify_ssl:
+            context.load_default_certs()
+        else:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        context.set_ciphers('DEFAULT@SECLEVEL=1')
+        proxy_kwargs['ssl_context'] = context
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+def download_dss_rot(ra: float, dec: float, rotation: float, out_file: str = None,
+                     use_proxy: bool = False, proxy_host: str = "127.0.0.1",
+                     proxy_port: int = 10550, proxy_type: str = "socks5h",
+                     verify_ssl: bool = False):
+    """
+    ra, dec     : 天区中心（度）
+    rotation    : 旋转角（度，逆时针为正）
+    out_file    : 保存文件名，如果为None则自动生成到 当前时间/ 目录
+    use_proxy   : 是否使用代理
+    proxy_host  : 代理主机地址
+    proxy_port  : 代理端口
+    proxy_type  : 代理类型 (http, socks5, socks5h) - socks5h会通过代理进行DNS解析
+    verify_ssl  : 是否验证SSL证书
+    """
+    # 如果未指定输出文件，使用当前时间创建目录
+    if out_file is None:
+        time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_file = f"{time_str}/dss_rot.jpg"
+    url = "https://alasky.cds.unistra.fr/hips-image-services/hips2fits"
+    params = {
+        "hips": "CDS/P/DSS2/color",   # 也可换成 CDS/P/2MASS/color 等
+        "width": 100,
+        "height": 100,
+        "ra": ra,
+        "dec": dec,
+        "fov": 0.1,             # 0.1° 视场，100 px 时 ~3.6″/px
+        "projection": "TAN",
+        "coordsys": "icrs",     # 必须小写
+        "rotation_angle": rotation,
+        "format": "jpg"
+    }
+
+    # 创建Session对象
+    session = requests.Session()
+    session.trust_env = False  # 不使用系统环境变量中的代理设置
+
+    # 使用自定义SSL适配器，使用代理时禁用SSL验证
+    ssl_verify = verify_ssl and not use_proxy
+    session.mount('https://', SSLAdapter(verify_ssl=ssl_verify))
+    session.mount('http://', SSLAdapter(verify_ssl=ssl_verify))
+
+    if use_proxy:
+        # 根据代理类型构建代理URL
+        if proxy_type.lower().startswith("socks"):
+            proxy_url = f"{proxy_type}://{proxy_host}:{proxy_port}"
+        else:
+            proxy_url = f"http://{proxy_host}:{proxy_port}"
+
+        session.proxies = {
+            "http": proxy_url,
+            "https": proxy_url
+        }
+        print(f"Using {proxy_type} proxy: {proxy_url}")
+    else:
+        # 明确设置为空，避免使用系统代理
+        session.proxies = {}
+
+    try:
+        print(f"Downloading from: {url}")
+        # 使用代理时通常需要禁用SSL验证，否则使用certifi证书
+        if use_proxy:
+            verify_param = False
+        else:
+            verify_param = certifi.where() if verify_ssl else False
+        r = session.get(url, params=params, stream=True, verify=verify_param, timeout=30)
+        r.raise_for_status()
+
+        # 确保目录存在
+        import os
+        out_dir = os.path.dirname(out_file)
+        if out_dir and not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+
+        with open(out_file, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        print(f"Saved: {out_file}")
+        return True
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return False
+
+# === 调用示例 ===
+if __name__ == "__main__":
+    # 定义多个测试目标
+    targets = [
+        {"name": "M57_Ring_0deg", "ra": 283.3963, "dec": 33.0292, "rotation": 0},      # 环状星云 0度
+        {"name": "M57_Ring_45deg", "ra": 283.3963, "dec": 33.0292, "rotation": 45},    # 环状星云 45度
+        {"name": "M57_Ring_90deg", "ra": 283.3963, "dec": 33.0292, "rotation": 90},    # 环状星云 90度
+    ]
+
+    # 创建时间目录
+    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    print(f"开始下载 {len(targets)} 个目标到目录: {time_str}/")
+    print("=" * 60)
+
+    success_count = 0
+    for i, target in enumerate(targets, 1):
+        print(f"\n[{i}/{len(targets)}] 下载 {target['name']}...")
+        print(f"  坐标: RA={target['ra']:.4f}°, Dec={target['dec']:.4f}°")
+
+        out_file = f"{time_str}/{target['name']}.jpg"
+        success = download_dss_rot(
+            ra=target['ra'],
+            dec=target['dec'],
+            rotation=target['rotation'],
+            out_file=out_file,
+            use_proxy=False  # 如果需要代理，设置为True
+        )
+
+        if success:
+            success_count += 1
+            print(f"  ✓ 成功")
+        else:
+            print(f"  ✗ 失败")
+
+    print("\n" + "=" * 60)
+    print(f"下载完成: {success_count}/{len(targets)} 成功")
+    print(f"文件保存在: {time_str}/")

@@ -1,0 +1,674 @@
+#!/usr/bin/env python3
+"""
+配置文件管理器
+用于保存和加载GUI应用程序的配置信息
+"""
+
+import json
+import os
+import sys
+from datetime import datetime
+from typing import Dict, List, Any
+import logging
+
+# 添加config目录到路径
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config'))
+from url_config_manager import url_config_manager
+
+
+class ConfigManager:
+    """配置文件管理器"""
+
+    def __init__(self, config_file="gui_config.json"):
+        self.config_file = config_file
+        self.logger = logging.getLogger(__name__)
+
+        # 预计算本地库默认路径（gui/mpc_variables）
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        mpc_variables_dir = os.path.join(current_dir, 'mpc_variables')
+        default_asteroid_path = os.path.join(mpc_variables_dir, 'MPCORB.DAT')
+        if not os.path.exists(default_asteroid_path):
+            default_asteroid_path = ""
+        # 变星库候选（优先顺序）：catalog_gaia_variables.dat -> .dat.gz -> .csv -> vclassre.dat.gz
+        vsx_candidates = [
+            os.path.join(mpc_variables_dir, 'catalog_gaia_variables.dat'),
+            os.path.join(mpc_variables_dir, 'catalog_gaia_variables.dat.gz'),
+            os.path.join(mpc_variables_dir, 'catalog_gaia_variables.csv'),
+            os.path.join(mpc_variables_dir, 'vclassre.dat.gz'),
+        ]
+        default_vsx_path = ""
+        for p in vsx_candidates:
+            if os.path.exists(p):
+                default_vsx_path = p
+                break
+        self._default_asteroid_catalog_path = default_asteroid_path
+        self._default_vsx_catalog_path = default_vsx_path
+
+        # 默认配置
+        self.default_config = {
+            "telescope_names": ["GY1", "GY2", "GY3", "GY4", "GY5", "GY6"],
+            "k_numbers": [f"K{i:03d}" for i in range(1, 100)],  # K001 - K099
+            "last_selected": {
+                "telescope_name": "GY5",
+                "date": datetime.now().strftime("%Y%m%d"),
+                "k_number": "K096",
+                "download_directory": "",
+                "template_directory": "",
+                "diff_output_directory": "",
+                "detected_directory": "",
+                "unqueried_export_directory": "",
+                "ai_training_export_root": ""
+            },
+            "download_settings": {
+                "max_workers": 1,
+                "max_workers_limit": 1,  # 锁定为1，不允许修改
+                "max_workers_enabled": False,  # 禁用并发数设置
+                "retry_times": 3,
+                "timeout": 30
+            },
+            "batch_process_settings": {
+                "thread_count": 4,  # 批量处理线程数（GUI默认值：4）
+                "noise_method": "median",  # 降噪方式: median, gaussian, none（GUI默认值：median，对应Adaptive Median选中）
+                "alignment_method": "ecc",  # 对齐方式: orb, ecc, none（GUI默认值：ecc，对应WCS选中）
+                "remove_bright_lines": True,  # 是否去除亮线（GUI默认值：True）
+                "fast_mode": True,  # 是否启用快速模式（GUI默认值：True）
+                "stretch_method": "percentile",  # 拉伸方法: percentile, minmax, asinh（GUI默认值：percentile）
+                "percentile_low": 99.95,  # 百分位参数（GUI默认值：99.95）
+                "max_jaggedness_ratio": 1.2,  # 最大锯齿比率（GUI默认值：1.2）
+                "detection_method": "contour",  # 检测方法: contour, simple_blob（GUI默认值：contour）
+                "overlap_edge_exclusion_px": 40,  # 重叠边界剔除宽度（像素，默认值：40）
+                "score_threshold": 3.0,  # 综合得分阈值（GUI默认值：3.0）
+                "aligned_snr_threshold": 1.1,  # Aligned SNR阈值（GUI默认值：1.1）
+                "sort_by": "aligned_snr",  # 排序方式: quality_score, aligned_snr, snr（GUI默认值：aligned_snr）
+                "wcs_use_sparse": False,  # WCS对齐是否使用稀疏采样优化（GUI默认值：False，不启用）
+                "wcs_sparse_step": 16,  # WCS稀疏采样步长（GUI默认值：16）
+                "generate_gif": False,  # 是否生成GIF动画（GUI默认值：False，不生成）
+                "science_bg_mode": "off",  # 科学图背景处理模式: off, scheme_a, scheme_b
+                "subpixel_refine_mode": "off",  # 亚像素精修模式: off, scheme_a, scheme_b, scheme_c
+                "diff_calc_mode": "abs",  # 差异计算方式: abs(绝对值) 或 signed(带符号)
+                "apply_diff_postprocess": False,  # 是否对difference.fits执行后处理（负值置零+中值滤波）
+                "enable_line_detection_filter": True,  # 批量导出时是否启用直线检测过滤（GUI默认值：True，启用）
+                # Alignment quality batch cleanup settings
+                "alignment_prune_non_high": True,  # 批量检测对齐时，清除“不是高分目标”的记录与检测结果文件（默认清除）
+                "alignment_error_px_threshold": 2.0,  # 判定“高分目标对齐误差过大”的像素阈值（默认2像素）
+                "alignment_error_ratio_threshold": 0.5,  # 若高分目标中误差>阈值的占比超过此比例则清空本文件（默认50%）
+                "alignment_cleanup_on_ratio_exceed": True,  # 占比超过阈值时是否执行清空（默认清除）
+                "alignment_delete_exceeding_when_ratio_below_threshold": True  # 占比未超过阈值时，删除超标的高分条目（默认清除）
+            },
+            "dss_flip_settings": {
+                "flip_vertical": True,  # 上下翻转DSS（默认值：True）
+                "flip_horizontal": False  # 左右翻转DSS（默认值：False）
+            },
+            "gps_settings": {
+                "latitude": 43.4,  # 纬度（默认值：43.4°N）
+                "longitude": 87.1  # 经度（默认值：87.1°E）
+            },
+            "mpc_settings": {
+                "mpc_code": "N87"  # MPC观测站代码（默认值：N87）
+            },
+            "query_settings": {
+                "search_radius": 0.01,                  # 搜索半径（度）（默认值：0.01）
+                "batch_query_interval_seconds": 5.0,    # 批量查询之间的间隔时间（秒）（默认值：5秒）
+                "batch_query_threads": 5,               # pympc批量查询线程数（默认值：5）
+                "batch_pympc_server_threads": 3,        # pympc server批量查询线程数（默认值：3）
+                "batch_vsx_server_threads": 3           # 变星server批量查询线程数（默认值：3）
+            },
+            "detection_filter_settings": {
+                "enable_center_distance_filter": False,  # 是否启用中心距离过滤（默认值：False）
+                "max_center_distance": 2400,  # 检测结果距离中心像素的最大距离（默认值：2400）
+                "auto_enable_threshold": 50  # 检测目标超过此数量时自动启用过滤（默认值：50）
+            },
+            "ai_classification_settings": {
+                "confidence_threshold": 0.5  # AI GOOD/BAD 自动标记置信度阈值（默认：0.7）
+            },
+            "line_detection_settings": {
+                "sensitivity": 50,                # 直线检测灵敏度(1-100)，越大越敏感
+                "center_distance_px": 3,         # 判定“过中心”的距离阈值（像素）
+                "min_line_length_ratio": 0.1,    # 最小线长=ratio*min(width,height)
+                "max_line_gap": 0,               # HoughLinesP 的最大断裂间隙
+                "percentile_high": 50             # 阈值化用的高百分位
+            },
+            "alignment_tuning_settings": {
+                "star_max_points": 600,           # 星点上限（越大越慢越稳）
+                "star_min_distance_px": 2.0,      # 星点最小间距（像素）
+                "tri_points": 35,                 # 构三角形的亮星点池大小
+                "tri_inlier_thr_px": 4.0,         # 内点距离阈值（像素）
+                "tri_bin_scale": 60,              # 三角形形状量化尺度
+                "tri_topk": 5                     # 可视化记录的Top-K三角形
+            },
+            "display_settings": {
+                "default_display_mode": "linear",
+                "default_colormap": "gray",
+                "auto_select_from_download_dir": True
+            },
+            "local_catalog_settings": {
+                "use_local_query": False,
+                "auto_chain_use_local_query": False,
+                "buttons_use_local_query": False,
+                "asteroid_catalog_path": self._default_asteroid_catalog_path,
+                "vsx_catalog_path": self._default_vsx_catalog_path,
+                "last_asteroid_update": "",
+                "last_vsx_update": "",
+                "mpc_h_limit": 20,
+                "ephemeris_file_path": "",
+                "last_ephemeris_update": "",
+                "asteroid_query_method": "auto",  # 小行星查询方式: auto/skybot/local/pympc
+                "pympc_catalog_path": "",
+                "last_pympc_update": "",
+                "pympc_use_observatory": False  # 使用pympc时是否使用观测站代码，默认不使用
+            },
+            "url_template_type": "standard",  # "standard" 或 "with_year"
+            # URL模板现在从独立的URL配置文件中读取
+            "url_templates": url_config_manager.get_available_templates(),
+            # 依赖检查状态
+            "dependencies_checked": False,  # 是否已通过依赖检查
+            "dependencies_check_date": "",  # 依赖检查通过日期
+            "missing_dependencies": []  # 缺失的依赖包列表
+        }
+
+        # 加载配置
+        self.config = self.load_config()
+
+    def load_config(self) -> Dict[str, Any]:
+        """
+        加载配置文件
+
+        Returns:
+            Dict[str, Any]: 配置字典
+        """
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+
+                # 合并默认配置和加载的配置
+                config = self.default_config.copy()
+                self._deep_update(config, loaded_config)
+
+                self.logger.info(f"配置文件加载成功: {self.config_file}")
+                return config
+            else:
+                self.logger.info("配置文件不存在，使用默认配置")
+                return self.default_config.copy()
+
+        except Exception as e:
+            self.logger.error(f"加载配置文件失败: {str(e)}")
+            return self.default_config.copy()
+
+    def save_config(self) -> bool:
+        """
+        保存配置文件
+
+        Returns:
+            bool: 是否保存成功
+        """
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+
+            self.logger.info(f"配置文件保存成功: {self.config_file}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"保存配置文件失败: {str(e)}")
+            return False
+
+    def _deep_update(self, base_dict: Dict, update_dict: Dict):
+        """深度更新字典"""
+        for key, value in update_dict.items():
+            if key in base_dict and isinstance(base_dict[key], dict) and isinstance(value, dict):
+                self._deep_update(base_dict[key], value)
+            else:
+                base_dict[key] = value
+
+    def get_telescope_names(self) -> List[str]:
+        """获取望远镜名称列表"""
+        return self.config["telescope_names"]
+
+    def get_k_numbers(self) -> List[str]:
+        """获取K序号列表"""
+        return self.config["k_numbers"]
+
+    def get_last_selected(self) -> Dict[str, str]:
+        """获取上次选择的值"""
+        return self.config["last_selected"]
+
+    def update_last_selected(self, **kwargs):
+        """更新上次选择的值"""
+        # 确保last_selected存在
+        if "last_selected" not in self.config:
+            self.config["last_selected"] = self.default_config["last_selected"].copy()
+
+        for key, value in kwargs.items():
+            # 允许添加新字段，不仅限于已存在的字段
+            self.config["last_selected"][key] = value
+        self.save_config()
+
+    def get_download_settings(self) -> Dict[str, int]:
+        """获取下载设置"""
+        return self.config["download_settings"]
+
+    def update_download_settings(self, **kwargs):
+        """更新下载设置"""
+        for key, value in kwargs.items():
+            if key in self.config["download_settings"]:
+                self.config["download_settings"][key] = value
+        self.save_config()
+
+    def get_display_settings(self) -> Dict[str, Any]:
+        """获取显示设置"""
+        return self.config["display_settings"]
+
+    def update_display_settings(self, **kwargs):
+        """更新显示设置"""
+        for key, value in kwargs.items():
+            if key in self.config["display_settings"]:
+                self.config["display_settings"][key] = value
+        self.save_config()
+
+    def get_local_catalog_settings(self) -> Dict[str, Any]:
+        """获取本地目录查询设置"""
+        if "local_catalog_settings" not in self.config:
+            self.config["local_catalog_settings"] = self.default_config.get("local_catalog_settings", {}).copy()
+            self.save_config()
+        settings = self.config["local_catalog_settings"]
+        # 自动填充默认路径（如果未设置或路径不存在）
+        changed = False
+        try:
+            asteroid_path = settings.get("asteroid_catalog_path", "")
+            if (not asteroid_path or not os.path.exists(asteroid_path)) and getattr(self, "_default_asteroid_catalog_path", ""):
+                if os.path.exists(self._default_asteroid_catalog_path):
+                    settings["asteroid_catalog_path"] = self._default_asteroid_catalog_path
+                    changed = True
+            vsx_path = settings.get("vsx_catalog_path", "")
+            if (not vsx_path or not os.path.exists(vsx_path)) and getattr(self, "_default_vsx_catalog_path", ""):
+                if os.path.exists(self._default_vsx_catalog_path):
+                    settings["vsx_catalog_path"] = self._default_vsx_catalog_path
+                    changed = True
+        except Exception:
+            pass
+
+        # 兼容旧版本: 填充小行星查询方式和pympc相关字段
+        valid_methods = ("auto", "skybot", "local", "pympc")
+        method = settings.get("asteroid_query_method")
+        if method not in valid_methods:
+            try:
+                buttons_local = bool(settings.get("buttons_use_local_query", False))
+            except Exception:
+                buttons_local = False
+            settings["asteroid_query_method"] = "local" if buttons_local else "auto"
+            changed = True
+
+        if "pympc_catalog_path" not in settings:
+            settings["pympc_catalog_path"] = ""
+            changed = True
+        if "last_pympc_update" not in settings:
+            settings["last_pympc_update"] = ""
+            changed = True
+        if "pympc_use_observatory" not in settings:
+            settings["pympc_use_observatory"] = False
+            changed = True
+
+        if changed:
+            self.save_config()
+        return settings
+
+    def update_local_catalog_settings(self, **kwargs):
+        """更新本地目录查询设置"""
+        if "local_catalog_settings" not in self.config:
+            self.config["local_catalog_settings"] = self.default_config.get("local_catalog_settings", {}).copy()
+        for key, value in kwargs.items():
+            self.config["local_catalog_settings"][key] = value
+        self.save_config()
+    def get_batch_process_settings(self) -> Dict[str, Any]:
+        """获取批量处理设置"""
+        # 如果配置中没有批量处理设置，使用默认值
+        if "batch_process_settings" not in self.config:
+            self.config["batch_process_settings"] = self.default_config["batch_process_settings"].copy()
+            self.save_config()
+            return self.config["batch_process_settings"]
+
+        # 兼容旧配置：补齐缺失键
+        changed = False
+        default_batch = self.default_config.get("batch_process_settings", {})
+        for key, default_value in default_batch.items():
+            if key not in self.config["batch_process_settings"]:
+                self.config["batch_process_settings"][key] = default_value
+                changed = True
+        if changed:
+            self.save_config()
+        return self.config["batch_process_settings"]
+
+    def update_batch_process_settings(self, **kwargs):
+        """更新批量处理设置"""
+        if "batch_process_settings" not in self.config:
+            self.config["batch_process_settings"] = self.default_config["batch_process_settings"].copy()
+
+        for key, value in kwargs.items():
+            if key in self.config["batch_process_settings"]:
+                self.config["batch_process_settings"][key] = value
+        self.save_config()
+
+    def get_dss_flip_settings(self) -> Dict[str, Any]:
+        """获取DSS翻转设置"""
+        # 如果配置中没有DSS翻转设置，使用默认值
+        if "dss_flip_settings" not in self.config:
+            self.config["dss_flip_settings"] = self.default_config["dss_flip_settings"].copy()
+            self.save_config()
+        return self.config["dss_flip_settings"]
+
+    def update_dss_flip_settings(self, **kwargs):
+        """更新DSS翻转设置"""
+        if "dss_flip_settings" not in self.config:
+            self.config["dss_flip_settings"] = self.default_config["dss_flip_settings"].copy()
+
+        for key, value in kwargs.items():
+            if key in ["flip_vertical", "flip_horizontal"]:
+                self.config["dss_flip_settings"][key] = value
+        self.save_config()
+
+    def get_gps_settings(self) -> Dict[str, Any]:
+        """获取GPS设置"""
+        # 如果配置中没有GPS设置，使用默认值
+        if "gps_settings" not in self.config:
+            self.config["gps_settings"] = self.default_config["gps_settings"].copy()
+            self.save_config()
+        return self.config["gps_settings"]
+
+    def update_gps_settings(self, **kwargs):
+        """更新GPS设置"""
+        if "gps_settings" not in self.config:
+            self.config["gps_settings"] = self.default_config["gps_settings"].copy()
+
+        for key, value in kwargs.items():
+            if key in ["latitude", "longitude"]:
+                self.config["gps_settings"][key] = value
+        self.save_config()
+
+    def get_mpc_settings(self) -> Dict[str, Any]:
+        """获取MPC代码设置"""
+        # 如果配置中没有MPC设置，使用默认值
+        if "mpc_settings" not in self.config:
+            self.config["mpc_settings"] = self.default_config["mpc_settings"].copy()
+            self.save_config()
+        return self.config["mpc_settings"]
+
+    def update_mpc_settings(self, **kwargs):
+        """更新MPC代码设置"""
+        if "mpc_settings" not in self.config:
+            self.config["mpc_settings"] = self.default_config["mpc_settings"].copy()
+
+        for key, value in kwargs.items():
+            if key == "mpc_code":
+                self.config["mpc_settings"][key] = value
+        self.save_config()
+
+    def get_query_settings(self) -> Dict[str, Any]:
+        """获取查询设置"""
+        # 如果配置中没有查询设置，使用默认值
+        if "query_settings" not in self.config:
+            self.config["query_settings"] = self.default_config["query_settings"].copy()
+            self.save_config()
+
+        # 确保所有默认键都存在（兼容旧配置文件）
+        changed = False
+        for key, default_value in self.default_config["query_settings"].items():
+            if key not in self.config["query_settings"]:
+                self.config["query_settings"][key] = default_value
+                changed = True
+        if changed:
+            self.save_config()
+
+        return self.config["query_settings"]
+
+    def update_query_settings(self, **kwargs):
+        """更新查询设置"""
+        if "query_settings" not in self.config:
+            self.config["query_settings"] = self.default_config["query_settings"].copy()
+
+        for key, value in kwargs.items():
+            # 允许更新所有已知的查询设置键（包括搜索半径和批量查询间隔）
+            self.config["query_settings"][key] = value
+        self.save_config()
+
+    def get_detection_filter_settings(self) -> Dict[str, Any]:
+        """获取检测结果过滤设置"""
+        if "detection_filter_settings" not in self.config:
+            self.config["detection_filter_settings"] = self.default_config["detection_filter_settings"].copy()
+            self.save_config()
+        return self.config["detection_filter_settings"]
+
+    def get_line_detection_settings(self) -> Dict[str, Any]:
+        """获取直线检测参数设置"""
+        if "line_detection_settings" not in self.config:
+            self.config["line_detection_settings"] = self.default_config.get("line_detection_settings", {}).copy()
+            self.save_config()
+        return self.config["line_detection_settings"]
+
+    def update_line_detection_settings(self, **kwargs):
+        """更新直线检测参数设置"""
+        if "line_detection_settings" not in self.config:
+            self.config["line_detection_settings"] = self.default_config.get("line_detection_settings", {}).copy()
+        for key, value in kwargs.items():
+            self.config["line_detection_settings"][key] = value
+        self.save_config()
+
+    def get_alignment_tuning_settings(self) -> Dict[str, Any]:
+        """获取对齐调优（速度/稳健性）设置"""
+        if "alignment_tuning_settings" not in self.config:
+            self.config["alignment_tuning_settings"] = self.default_config.get("alignment_tuning_settings", {}).copy()
+            self.save_config()
+        return self.config["alignment_tuning_settings"]
+
+    def update_alignment_tuning_settings(self, **kwargs):
+        """更新对齐调优设置"""
+        if "alignment_tuning_settings" not in self.config:
+            self.config["alignment_tuning_settings"] = self.default_config.get("alignment_tuning_settings", {}).copy()
+        for key, value in kwargs.items():
+            self.config["alignment_tuning_settings"][key] = value
+        self.save_config()
+
+    def get_ai_classification_settings(self) -> Dict[str, Any]:
+        """获取AI GOOD/BAD 自动标记相关设置"""
+        if "ai_classification_settings" not in self.config:
+            self.config["ai_classification_settings"] = self.default_config.get("ai_classification_settings", {}).copy()
+            self.save_config()
+        return self.config["ai_classification_settings"]
+
+    def update_ai_classification_settings(self, **kwargs):
+        """更新AI GOOD/BAD 自动标记相关设置"""
+        if "ai_classification_settings" not in self.config:
+            self.config["ai_classification_settings"] = self.default_config.get("ai_classification_settings", {}).copy()
+        for key, value in kwargs.items():
+            self.config["ai_classification_settings"][key] = value
+        self.save_config()
+
+
+    def update_detection_filter_settings(self, **kwargs):
+        """更新检测结果过滤设置"""
+        if "detection_filter_settings" not in self.config:
+            self.config["detection_filter_settings"] = self.default_config["detection_filter_settings"].copy()
+
+        for key, value in kwargs.items():
+            if key in ["enable_center_distance_filter", "max_center_distance", "auto_enable_threshold"]:
+                self.config["detection_filter_settings"][key] = value
+        self.save_config()
+
+    def get_url_template_type(self) -> str:
+        """获取URL模板类型"""
+        return self.config.get("url_template_type", "standard")
+
+    def get_url_template(self) -> str:
+        """获取当前URL模板"""
+        template_type = self.get_url_template_type()
+
+        # 从URL配置管理器获取模板，并添加基础URL
+        base_url = url_config_manager.get_base_url()
+        template = url_config_manager.get_url_template(template_type)
+
+        # 将模板中的{base_url}替换为实际的基础URL
+        return template.replace("{base_url}", base_url)
+
+    def get_url_templates(self) -> Dict[str, str]:
+        """获取所有URL模板"""
+        # 从URL配置管理器获取模板
+        templates = url_config_manager.get_available_templates()
+        base_url = url_config_manager.get_base_url()
+
+        # 将所有模板中的{base_url}替换为实际的基础URL
+        result = {}
+        for key, template in templates.items():
+            result[key] = template.replace("{base_url}", base_url)
+
+        return result
+
+    def update_url_template_type(self, template_type: str):
+        """更新URL模板类型"""
+        if template_type in ["standard", "with_year"]:
+            self.config["url_template_type"] = template_type
+            self.save_config()
+        else:
+            raise ValueError(f"无效的URL模板类型: {template_type}")
+
+    def get_url_template_options(self) -> Dict[str, str]:
+        """获取URL模板选项的显示名称"""
+        return {
+            "standard": "标准格式 (/{date}/)",
+            "with_year": "包含年份 (/{year}/{date}/)"
+        }
+
+    def build_url(self, tel_name: str = None, date: str = None, k_number: str = None) -> str:
+        """
+        构建URL
+
+        Args:
+            tel_name (str): 望远镜名称，如果为None则使用上次选择的值
+            date (str): 日期，如果为None则使用上次选择的值
+            k_number (str): K序号，如果为None则使用上次选择的值
+
+        Returns:
+            str: 构建的URL
+        """
+        last_selected = self.get_last_selected()
+
+        tel_name = tel_name or last_selected["telescope_name"]
+        date = date or last_selected["date"]
+        k_number = k_number or last_selected["k_number"]
+
+        # 使用URL配置管理器构建URL
+        template_type = self.get_url_template_type()
+        return url_config_manager.build_url(tel_name, date, k_number, template_type)
+
+    def validate_date(self, date_str: str) -> bool:
+        """
+        验证日期格式
+
+        Args:
+            date_str (str): 日期字符串 (YYYYMMDD)
+
+        Returns:
+            bool: 是否有效
+        """
+        try:
+            datetime.strptime(date_str, '%Y%m%d')
+            return True
+        except ValueError:
+            return False
+
+    def validate_k_number(self, k_number: str) -> bool:
+        """
+        验证K序号格式
+
+        Args:
+            k_number (str): K序号字符串
+
+        Returns:
+            bool: 是否有效
+        """
+        return k_number in self.get_k_numbers()
+
+    def validate_telescope_name(self, tel_name: str) -> bool:
+        """
+        验证望远镜名称
+
+        Args:
+            tel_name (str): 望远镜名称
+
+        Returns:
+            bool: 是否有效
+        """
+        return tel_name in self.get_telescope_names()
+
+    def get_recent_dates(self, days: int = 7) -> List[str]:
+        """
+        获取最近几天的日期列表
+
+        Args:
+            days (int): 天数
+
+        Returns:
+            List[str]: 日期列表 (YYYYMMDD格式)
+        """
+        from datetime import timedelta
+
+        dates = []
+        base_date = datetime.now()
+
+        for i in range(days):
+            date = base_date - timedelta(days=i)
+            dates.append(date.strftime('%Y%m%d'))
+
+        return dates
+
+    def export_config(self, export_file: str) -> bool:
+        """
+        导出配置到指定文件
+
+        Args:
+            export_file (str): 导出文件路径
+
+        Returns:
+            bool: 是否导出成功
+        """
+        try:
+            with open(export_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+
+            self.logger.info(f"配置导出成功: {export_file}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"导出配置失败: {str(e)}")
+            return False
+
+    def import_config(self, import_file: str) -> bool:
+        """
+        从指定文件导入配置
+
+        Args:
+            import_file (str): 导入文件路径
+
+        Returns:
+            bool: 是否导入成功
+        """
+        try:
+            if not os.path.exists(import_file):
+                raise FileNotFoundError(f"配置文件不存在: {import_file}")
+
+            with open(import_file, 'r', encoding='utf-8') as f:
+                imported_config = json.load(f)
+
+            # 验证配置格式
+            if not isinstance(imported_config, dict):
+                raise ValueError("配置文件格式无效")
+
+            # 合并配置
+            self._deep_update(self.config, imported_config)
+            self.save_config()
+
+            self.logger.info(f"配置导入成功: {import_file}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"导入配置失败: {str(e)}")
+            return False
