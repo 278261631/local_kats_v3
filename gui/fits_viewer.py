@@ -4089,12 +4089,12 @@ class FitsImageViewer:
                 self.last_output_dir = output_dir
                 self.parent_frame.after(0, lambda: self.open_output_dir_btn.config(state="normal"))
 
-                # 尝试显示第一个检测目标的cutout图片
-                cutout_displayed = self._display_first_detection_cutouts(output_dir)
-                if cutout_displayed:
-                    self.logger.info("已显示已有的cutout图片")
+                # 直接显示CSV候选
+                csv_displayed = self._display_first_detection_cutouts(output_dir)
+                if csv_displayed:
+                    self.logger.info("已显示已有的CSV候选")
                 else:
-                    self.logger.info("未找到cutout图片")
+                    self.logger.info("未找到CSV候选")
 
                 self.logger.info(f"输出目录: {output_dir} (点击'打开输出目录'按钮查看)")
                 self.parent_frame.after(0, lambda: self.diff_button.config(state="normal", text="执行Diff"))
@@ -4260,17 +4260,17 @@ class FitsImageViewer:
                         self.logger.info(line)
                 self.logger.info("=" * 60)
 
-                # 尝试显示第一个检测目标的cutout图片
-                cutout_displayed = False
+                # 显示CSV候选（不再使用cutout）
+                csv_displayed = False
                 output_dir = result.get('output_directory')
                 if output_dir:
-                    cutout_displayed = self._display_first_detection_cutouts(output_dir)
+                    csv_displayed = self._display_first_detection_cutouts(output_dir)
 
-                # 根据是否显示了cutout图片决定后续操作
-                if cutout_displayed:
-                    self.logger.info("已显示cutout图片")
+                # 根据是否显示了CSV候选决定后续操作
+                if csv_displayed:
+                    self.logger.info("已显示CSV候选")
                 else:
-                    self.logger.info("未找到cutout图片，不显示其他文件")
+                    self.logger.info("未找到CSV候选，不显示检测结果")
 
                 # 保存输出目录路径并启用按钮
                 self.last_output_dir = output_dir
@@ -4457,6 +4457,163 @@ class FitsImageViewer:
             except Exception:
                 return 0
 
+    def _load_variable_candidates_nonref_only(self, output_dir: str):
+        """读取 variable_candidates_nonref_only.csv 并返回候选列表。"""
+        csv_path = os.path.join(output_dir, "variable_candidates_nonref_only.csv")
+        if not os.path.exists(csv_path):
+            return []
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = []
+                for row in reader:
+                    if row and any(str(v).strip() for v in row.values()):
+                        rows.append(row)
+                return rows
+        except Exception as e:
+            self.logger.warning(f"读取 variable_candidates_nonref_only.csv 失败: {e}")
+            return []
+
+    def _try_get_float_from_row(self, row: dict, key_candidates):
+        """从CSV行中按候选列名提取浮点数。"""
+        for key in key_candidates:
+            if key in row:
+                v = str(row.get(key, "")).strip()
+                if not v:
+                    continue
+                # 兼容类似 "123.4 px" 这类文本
+                m = re.search(r"[-+]?\d+(?:\.\d+)?", v)
+                if not m:
+                    continue
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    continue
+        return None
+
+    def _resolve_candidate_pixel_xy(self, row: dict):
+        """从候选行解析像素坐标；缺失时尝试用RA/DEC + 当前WCS转换。"""
+        x = self._try_get_float_from_row(
+            row, ["x", "pixel_x", "x_px", "xpix", "target_x", "cx", "col", "img_x"]
+        )
+        y = self._try_get_float_from_row(
+            row, ["y", "pixel_y", "y_px", "ypix", "target_y", "cy", "row", "img_y"]
+        )
+        if x is not None and y is not None:
+            return x, y
+
+        ra = self._try_get_float_from_row(row, ["ra", "ra_deg", "ra_degree", "target_ra"])
+        dec = self._try_get_float_from_row(row, ["dec", "dec_deg", "dec_degree", "target_dec"])
+        if ra is None or dec is None:
+            return None, None
+
+        try:
+            from astropy.wcs import WCS
+
+            if self.current_header is None:
+                return None, None
+            wcs = WCS(self.current_header)
+            pixel_coords = wcs.all_world2pix([[ra, dec]], 0)
+            return float(pixel_coords[0][0]), float(pixel_coords[0][1])
+        except Exception:
+            return None, None
+
+    def _display_csv_candidate_by_index(self, index: int):
+        """在主图中显示 CSV 候选，并支持上一条/下一条浏览。"""
+        if not hasattr(self, "_csv_candidates") or not self._csv_candidates:
+            return
+        if index < 0 or index >= len(self._csv_candidates):
+            return
+        if not self.selected_file_path:
+            return
+
+        # 切换到CSV候选浏览模式
+        self._csv_candidate_mode = True
+        self._current_csv_candidate_index = index
+        total = len(self._csv_candidates)
+        row = self._csv_candidates[index]
+
+        # 加载当前FITS（若尚未加载或切换了文件）
+        if (
+            self.current_fits_data is None
+            or not self.current_file_path
+            or os.path.normpath(self.current_file_path) != os.path.normpath(self.selected_file_path)
+        ):
+            if not self.load_fits_file(self.selected_file_path):
+                return
+        if self.current_fits_data is None:
+            return
+
+        # 停止cutout相关动画/点击事件
+        if hasattr(self, "_blink_animation_id") and self._blink_animation_id:
+            self.parent_frame.after_cancel(self._blink_animation_id)
+            self._blink_animation_id = None
+        if hasattr(self, "_click_connection_id") and self._click_connection_id:
+            self.canvas.mpl_disconnect(self._click_connection_id)
+            self._click_connection_id = None
+
+        x, y = self._resolve_candidate_pixel_xy(row)
+        h, w = self.current_fits_data.shape[0], self.current_fits_data.shape[1]
+
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        display_data = self._apply_display_transform(self.current_fits_data)
+        im = ax.imshow(display_data, cmap=self.colormap.get(), origin="lower")
+        self.figure.colorbar(im, ax=ax, shrink=0.8)
+        self._draw_crosshair_on_axis(ax, self.current_fits_data.shape)
+
+        marker_text = "像素坐标: N/A"
+        if x is not None and y is not None:
+            self._draw_four_pointed_star(ax, x, y, color="orange", linewidth=1.4, size=10, gap=3)
+            marker_text = f"像素坐标: ({x:.1f}, {y:.1f})"
+
+        ax.set_xlabel("X (像素)")
+        ax.set_ylabel("Y (像素)")
+        ax.set_title(f"CSV候选 {index + 1}/{total}")
+
+        # 标题附带关键列（精简展示）
+        key_pairs = []
+        for k in ["score", "snr", "flux_ratio", "ra", "dec"]:
+            if k in row and str(row.get(k, "")).strip():
+                key_pairs.append(f"{k}={row[k]}")
+        title_extra = " | ".join(key_pairs[:4])
+        suptitle = f"variable_candidates_nonref_only.csv  候选 {index + 1}/{total}\n{marker_text}"
+        if title_extra:
+            suptitle += f"\n{title_extra}"
+        self.figure.suptitle(suptitle, fontsize=10, fontweight="bold")
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+        # 更新计数与按钮状态
+        if hasattr(self, "cutout_count_label"):
+            self.cutout_count_label.config(text=f"{index + 1}/{total}")
+        if hasattr(self, "prev_cutout_button"):
+            self.prev_cutout_button.config(state="normal" if total > 1 else "disabled")
+        if hasattr(self, "next_cutout_button"):
+            self.next_cutout_button.config(state="normal" if total > 1 else "disabled")
+
+        # CSV模式下禁用依赖cutout上下文的操作
+        if hasattr(self, "check_dss_button"):
+            self.check_dss_button.config(state="disabled")
+        if hasattr(self, "skybot_button"):
+            self.skybot_button.config(state="disabled")
+        if hasattr(self, "vsx_button"):
+            self.vsx_button.config(state="disabled")
+        if hasattr(self, "satellite_button"):
+            self.satellite_button.config(state="disabled")
+        if hasattr(self, "save_detection_button"):
+            self.save_detection_button.config(state="disabled")
+
+        # 更新中心距离显示
+        if hasattr(self, "current_center_distance_label"):
+            if x is not None and y is not None:
+                cx, cy = w / 2.0, h / 2.0
+                dist = float(np.hypot(x - cx, y - cy))
+                self.current_center_distance_label.config(text=f"{dist:.1f}")
+            else:
+                self.current_center_distance_label.config(text="--")
+
     def _auto_load_diff_results(self, file_path):
         """自动检查并加载diff结果"""
         try:
@@ -4486,13 +4643,13 @@ class FitsImageViewer:
             self.last_output_dir = output_dir
             self.open_output_dir_btn.config(state="normal")
 
-            # 尝试显示第一个检测目标的cutout图片
-            cutout_displayed = self._display_first_detection_cutouts(output_dir)
-            if cutout_displayed:
-                self.logger.info("已自动加载cutout图片")
+            # 直接显示CSV候选
+            csv_displayed = self._display_first_detection_cutouts(output_dir)
+            if csv_displayed:
+                self.logger.info("已自动加载CSV候选")
                 self.diff_progress_label.config(text="已加载diff结果", foreground="green")
             else:
-                self.logger.info("未找到cutout图片")
+                self.logger.info("未找到CSV候选")
                 # 清空图像显示，避免保留上一个文件的画面；但保留输出目录按钮可用
                 try:
                     self._clear_diff_display()
@@ -4504,7 +4661,7 @@ class FitsImageViewer:
                     self.open_output_dir_btn.config(state="normal")
                 # 提示状态
                 if hasattr(self, 'diff_progress_label'):
-                    self.diff_progress_label.config(text="已有diff结果（无cutout）", foreground="blue")
+                    self.diff_progress_label.config(text="已有diff结果（无CSV候选）", foreground="blue")
 
             self.logger.info(f"输出目录: {output_dir} (点击'打开输出目录'按钮查看)")
 
@@ -4538,6 +4695,9 @@ class FitsImageViewer:
             self._current_cutout_index = 0
         if hasattr(self, '_total_cutouts'):
             self._total_cutouts = 0
+        self._csv_candidate_mode = False
+        self._csv_candidates = []
+        self._current_csv_candidate_index = 0
 
         # 清空坐标显示框
         if hasattr(self, 'coord_deg_entry'):
@@ -4769,94 +4929,35 @@ class FitsImageViewer:
 
     def _display_first_detection_cutouts(self, output_dir):
         """
-        显示第一个检测目标的cutout图片
+        显示第一个检测目标（仅CSV模式）
 
         Args:
             output_dir: 输出目录路径
 
         Returns:
-            bool: 是否成功显示了cutout图片
+            bool: 是否成功显示了CSV候选
         """
         try:
-            # 查找detection目录
-            detection_dirs = list(Path(output_dir).glob("detection_*"))
-            if not detection_dirs:
-                candidate_count = self._count_variable_candidates_nonref_only(output_dir)
-                if candidate_count > 0:
-                    self.logger.info(
-                        "未找到detection目录，当前检测结果来源为 variable_candidates_nonref_only.csv（%d 条）",
-                        candidate_count,
-                    )
-                else:
-                    self.logger.info("未找到detection目录")
-                return False
-
-            # 使用最新的detection目录
-            detection_dir = sorted(detection_dirs, key=lambda x: x.stat().st_mtime, reverse=True)[0]
-            self.logger.info(f"找到detection目录: {detection_dir.name}")
-
-            # 查找cutouts文件夹
-            cutouts_dir = detection_dir / "cutouts"
-            if not cutouts_dir.exists():
-                self.logger.info("未找到cutouts文件夹")
-                return False
-
-            # 查找所有目标的图片（按文件名排序）
-            reference_files = sorted(cutouts_dir.glob("*_1_reference.png"))
-            aligned_files = sorted(cutouts_dir.glob("*_2_aligned.png"))
-            detection_files = sorted(cutouts_dir.glob("*_3_detection.png"))
-
-            if not (reference_files and aligned_files and detection_files):
-                self.logger.info("未找到完整的cutout图片")
-                return False
-
-            # 保存所有图片列表和当前索引
+            # 取消 detection_*/cutouts 逻辑，只使用 CSV 候选
             self._all_cutout_sets = []
-            for ref, aligned, det in zip(reference_files, aligned_files, detection_files):
-                self._all_cutout_sets.append({
-                    'reference': str(ref),
-                    'aligned': str(aligned),
-                    'detection': str(det),
-                    'skybot_results': None,   # 小行星查询结果（表格或简要文本）
-                    'vsx_results': None,      # 变星查询结果
-                    'skybot_queried': False,  # 是否已查询小行星
-                    'vsx_queried': False,     # 是否已查询变星
-                    'manual_label': None,     # 人工质量标记: None/good/bad
-                    'auto_class_label': None, # 自动分类标记: None/suspect/false/error
-                    'skybot_error': False,    # 小行星查询是否出错
-                    'vsx_error': False        # 变星查询是否出错
-                })
-
+            self._total_cutouts = 0
             self._current_cutout_index = 0
-            self._total_cutouts = len(self._all_cutout_sets)
+            self._csv_candidate_mode = False
+            self._csv_candidates = []
+            self._current_csv_candidate_index = 0
 
-            self.logger.info(f"找到 {self._total_cutouts} 组检测结果")
+            candidates = self._load_variable_candidates_nonref_only(output_dir)
+            if not candidates:
+                self.logger.info("未找到可显示的 variable_candidates_nonref_only.csv 候选")
+                return False
 
-            # 加载每个cutout的查询结果，并基于 query_results_*.txt 重新计算自动分类
-            for idx, cutout_set in enumerate(self._all_cutout_sets):
-                self._load_query_results_from_file(cutout_set, idx)
-                # 这里临时设置当前索引，以便复用统一的自动分类逻辑
-                self._current_cutout_index = idx
-                try:
-                    self._update_auto_classification_for_current_cutout()
-                except Exception:
-                    # 自动分类失败不影响浏览
-                    pass
-
-            # 从 aligned_comparison_*.txt 加载 GOOD/BAD 手工标记
-            try:
-                self._load_manual_labels_for_current_detection_dir(detection_dir)
-            except Exception:
-                # 读取手工标记失败不影响正常浏览
-                pass
-
-            # 显示第一组图片
-            self._display_cutout_by_index(0)
-
-            return True  # 成功显示
+            self.logger.info("使用 CSV 检测结果，共 %d 条候选", len(candidates))
+            self._csv_candidates = candidates
+            self._display_csv_candidate_by_index(0)
+            return True
 
         except Exception as e:
-            self.logger.error(f"显示cutout图片时出错: {e}")
+            self.logger.error(f"显示CSV候选时出错: {e}")
             return False
 
     def _load_query_results_from_file(self, cutout_set, cutout_index):
@@ -5228,6 +5329,7 @@ class FitsImageViewer:
         if index < 0 or index >= len(self._all_cutout_sets):
             return
 
+        self._csv_candidate_mode = False
         self._current_cutout_index = index
         cutout_set = self._all_cutout_sets[index]
 
@@ -5443,6 +5545,15 @@ class FitsImageViewer:
 
     def _show_next_cutout(self):
         """显示下一组cutout图片"""
+        if getattr(self, "_csv_candidate_mode", False):
+            if not hasattr(self, "_csv_candidates") or not self._csv_candidates:
+                messagebox.showinfo("提示", "没有可显示的检测结果")
+                return
+            total = len(self._csv_candidates)
+            next_index = (self._current_csv_candidate_index + 1) % total
+            self._display_csv_candidate_by_index(next_index)
+            return
+
         if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
             messagebox.showinfo("提示", "没有可显示的检测结果")
             return
@@ -5666,6 +5777,15 @@ class FitsImageViewer:
 
     def _show_previous_cutout(self):
         """显示上一组cutout图片"""
+        if getattr(self, "_csv_candidate_mode", False):
+            if not hasattr(self, "_csv_candidates") or not self._csv_candidates:
+                messagebox.showinfo("提示", "没有可显示的检测结果")
+                return
+            total = len(self._csv_candidates)
+            prev_index = (self._current_csv_candidate_index - 1) % total
+            self._display_csv_candidate_by_index(prev_index)
+            return
+
         if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
             messagebox.showinfo("提示", "没有可显示的检测结果")
             return
@@ -12045,7 +12165,7 @@ class FitsImageViewer:
 
 
     def _load_diff_results_for_file(self, file_path, region_dir):
-        """为指定文件加载diff结果"""
+        """为指定文件加载diff结果（CSV模式，不再加载cutout目录）"""
         try:
             # 获取配置的输出目录
             base_output_dir = None
@@ -12079,77 +12199,23 @@ class FitsImageViewer:
             file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
             potential_output_dir = os.path.join(output_region_dir, file_basename)
 
-            # 检查是否存在detection目录
+            # 检查输出目录是否存在
             if not os.path.exists(potential_output_dir) or not os.path.isdir(potential_output_dir):
                 return False
 
-            # 查找detection_开头的目录
-            detection_dir_path = None
-            try:
-                items = os.listdir(potential_output_dir)
-                for item_name in items:
-                    item_path = os.path.join(potential_output_dir, item_name)
-                    if os.path.isdir(item_path) and item_name.startswith('detection_'):
-                        detection_dir_path = item_path
-                        break
-            except Exception:
+            candidates = self._load_variable_candidates_nonref_only(potential_output_dir)
+            if not candidates:
                 return False
 
-            if not detection_dir_path:
-                return False
-
-            # 加载cutouts（使用与_display_first_detection_cutouts相同的逻辑）
-            cutouts_dir = Path(detection_dir_path) / "cutouts"
-            if not cutouts_dir.exists():
-                self.logger.info("未找到cutouts文件夹")
-                return False
-
-            # 查找所有目标的图片（按文件名排序）
-            reference_files = sorted(cutouts_dir.glob("*_1_reference.png"))
-            aligned_files = sorted(cutouts_dir.glob("*_2_aligned.png"))
-            detection_files = sorted(cutouts_dir.glob("*_3_detection.png"))
-
-            if not (reference_files and aligned_files and detection_files):
-                self.logger.info("未找到完整的cutout图片")
-                return False
-
-            # 保存所有图片列表和当前索引
+            # 统一清空cutout状态，避免残留旧逻辑数据
             self._all_cutout_sets = []
-            for ref, aligned, det in zip(reference_files, aligned_files, detection_files):
-                cutout_set = {
-                    'reference': str(ref),
-                    'aligned': str(aligned),
-                    'detection': str(det),
-                    'skybot_results': None,
-                    'vsx_results': None,
-                    'skybot_queried': False,
-                    'vsx_queried': False,
-                    'manual_label': None,
-                    'auto_class_label': None,
-                    'skybot_error': False,
-                    'vsx_error': False,
-                }
-                self._all_cutout_sets.append(cutout_set)
-
             self._current_cutout_index = 0
-            self._total_cutouts = len(self._all_cutout_sets)
+            self._total_cutouts = 0
+            self._csv_candidate_mode = True
+            self._csv_candidates = candidates
+            self._current_csv_candidate_index = 0
 
-            # 加载每个cutout的查询结果，并基于 query_results_*.txt 重新计算自动分类
-            for idx, cutout_set in enumerate(self._all_cutout_sets):
-                self._load_query_results_from_file(cutout_set, idx)
-                self._current_cutout_index = idx
-                try:
-                    self._update_auto_classification_for_current_cutout()
-                except Exception:
-                    pass
-
-            # 从 aligned_comparison_*.txt 加载 GOOD/BAD 手工标记
-            try:
-                self._load_manual_labels_for_current_detection_dir(detection_dir_path)
-            except Exception:
-                pass
-
-            self.logger.info(f"成功加载 {self._total_cutouts} 个检测目标")
+            self.logger.info("成功加载 CSV 检测目标: %d 个", len(candidates))
             return True
 
         except Exception as e:
