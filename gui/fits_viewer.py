@@ -410,6 +410,16 @@ class FitsImageViewer:
                                                          command=self._on_flip_dss_config_changed)
         self.flip_dss_horizontal_check.pack(side=tk.LEFT, padx=(0, 0))
 
+        # Rank候选图翻转选项（仅影响 variable_candidates_rank_aligned_to_a.png 的显示）
+        self.flip_rank_aligned_vertical_var = tk.BooleanVar(value=False)
+        self.flip_rank_aligned_vertical_check = ttk.Checkbutton(
+            toolbar_frame3,
+            text="上下翻转Rank图",
+            variable=self.flip_rank_aligned_vertical_var,
+            command=self._on_flip_rank_aligned_changed,
+        )
+        self.flip_rank_aligned_vertical_check.pack(side=tk.LEFT, padx=(6, 0))
+
         # 检测结果人工标记与跳转控件已移动到右侧控制面板（保存图像按钮下一行）
 
         # 坐标显示区域（第四行工具栏）
@@ -1216,6 +1226,17 @@ class FitsImageViewer:
 
         except Exception as e:
             self.logger.error(f"保存DSS翻转设置失败: {str(e)}")
+
+    def _on_flip_rank_aligned_changed(self, *args):
+        """切换Rank图上下翻转后，刷新当前CSV候选显示。"""
+        try:
+            enabled = bool(self.flip_rank_aligned_vertical_var.get())
+            self.logger.info(f"Rank图上下翻转已{'启用' if enabled else '关闭'}")
+            if getattr(self, "_csv_candidate_mode", False):
+                idx = getattr(self, "_current_csv_candidate_index", 0)
+                self._display_csv_candidate_by_index(idx)
+        except Exception as e:
+            self.logger.warning(f"刷新Rank图翻转显示失败: {e}")
 
     def _load_gps_settings(self):
         """从配置文件加载GPS设置"""
@@ -4491,8 +4512,8 @@ class FitsImageViewer:
                     continue
         return None
 
-    def _resolve_candidate_pixel_xy(self, row: dict):
-        """从候选行解析像素坐标；缺失时尝试用RA/DEC + 当前WCS转换。"""
+    def _resolve_candidate_pixel_xy(self, row: dict, header=None):
+        """从候选行解析像素坐标；缺失时尝试用RA/DEC + WCS转换。"""
         x = self._try_get_float_from_row(
             row, ["x", "pixel_x", "x_px", "xpix", "target_x", "cx", "col", "img_x"]
         )
@@ -4510,13 +4531,90 @@ class FitsImageViewer:
         try:
             from astropy.wcs import WCS
 
-            if self.current_header is None:
+            target_header = header if header is not None else self.current_header
+            if target_header is None:
                 return None, None
-            wcs = WCS(self.current_header)
+            wcs = WCS(target_header)
             pixel_coords = wcs.all_world2pix([[ra, dec]], 0)
             return float(pixel_coords[0][0]), float(pixel_coords[0][1])
         except Exception:
             return None, None
+
+    def _load_fits_image_and_header(self, fits_path: str):
+        """读取FITS并返回二维图像数据及header。"""
+        try:
+            with fits.open(fits_path) as hdul:
+                header = hdul[0].header
+                data = hdul[0].data
+            if data is None:
+                return None, None
+            data = data.astype(np.float64)
+            if len(data.shape) == 3:
+                data = data[0]
+            return data, header
+        except Exception:
+            return None, None
+
+    def _extract_local_patch(self, data: np.ndarray, x: float, y: float, half_size: int = 64):
+        """按像素坐标提取局部区域，返回(patch, local_x, local_y)。"""
+        h, w = data.shape[0], data.shape[1]
+        if x is None or y is None:
+            x = w / 2.0
+            y = h / 2.0
+
+        xi = int(round(x))
+        yi = int(round(y))
+        x0 = max(0, xi - half_size)
+        x1 = min(w, xi + half_size)
+        y0 = max(0, yi - half_size)
+        y1 = min(h, yi + half_size)
+        patch = data[y0:y1, x0:x1]
+        local_x = float(x - x0)
+        local_y = float(y - y0)
+        return patch, local_x, local_y
+
+    def _get_csv_mode_reference_fits(self):
+        """CSV模式下获取参考FITS路径（模板图）。"""
+        try:
+            if not self.selected_file_path:
+                return None
+            if not self.get_template_dir_callback:
+                return None
+            template_dir = self.get_template_dir_callback()
+            if not template_dir:
+                return None
+            return self.diff_orb.find_template_file(self.selected_file_path, template_dir)
+        except Exception:
+            return None
+
+    def _get_csv_mode_aligned_fits(self):
+        """CSV模式下获取aligned FITS路径（优先*.02rp.fit）。"""
+        output_dir = getattr(self, "_current_csv_output_dir", None)
+        if not output_dir or not os.path.exists(output_dir):
+            return self.selected_file_path if self.selected_file_path and os.path.exists(self.selected_file_path) else None
+        try:
+            rp_files = sorted(Path(output_dir).glob("*.02rp.fit"))
+            if rp_files:
+                return str(rp_files[0])
+            fallback = sorted(Path(output_dir).glob("*.fit"))
+            if fallback:
+                return str(fallback[0])
+        except Exception:
+            pass
+        return self.selected_file_path if self.selected_file_path and os.path.exists(self.selected_file_path) else None
+
+    def _get_csv_mode_rank_aligned_png(self):
+        """CSV模式下获取候选排序图（优先 aligned_to_a 版本）。"""
+        output_dir = getattr(self, "_current_csv_output_dir", None)
+        if not output_dir or not os.path.exists(output_dir):
+            return None
+        preferred = os.path.join(output_dir, "variable_candidates_rank_aligned_to_a.png")
+        if os.path.exists(preferred):
+            return preferred
+        fallback = os.path.join(output_dir, "variable_candidates_rank.png")
+        if os.path.exists(fallback):
+            return fallback
+        return None
 
     def _display_csv_candidate_by_index(self, index: int):
         """在主图中显示 CSV 候选，并支持上一条/下一条浏览。"""
@@ -4533,17 +4631,6 @@ class FitsImageViewer:
         total = len(self._csv_candidates)
         row = self._csv_candidates[index]
 
-        # 加载当前FITS（若尚未加载或切换了文件）
-        if (
-            self.current_fits_data is None
-            or not self.current_file_path
-            or os.path.normpath(self.current_file_path) != os.path.normpath(self.selected_file_path)
-        ):
-            if not self.load_fits_file(self.selected_file_path):
-                return
-        if self.current_fits_data is None:
-            return
-
         # 停止cutout相关动画/点击事件
         if hasattr(self, "_blink_animation_id") and self._blink_animation_id:
             self.parent_frame.after_cancel(self._blink_animation_id)
@@ -4552,24 +4639,90 @@ class FitsImageViewer:
             self.canvas.mpl_disconnect(self._click_connection_id)
             self._click_connection_id = None
 
-        x, y = self._resolve_candidate_pixel_xy(row)
-        h, w = self.current_fits_data.shape[0], self.current_fits_data.shape[1]
+        aligned_fits_path = self._get_csv_mode_aligned_fits()
+        ref_fits_path = self._get_csv_mode_reference_fits()
+        rank_png_path = self._get_csv_mode_rank_aligned_png()
+        aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits_path) if aligned_fits_path else (None, None)
+        ref_data, ref_header = self._load_fits_image_and_header(ref_fits_path) if ref_fits_path else (None, None)
+
+        if aligned_data is None:
+            # 兜底到当前文件
+            if (
+                self.current_fits_data is None
+                or not self.current_file_path
+                or os.path.normpath(self.current_file_path) != os.path.normpath(self.selected_file_path)
+            ):
+                if not self.load_fits_file(self.selected_file_path):
+                    return
+            aligned_data = self.current_fits_data
+            aligned_header = self.current_header
+
+        x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
+        ref_x, ref_y = self._resolve_candidate_pixel_xy(
+            row,
+            header=ref_header if ref_header is not None else aligned_header,
+        )
+
+        aligned_patch, aligned_lx, aligned_ly = self._extract_local_patch(aligned_data, x, y, half_size=64)
+        if ref_data is None:
+            ref_data = aligned_data
+            ref_x, ref_y = x, y
+        ref_patch, ref_lx, ref_ly = self._extract_local_patch(ref_data, ref_x, ref_y, half_size=64)
+
+        rank_patch = None
+        rank_lx, rank_ly = None, None
+        if rank_png_path and os.path.exists(rank_png_path):
+            try:
+                from PIL import Image
+                rank_img = np.array(Image.open(rank_png_path))
+                if hasattr(self, "flip_rank_aligned_vertical_var") and self.flip_rank_aligned_vertical_var.get():
+                    rank_img = np.flipud(rank_img)
+                ah, aw = aligned_data.shape[0], aligned_data.shape[1]
+                rh, rw = rank_img.shape[0], rank_img.shape[1]
+                sx = float(rw) / float(aw) if aw > 0 else 1.0
+                sy = float(rh) / float(ah) if ah > 0 else 1.0
+                rank_x = x * sx if x is not None else None
+                rank_y = y * sy if y is not None else None
+                rank_patch, rank_lx, rank_ly = self._extract_local_patch(rank_img, rank_x, rank_y, half_size=64)
+            except Exception as e:
+                self.logger.warning(f"读取候选排序图失败: {e}")
 
         self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        display_data = self._apply_display_transform(self.current_fits_data)
-        im = ax.imshow(display_data, cmap=self.colormap.get(), origin="lower")
-        self.figure.colorbar(im, ax=ax, shrink=0.8)
-        self._draw_crosshair_on_axis(ax, self.current_fits_data.shape)
+        axes = self.figure.subplots(1, 3)
+
+        ref_show = self._apply_display_transform(ref_patch)
+        axes[0].imshow(ref_show, cmap=self.colormap.get(), origin="lower")
+        axes[0].set_title("Reference 局部", fontsize=10, fontweight="bold")
+        axes[0].axis("off")
+        self._draw_crosshair_on_axis(axes[0], ref_patch.shape)
+        if ref_lx is not None and ref_ly is not None:
+            self._draw_four_pointed_star(axes[0], ref_lx, ref_ly, color="orange", linewidth=1.2, size=8, gap=2)
+
+        aligned_show = self._apply_display_transform(aligned_patch)
+        axes[1].imshow(aligned_show, cmap=self.colormap.get(), origin="lower")
+        axes[1].set_title("Aligned 局部", fontsize=10, fontweight="bold")
+        axes[1].axis("off")
+        self._draw_crosshair_on_axis(axes[1], aligned_patch.shape)
+        if aligned_lx is not None and aligned_ly is not None:
+            self._draw_four_pointed_star(axes[1], aligned_lx, aligned_ly, color="orange", linewidth=1.2, size=8, gap=2)
+
+        if rank_patch is not None:
+            axes[2].imshow(rank_patch, cmap="gray" if len(rank_patch.shape) == 2 else None, origin="lower")
+            axes[2].set_title("Rank Aligned 局部", fontsize=10, fontweight="bold")
+            axes[2].axis("off")
+            self._draw_crosshair_on_axis(axes[2], rank_patch.shape)
+            if rank_lx is not None and rank_ly is not None:
+                self._draw_four_pointed_star(axes[2], rank_lx, rank_ly, color="orange", linewidth=1.2, size=8, gap=2)
+        else:
+            # 无排序图时保持三栏布局，避免界面抖动
+            axes[2].text(0.5, 0.5, "未找到\nvariable_candidates_rank_aligned_to_a.png",
+                         ha="center", va="center", fontsize=9)
+            axes[2].set_title("Rank Aligned 局部", fontsize=10, fontweight="bold")
+            axes[2].axis("off")
 
         marker_text = "像素坐标: N/A"
         if x is not None and y is not None:
-            self._draw_four_pointed_star(ax, x, y, color="orange", linewidth=1.4, size=10, gap=3)
             marker_text = f"像素坐标: ({x:.1f}, {y:.1f})"
-
-        ax.set_xlabel("X (像素)")
-        ax.set_ylabel("Y (像素)")
-        ax.set_title(f"CSV候选 {index + 1}/{total}")
 
         # 标题附带关键列（精简展示）
         key_pairs = []
@@ -4608,6 +4761,7 @@ class FitsImageViewer:
         # 更新中心距离显示
         if hasattr(self, "current_center_distance_label"):
             if x is not None and y is not None:
+                h, w = aligned_data.shape[0], aligned_data.shape[1]
                 cx, cy = w / 2.0, h / 2.0
                 dist = float(np.hypot(x - cx, y - cy))
                 self.current_center_distance_label.config(text=f"{dist:.1f}")
@@ -4698,6 +4852,7 @@ class FitsImageViewer:
         self._csv_candidate_mode = False
         self._csv_candidates = []
         self._current_csv_candidate_index = 0
+        self._current_csv_output_dir = None
 
         # 清空坐标显示框
         if hasattr(self, 'coord_deg_entry'):
@@ -4945,6 +5100,7 @@ class FitsImageViewer:
             self._csv_candidate_mode = False
             self._csv_candidates = []
             self._current_csv_candidate_index = 0
+            self._current_csv_output_dir = None
 
             candidates = self._load_variable_candidates_nonref_only(output_dir)
             if not candidates:
@@ -4953,6 +5109,7 @@ class FitsImageViewer:
 
             self.logger.info("使用 CSV 检测结果，共 %d 条候选", len(candidates))
             self._csv_candidates = candidates
+            self._current_csv_output_dir = output_dir
             self._display_csv_candidate_by_index(0)
             return True
 
@@ -12214,6 +12371,7 @@ class FitsImageViewer:
             self._csv_candidate_mode = True
             self._csv_candidates = candidates
             self._current_csv_candidate_index = 0
+            self._current_csv_output_dir = potential_output_dir
 
             self.logger.info("成功加载 CSV 检测目标: %d 个", len(candidates))
             return True
