@@ -12,6 +12,7 @@ import platform
 import numpy as np
 import csv
 import time
+import shutil
 import threading
 import queue
 import json
@@ -1741,50 +1742,20 @@ class FitsImageViewer:
 
             # 构建输出目录路径
             output_region_dir = os.path.join(base_output_dir, relative_path)
-            file_basename = os.path.splitext(filename)[0]
+            file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
             potential_output_dir = os.path.join(output_region_dir, file_basename)
 
-            # 检查是否存在detection目录
+            # 检查输出目录是否存在
             if not os.path.exists(potential_output_dir) or not os.path.isdir(potential_output_dir):
                 return None
 
-            # 查找detection_开头的目录
-            detection_dir_path = None
-            try:
-                items = os.listdir(potential_output_dir)
-                for item_name in items:
-                    item_path = os.path.join(potential_output_dir, item_name)
-                    if os.path.isdir(item_path) and item_name.startswith('detection_'):
-                        detection_dir_path = item_path
-                        break
-            except Exception:
+            # 必须存在候选CSV才认为有结果
+            if not os.path.exists(os.path.join(potential_output_dir, "variable_candidates_nonref_only.csv")):
                 return None
 
-            if not detection_dir_path:
-                return None
-
-            # 分析 analysis.txt 文件（仅读取检测总数，不再做高分/阈值筛选）
-            detection_count = 0
-            is_empty_detection = False
-
-            try:
-                analysis_files = [f for f in os.listdir(detection_dir_path)
-                                if '_analysis' in f and f.endswith('.txt')]
-
-                if analysis_files:
-                    analysis_path = os.path.join(detection_dir_path, analysis_files[0])
-
-                    with open(analysis_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-
-                        count_match = re.search(r'检测到\s+(\d+)\s+个斑点', content)
-                        if count_match:
-                            detection_count = int(count_match.group(1))
-                            if detection_count == 0:
-                                is_empty_detection = True
-            except Exception as e:
-                import traceback
-                self.logger.debug(f"解析analysis.txt异常: {e}\n{traceback.format_exc()}")
+            # 使用 variable_candidates_nonref_only.csv 作为检测结果来源
+            detection_count = self._count_variable_candidates_nonref_only(potential_output_dir)
+            is_empty_detection = detection_count == 0
 
             return {
                 'has_result': True,
@@ -2227,60 +2198,27 @@ class FitsImageViewer:
 
                     self.logger.info(f"  输出天区目录: {output_region_dir}")
 
-                    file_basename = os.path.splitext(filename)[0]
+                    file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
                     potential_output_dir = os.path.join(output_region_dir, file_basename)
 
                     self.logger.info(f"  检查输出目录: {potential_output_dir}")
                     self.logger.info(f"  目录是否存在: {os.path.exists(potential_output_dir)}")
 
-                    # 检查是否存在detection目录
+                    # 检查是否存在候选CSV结果
                     has_diff_result = False
-                    detection_dir_path = None
                     if os.path.exists(potential_output_dir) and os.path.isdir(potential_output_dir):
-                        self.logger.info(f"  输出目录存在，查找detection子目录...")
-                        # 查找detection_开头的目录
-                        try:
-                            items = os.listdir(potential_output_dir)
-                            self.logger.info(f"  输出目录内容: {items}")
-
-                            for item_name in items:
-                                item_path = os.path.join(potential_output_dir, item_name)
-                                if os.path.isdir(item_path) and item_name.startswith('detection_'):
-                                    has_diff_result = True
-                                    detection_dir_path = item_path
-                                    self.logger.info(f"  ✓ 找到diff结果: {filename} -> {item_name}")
-                                    break
-                        except Exception as list_error:
-                            self.logger.error(f"  列出目录内容失败: {list_error}")
+                        csv_path = os.path.join(potential_output_dir, "variable_candidates_nonref_only.csv")
+                        has_diff_result = os.path.exists(csv_path)
+                        if has_diff_result:
+                            self.logger.info(f"  ✓ 找到diff结果CSV: {filename} -> {csv_path}")
                     else:
                         self.logger.debug(f"  输出目录不存在")
 
                     # 如果有diff结果，分析检测结果并标记颜色
-                    if has_diff_result and detection_dir_path:
-                        detection_count = 0
-                        is_empty_detection = False
-
-                        try:
-                            analysis_files = [f for f in os.listdir(detection_dir_path) if '_analysis' in f and f.endswith('.txt')]
-
-                            if analysis_files:
-                                analysis_path = os.path.join(detection_dir_path, analysis_files[0])
-                                self.logger.info(f"  分析文件: {analysis_path}")
-
-                                with open(analysis_path, 'r', encoding='utf-8') as f:
-                                    content = f.read()
-
-                                count_match = re.search(r'检测到\s+(\d+)\s+个斑点', content)
-                                if count_match:
-                                    detection_count = int(count_match.group(1))
-                                    self.logger.info(f"  检测数量: {detection_count}")
-                                    if detection_count == 0:
-                                        is_empty_detection = True
-                            else:
-                                self.logger.warning(f"  未找到 analysis.txt 文件")
-
-                        except Exception as analysis_error:
-                            self.logger.error(f"  分析检测结果失败: {analysis_error}")
+                    if has_diff_result:
+                        detection_count = self._count_variable_candidates_nonref_only(potential_output_dir)
+                        is_empty_detection = detection_count == 0
+                        self.logger.info(f"  CSV检测数量(variable_candidates_nonref_only.csv): {detection_count}")
 
                         current_tags = list(child_tags)
                         current_tags = [t for t in current_tags if t not in ["wcs_green", "wcs_orange", "diff_blue", "diff_purple", "diff_gold_red"]]
@@ -4134,11 +4072,11 @@ class FitsImageViewer:
             # 获取输出目录
             output_dir = self._get_diff_output_directory()
 
-            # 检查输出目录中是否已存在detection目录（避免重复执行）
-            detection_dirs = [d for d in os.listdir(output_dir) if d.startswith('detection_') and os.path.isdir(os.path.join(output_dir, d))]
-            if detection_dirs:
+            # 检查输出目录中是否已存在 CSV 结果（避免重复执行）
+            nonref_csv = os.path.join(output_dir, "variable_candidates_nonref_only.csv")
+            if os.path.exists(nonref_csv):
                 self.logger.info("=" * 60)
-                self.logger.info(f"检测到已有处理结果: {detection_dirs[0]}")
+                self.logger.info("检测到已有 CSV 处理结果: variable_candidates_nonref_only.csv")
                 self.logger.info(f"输出目录: {output_dir}")
                 self.logger.info("跳过diff操作，直接显示已有结果")
                 self.logger.info("=" * 60)
@@ -4163,99 +4101,148 @@ class FitsImageViewer:
                 self.parent_frame.after(0, lambda: self.diff_progress_label.config(text="", foreground="black"))
                 return
 
-            # 获取选择的降噪方式
-            noise_methods = []
-            if self.outlier_var.get():
-                noise_methods.append('outlier')
-            if self.hot_cold_var.get():
-                noise_methods.append('hot_cold')
-            if self.adaptive_median_var.get():
-                noise_methods.append('adaptive_median')
-
-            # 如果没有选择任何方式，不使用降噪（传入空列表）
-            if not noise_methods:
-                self.logger.info("未选择降噪方式，跳过降噪处理")
-
-            # 获取选择的对齐方式
-            alignment_method = self.alignment_var.get()
-            self.logger.info(f"选择的对齐方式: {alignment_method}")
-
-            # 获取是否去除亮线选项
-            remove_bright_lines = self.remove_lines_var.get()
-            self.logger.info(f"去除亮线: {'是' if remove_bright_lines else '否'}")
-
-            # 获取快速模式选项
-            fast_mode = self.fast_mode_var.get()
-            self.logger.info(f"快速模式: {'是' if fast_mode else '否'}")
-
-            # 获取锯齿比率参数
-            max_jaggedness_ratio = 2.0  # 默认值
-            try:
-                max_jaggedness_ratio = float(self.jaggedness_ratio_var.get())
-                if max_jaggedness_ratio <= 0:
-                    raise ValueError("锯齿比率必须大于0")
-                self.logger.info(f"锯齿比率: {max_jaggedness_ratio}")
-            except ValueError as e:
-                self.logger.warning(f"锯齿比率输入无效，使用默认值2.0: {e}")
-                max_jaggedness_ratio = 2.0
-
-            # 获取检测方法
-            detection_method = self.detection_method_var.get()
-            self.logger.info(f"检测方法: {detection_method}")
-
-            # 获取重叠边界剔除宽度（优先取GUI输入）
-            overlap_edge_exclusion_px = 40
-            try:
-                overlap_edge_exclusion_px = int(float(self.overlap_edge_exclusion_px_var.get()))
-                overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-            except Exception:
-                try:
-                    batch_settings = self.config_manager.get_batch_process_settings()
-                    overlap_edge_exclusion_px = int(batch_settings.get('overlap_edge_exclusion_px', 40))
-                    overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-                except Exception:
-                    overlap_edge_exclusion_px = 40
-            self.logger.info(f"重叠边界剔除宽度: {overlap_edge_exclusion_px}px")
-
-            # 获取WCS稀疏采样设置
-            wcs_use_sparse = self.wcs_sparse_var.get()
-            self.logger.info(f"WCS稀疏采样: {'启用' if wcs_use_sparse else '禁用'}")
-
-            # 获取生成GIF设置
-            generate_gif = self.generate_gif_var.get()
-            self.logger.info(f"生成GIF: {'启用' if generate_gif else '禁用'}")
-
-            # 获取科学图背景处理模式
-            science_bg_mode = self._get_science_bg_mode()
-            self.logger.info(f"科学图背景处理模式: {science_bg_mode}")
-            subpixel_refine_mode = self._get_subpixel_refine_mode()
-            self.logger.info(f"亚像素精修模式: {subpixel_refine_mode}")
-
-            # 获取差异计算方式
-            diff_calc_mode = self._get_diff_calc_mode()
-            self.logger.info(f"差异计算方式: {diff_calc_mode}")
-            apply_diff_postprocess = self.apply_diff_postprocess_var.get()
-            self.logger.info(f"difference后处理(去负值+中值): {'启用' if apply_diff_postprocess else '禁用'}")
-
-            # 更新进度：开始执行Diff
+            # 更新进度：开始执行替代流程
             filename = os.path.basename(self.selected_file_path)
             self.parent_frame.after(0, lambda f=filename: self.diff_progress_label.config(
-                text=f"正在执行Diff: {f}", foreground="blue"))
+                text=f"正在执行替代流程: {f}", foreground="blue"))
 
-            # 执行diff操作
-            result = self.diff_orb.process_diff(self.selected_file_path, template_file, output_dir,
-                                              noise_methods=noise_methods, alignment_method=alignment_method,
-                                              remove_bright_lines=remove_bright_lines,
-                                              fast_mode=fast_mode,
-                                              max_jaggedness_ratio=max_jaggedness_ratio,
-                                              detection_method=detection_method,
-                                              overlap_edge_exclusion_px=overlap_edge_exclusion_px,
-                                              wcs_use_sparse=wcs_use_sparse,
-                                              generate_gif=generate_gif,
-                                              science_bg_mode=science_bg_mode,
-                                              subpixel_refine_mode=subpixel_refine_mode,
-                                              diff_calc_mode=diff_calc_mode,
-                                              apply_diff_postprocess=apply_diff_postprocess)
+            # 使用 misaligned_fits/test.txt 对应命令流程
+            py = sys.executable or "python"
+            source_file_for_pipeline = self._prepare_safe_source_file_for_diff(self.selected_file_path, output_dir)
+            template_base_raw = os.path.splitext(os.path.basename(template_file))[0]
+            target_base_raw = os.path.splitext(os.path.basename(source_file_for_pipeline))[0]
+            template_base = self._sanitize_output_name(template_base_raw)
+            target_base = self._sanitize_output_name(target_base_raw)
+
+            template_stars = os.path.join(output_dir, f"{template_base}.stars.npz")
+            template_stars_all = os.path.join(output_dir, f"{template_base}.stars.all.npz")
+            proc_fit = os.path.join(output_dir, f"{target_base}.01proc.fit")
+            rp_fit = os.path.join(output_dir, f"{target_base}.02rp.fit")
+            rp_stars = os.path.join(output_dir, f"{target_base}.rp.stars.npz")
+            rp_stars_all = os.path.join(output_dir, f"{target_base}.rp.stars.all.npz")
+            align_npz = os.path.join(output_dir, f"{target_base}.rp.align.npz")
+            out_csv_rank = os.path.join(output_dir, "variable_candidates_rank.csv")
+            out_csv_nonref = os.path.join(output_dir, "variable_candidates_nonref_only.csv")
+            out_csv_ref_missing = os.path.join(output_dir, "variable_candidates_ref_only_missing_in_targets.csv")
+            out_png_rank = os.path.join(output_dir, "variable_candidates_rank.png")
+
+            commands = [
+                (
+                    "导出模板星点",
+                    [
+                        py, "D:/github/misaligned_fits/export_fits_stars.py",
+                        "--fits", template_file,
+                        "--out", template_stars,
+                        "--out-all", template_stars_all,
+                        "--uniform-grid-x", "7", "--uniform-grid-y", "7", "--uniform-per-cell", "100",
+                    ],
+                ),
+                (
+                    "预处理目标图",
+                    [
+                        py, "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+                        "-i", source_file_for_pipeline,
+                        "-o", proc_fit,
+                        "--box", "48", "--clip-sigma", "3.0", "--median-ksize", "3",
+                        "--denoise-sigma", "2.0", "--mix-alpha", "0.7", "--overwrite",
+                    ],
+                ),
+                (
+                    "WCS重投影并导出目标星点",
+                    [
+                        py, "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+                        "--a", template_file,
+                        "--b", proc_fit,
+                        "--out-fits", rp_fit,
+                        "--out-stars", rp_stars,
+                        "--out-stars-all", rp_stars_all,
+                        "--skip-median-filter", "--max-stars", "5000",
+                        "--uniform-grid-x", "7", "--uniform-grid-y", "7", "--uniform-per-cell", "100",
+                    ],
+                ),
+                (
+                    "求解对齐",
+                    [
+                        py, "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+                        "--a-stars", template_stars,
+                        "--b-stars", rp_stars,
+                        "--out", align_npz,
+                        "--radii", "24", "32", "40",
+                    ],
+                ),
+                (
+                    "渲染对齐结果",
+                    [
+                        py, "D:/github/misaligned_fits/render_alignment_outputs.py",
+                        "--a", template_file,
+                        "--b", rp_fit,
+                        "--align", align_npz,
+                        "--outdir", output_dir,
+                    ],
+                ),
+                (
+                    "生成候选目标CSV",
+                    [
+                        py, "D:/github/misaligned_fits/rank_variable_candidates.py",
+                        "--ref-stars-all", template_stars_all,
+                        "--target-stars-all", rp_stars_all,
+                        "--target-align", align_npz,
+                        "--out-csv", out_csv_rank,
+                        "--out-csv-nonref", out_csv_nonref,
+                        "--out-csv-ref-missing", out_csv_ref_missing,
+                        "--out-png", out_png_rank,
+                        "--min-observations", "2",
+                    ],
+                ),
+            ]
+
+            for step_name, cmd in commands:
+                self.parent_frame.after(
+                    0,
+                    lambda n=step_name: self.diff_progress_label.config(
+                        text=f"正在执行: {n}", foreground="blue"
+                    ),
+                )
+                self.logger.info("执行步骤[%s]: %s", step_name, " ".join(cmd))
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                if proc.returncode != 0:
+                    self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
+                    if proc.stdout:
+                        self.logger.error("stdout:\n%s", proc.stdout)
+                    if proc.stderr:
+                        self.logger.error("stderr:\n%s", proc.stderr)
+                    raise RuntimeError(f"{step_name}失败: {proc.stderr.strip() or proc.stdout.strip() or 'unknown'}")
+
+                # 关键产物存在性检查，避免到后续步骤才报“文件不存在”
+                if step_name == "导出模板星点":
+                    if not (os.path.exists(template_stars) and os.path.exists(template_stars_all)):
+                        raise RuntimeError(
+                            f"{step_name}完成但未生成输出文件: {template_stars} / {template_stars_all}"
+                        )
+                elif step_name == "预处理目标图":
+                    if not os.path.exists(proc_fit):
+                        raise RuntimeError(
+                            f"{step_name}完成但未生成输出文件: {proc_fit}。"
+                            f"当前输入源文件: {source_file_for_pipeline}。"
+                            "若原始文件名含特殊字符，系统已自动替换为下划线后继续处理。"
+                        )
+                elif step_name == "WCS重投影并导出目标星点":
+                    if not (os.path.exists(rp_fit) and os.path.exists(rp_stars) and os.path.exists(rp_stars_all)):
+                        raise RuntimeError(
+                            f"{step_name}完成但输出不完整: {rp_fit} / {rp_stars} / {rp_stars_all}"
+                        )
+                elif step_name == "求解对齐":
+                    if not os.path.exists(align_npz):
+                        raise RuntimeError(f"{step_name}完成但未生成输出文件: {align_npz}")
+
+            # 用 variable_candidates_nonref_only.csv 作为检测结果来源
+            detected_count = self._count_variable_candidates_nonref_only(output_dir)
+            result = {
+                "success": True,
+                "alignment_success": True,
+                "new_bright_spots": detected_count,
+                "output_directory": output_dir,
+            }
 
             if result and result.get('success'):
                 # 更新进度：处理完成
@@ -4396,9 +4383,13 @@ class FitsImageViewer:
         if self.selected_file_path:
             filename = os.path.basename(self.selected_file_path)
             name_without_ext = os.path.splitext(filename)[0]
-            subdir_name = name_without_ext
+            subdir_name = self._sanitize_output_name(name_without_ext)
         else:
             subdir_name = "diff_result"
+
+        # 目录段名做安全化，避免特殊字符影响外部脚本
+        system_name = self._sanitize_output_name(system_name)
+        sky_region = self._sanitize_output_name(sky_region)
 
         # 构建完整输出目录：根目录/系统名/日期/天区/文件名/
         output_dir = os.path.join(base_output_dir, system_name, date_str, sky_region, subdir_name)
@@ -4409,6 +4400,62 @@ class FitsImageViewer:
         self.logger.info(f"diff输出目录: {output_dir}")
         self.logger.info(f"目录结构: {system_name}/{date_str}/{sky_region}/{subdir_name}")
         return output_dir
+
+    def _sanitize_output_name(self, name: str) -> str:
+        """将名称中的特殊字符替换为下划线，避免外部脚本路径兼容问题。"""
+        if not name:
+            return "unnamed"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
+        safe = re.sub(r"_+", "_", safe).strip("._")
+        return safe or "unnamed"
+
+    def _prepare_safe_source_file_for_diff(self, source_path: str, output_dir: str) -> str:
+        """若源文件名包含特殊字符，则复制为安全文件名并返回新路径。"""
+        try:
+            if not source_path or not os.path.exists(source_path):
+                return source_path
+            src_name = os.path.basename(source_path)
+            src_stem, src_ext = os.path.splitext(src_name)
+            safe_stem = self._sanitize_output_name(src_stem)
+            safe_name = f"{safe_stem}{src_ext or '.fit'}"
+            if safe_name == src_name:
+                return source_path
+
+            safe_source_path = os.path.join(output_dir, safe_name)
+            if os.path.abspath(safe_source_path) != os.path.abspath(source_path):
+                if not os.path.exists(safe_source_path):
+                    shutil.copy2(source_path, safe_source_path)
+                self.logger.warning(
+                    "检测到源文件名包含特殊字符，已自动复制为安全文件名并继续处理: %s -> %s",
+                    source_path,
+                    safe_source_path,
+                )
+            return safe_source_path
+        except Exception as e:
+            self.logger.warning("创建安全源文件名失败，回退原文件继续处理: %s", e)
+            return source_path
+
+    def _count_variable_candidates_nonref_only(self, output_dir: str) -> int:
+        """统计 variable_candidates_nonref_only.csv 的候选数量。"""
+        csv_path = os.path.join(output_dir, "variable_candidates_nonref_only.csv")
+        if not os.path.exists(csv_path):
+            return 0
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                count = 0
+                for row in reader:
+                    if row and any(str(v).strip() for v in row.values()):
+                        count += 1
+                return count
+        except Exception:
+            # 兜底：按文本行数估算（减去表头）
+            try:
+                with open(csv_path, "r", encoding="utf-8") as f:
+                    lines = [ln for ln in f.readlines() if ln.strip()]
+                return max(0, len(lines) - 1)
+            except Exception:
+                return 0
 
     def _auto_load_diff_results(self, file_path):
         """自动检查并加载diff结果"""
@@ -4422,23 +4469,16 @@ class FitsImageViewer:
                 self._clear_diff_display()
                 return
 
-            # 检查输出目录中是否存在detection目录
-            try:
-                detection_dirs = [d for d in os.listdir(output_dir)
-                                if d.startswith('detection_') and os.path.isdir(os.path.join(output_dir, d))]
-            except Exception as e:
-                self.logger.info(f"读取输出目录失败，清除显示: {str(e)}")
-                self._clear_diff_display()
-                return
-
-            if not detection_dirs:
-                self.logger.info(f"未找到detection目录，清除显示")
+            # 检查输出目录中是否存在候选CSV
+            csv_path = os.path.join(output_dir, "variable_candidates_nonref_only.csv")
+            if not os.path.exists(csv_path):
+                self.logger.info(f"未找到 variable_candidates_nonref_only.csv，清除显示")
                 self._clear_diff_display()
                 return
 
             # 找到了diff结果
             self.logger.info("=" * 60)
-            self.logger.info(f"发现已有diff结果: {detection_dirs[0]}")
+            self.logger.info("发现已有diff结果: variable_candidates_nonref_only.csv")
             self.logger.info(f"输出目录: {output_dir}")
             self.logger.info("=" * 60)
 
@@ -4741,7 +4781,14 @@ class FitsImageViewer:
             # 查找detection目录
             detection_dirs = list(Path(output_dir).glob("detection_*"))
             if not detection_dirs:
-                self.logger.info("未找到detection目录")
+                candidate_count = self._count_variable_candidates_nonref_only(output_dir)
+                if candidate_count > 0:
+                    self.logger.info(
+                        "未找到detection目录，当前检测结果来源为 variable_candidates_nonref_only.csv（%d 条）",
+                        candidate_count,
+                    )
+                else:
+                    self.logger.info("未找到detection目录")
                 return False
 
             # 使用最新的detection目录
@@ -12029,7 +12076,7 @@ class FitsImageViewer:
             # 构建输出目录路径
             filename = os.path.basename(file_path)
             output_region_dir = os.path.join(base_output_dir, relative_path)
-            file_basename = os.path.splitext(filename)[0]
+            file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
             potential_output_dir = os.path.join(output_region_dir, file_basename)
 
             # 检查是否存在detection目录

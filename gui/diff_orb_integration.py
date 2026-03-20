@@ -22,7 +22,7 @@ class DiffOrbIntegration:
         self.logger = logging.getLogger(__name__)
         self.filename_parser = FITSFilenameParser()
         self.gui_callback = gui_callback
-
+    
     def is_available(self) -> bool:
         """模板查找等基础能力是否可用（不表示 Diff 流水线已实现）。"""
         return True
@@ -34,40 +34,40 @@ class DiffOrbIntegration:
     def can_process_file(self, file_path: str, template_dir: str) -> Tuple[bool, str]:
         if not os.path.exists(file_path):
             return False, "文件不存在"
-
+        
         if not os.path.exists(template_dir):
             return False, "模板目录不存在"
-
+        
         parsed_info = self.filename_parser.parse_filename(file_path)
         if not parsed_info:
             return False, "无法解析文件名"
-
+        
         if "tel_name" not in parsed_info:
             return False, "文件名中缺少望远镜信息"
-
+        
         tel_name = parsed_info["tel_name"]
         k_number = parsed_info.get("k_full", parsed_info.get("k_number", ""))
 
         template_file = self.filename_parser.find_template_file(template_dir, tel_name, k_number)
         if not template_file:
             return False, f"未找到匹配的模板文件 (tel_name: {tel_name}, k_number: {k_number})"
-
+        
         return True, f"找到模板文件: {os.path.basename(template_file)}"
-
+    
     def find_template_file(self, download_file: str, template_dir: str) -> Optional[str]:
         try:
             parsed_info = self.filename_parser.parse_filename(download_file)
             if not parsed_info or "tel_name" not in parsed_info:
                 self.logger.error("无法从文件名中提取信息: %s", download_file)
                 return None
-
+            
             tel_name = parsed_info["tel_name"]
             k_number = parsed_info.get("k_full", parsed_info.get("k_number", ""))
 
             template_file = self.filename_parser.find_template_file(
                 template_dir, tel_name, k_number
             )
-
+            
             if template_file:
                 self.logger.info(
                     "为 %s 找到模板文件: %s",
@@ -78,13 +78,13 @@ class DiffOrbIntegration:
                 self.logger.warning(
                     "未找到匹配的模板文件: tel_name=%s, k_number=%s", tel_name, k_number
                 )
-
+            
             return template_file
-
+            
         except Exception as e:
             self.logger.error("查找模板文件时出错: %s", e)
             return None
-
+    
     def process_diff(self, download_file: str, template_file: str, output_dir: Optional[str] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
         """
         Diff 流水线占位：尚未实现，始终返回 None。

@@ -9,6 +9,7 @@ import sys
 import json
 import logging
 import subprocess
+import shlex
 import re
 from pathlib import Path
 from typing import Optional, Dict, Tuple
@@ -163,15 +164,26 @@ class ASTAPProcessor:
         """
         try:
             self.logger.info(f"开始执行ASTAP命令: {command}")
-            
-            # 执行命令
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5分钟超时
-            )
+
+            # 优先以参数列表执行，降低 shell 特殊字符解析风险
+            try:
+                argv = shlex.split(command, posix=False)
+                result = subprocess.run(
+                    argv,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,  # 5分钟超时
+                )
+            except Exception as split_error:
+                self.logger.warning(f"ASTAP命令参数解析失败，回退 shell 执行: {split_error}")
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,  # 5分钟超时
+                )
             
             if result.returncode == 0:
                 self.logger.info("ASTAP命令执行成功")

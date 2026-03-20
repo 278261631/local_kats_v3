@@ -15,6 +15,7 @@ from pathlib import Path
 
 import time
 import json
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 import shutil
 
@@ -2447,6 +2448,12 @@ class FitsWebDownloaderGUI:
         """输出选中文件的cp命令"""
         if not selected_files:
             return
+        def _safe_segment(seg: str) -> str:
+            import re
+            seg = str(seg or "").strip()
+            seg = re.sub(r"[\\/:\*\?\"<>\|\s]+", "_", seg)
+            seg = re.sub(r"_+", "_", seg).strip("._")
+            return seg or "unknown"
 
         # 获取当前选择的参数
         selections = self.url_builder.get_current_selections()
@@ -2456,10 +2463,11 @@ class FitsWebDownloaderGUI:
         # 从k_text中提取天区前缀，例如从"K025-1"提取"K025"
         import re
         match = re.search(r'(K\d{3})', k_text)
-        sky_region_prefix = match.group(1) if match else k_text
+        sky_region_prefix = _safe_segment(match.group(1) if match else k_text)
 
         # 转换系统名称为小写
-        system_name = telescope_name.lower()
+        system_name = _safe_segment(telescope_name).lower()
+        date_str = _safe_segment(date_str)
 
         self._log("=" * 50)
         self._log(f"选中天区 {k_text} 的文件cp命令:")
@@ -2468,19 +2476,18 @@ class FitsWebDownloaderGUI:
         serv_debug_path = f'/data/{system_name}/20251332/{sky_region_prefix}/'
 
         # 输出创建目录命令
-        mkdir_command = f'mkdir -p {serv_debug_path}'
+        mkdir_command = f"mkdir -p {shlex.quote(serv_debug_path)}"
         self._log_plain(mkdir_command)
 
         for filename in selected_files:
-            # URL解码文件名，去除%20等编码字符
-            import urllib.parse
-            decoded_filename = urllib.parse.unquote(filename)
+            # 保持与下载落盘一致：不解码%20等编码字符
+            normalized_filename = str(filename).strip()
 
             # 构建原始文件路径
-            original_file_path = f'/data/{system_name}/{date_str}/{sky_region_prefix}/{decoded_filename}'
+            original_file_path = f"/data/{system_name}/{date_str}/{sky_region_prefix}/{normalized_filename}"
 
             # 生成cp命令
-            cp_command = f'cp "{original_file_path}" {serv_debug_path}'
+            cp_command = f"cp {shlex.quote(original_file_path)} {shlex.quote(serv_debug_path)}"
 
             # 使用不带时间前缀的日志输出cp命令
             self._log_plain(cp_command)
@@ -2489,13 +2496,11 @@ class FitsWebDownloaderGUI:
 
         # 另一种调试
         for filename in selected_files:
-            # URL解码文件名，去除%20等编码字符
-            import urllib.parse
-            decoded_filename = urllib.parse.unquote(filename)
-            decoded_filename_no_ext = decoded_filename.replace(".fit", "").replace("_No Filter_", "_C_")
+            normalized_filename = str(filename).strip()
+            decoded_filename_no_ext = normalized_filename.replace(".fit", "").replace("_No Filter_", "_C_")
 
             # 构建原始文件路径
-            original_file_path = f'/data/{system_name}/20251332/{sky_region_prefix}/{decoded_filename}'
+            original_file_path = f"/data/{system_name}/20251332/{sky_region_prefix}/{normalized_filename}"
             fix_cat_path = f'/data/{system_name}/20251332/{sky_region_prefix}/redux/{decoded_filename_no_ext}_pp.diff1.fixedsrc.cat'
             mo_cat_path = f'/data/{system_name}/20251332/{sky_region_prefix}/redux/{decoded_filename_no_ext}_pp.diff1.mo.cat'
 
@@ -2519,13 +2524,11 @@ class FitsWebDownloaderGUI:
         self._log("=" * 50)
 
         for filename in selected_files:
-            # URL解码文件名，去除%20等编码字符
-            import urllib.parse
-            decoded_filename = urllib.parse.unquote(filename)
-            decoded_filename_no_ext = decoded_filename.replace(".fit", "").replace("_No Filter_", "_C_")
+            normalized_filename = str(filename).strip()
+            decoded_filename_no_ext = normalized_filename.replace(".fit", "").replace("_No Filter_", "_C_")
 
             # 构建原始文件路径
-            original_file_path = f'/data/{system_name}/{date_str}/{sky_region_prefix}/{decoded_filename}'
+            original_file_path = f"/data/{system_name}/{date_str}/{sky_region_prefix}/{normalized_filename}"
             fix_cat_path = f'/data/{system_name}/{date_str}/{sky_region_prefix}/redux/{decoded_filename_no_ext}_pp.diff1.fixedsrc.cat'
             mo_cat_path = f'/data/{system_name}/{date_str}/{sky_region_prefix}/redux/{decoded_filename_no_ext}_pp.diff1.mo.cat'
 
