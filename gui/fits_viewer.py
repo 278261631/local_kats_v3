@@ -86,12 +86,6 @@ class FitsImageViewer:
         self.get_diff_output_dir_callback = get_diff_output_dir_callback
         self.get_url_selections_callback = get_url_selections_callback
         self.log_callback = log_callback  # 日志回调函数，用于输出到日志标签页
-        # 强制在线查询开关（临时搁置本地库时置为True）
-        # 默认关闭，由需要的功能显式开启；否则会覆盖本地/MPC/pympc 等设置
-        self._force_online_query = False
-
-        # Local query override flag (used by batch-local button/auto-chain)
-        self._use_local_query_override = False
 
         # 本地目录缓存，避免重复读取大文件
         self._local_asteroid_cache = None  # (path, table)
@@ -486,26 +480,6 @@ class FitsImageViewer:
         # 变星server批量查询线程数，在高级设置中配置
         self.batch_vsx_server_threads_var = tk.StringVar(value="3")
 
-        # 批量本地查询按钮（离线）
-        self.batch_local_query_button = ttk.Button(
-            toolbar_frame6, text="批量本地查询(离线)",
-            command=self._batch_query_local_asteroids_and_variables,
-            state="disabled"
-        )
-        self.batch_local_query_button.pack(side=tk.LEFT, padx=(0, 5))
-
-        # 批量查询按钮
-        self.batch_query_button = ttk.Button(toolbar_frame6, text="批量查询",
-                                            command=self._batch_query_asteroids_and_variables,
-                                            state="disabled")
-        self.batch_query_button.pack(side=tk.LEFT, padx=(5, 5))
-
-        # pympc批量查询按钮（多线程）
-        self.batch_pympc_query_button = ttk.Button(toolbar_frame6, text="pympc批量查询",
-                                                   command=self._batch_pympc_query,
-                                                   state="disabled")
-        self.batch_pympc_query_button.pack(side=tk.LEFT, padx=(5, 5))
-
         # pympc server批量查询按钮（多线程）
         self.batch_pympc_server_query_button = ttk.Button(
             toolbar_frame6,
@@ -513,13 +487,7 @@ class FitsImageViewer:
             command=self._batch_pympc_server_query,
             state="disabled"
         )
-        self.batch_pympc_server_query_button.pack(side=tk.LEFT, padx=(5, 5))
-
-        # 批量变星查询按钮（跳过非GOOD和已有小行星结果的）
-        self.batch_vsx_query_button = ttk.Button(toolbar_frame6, text="批量变星查询",
-                                                  command=self._batch_vsx_query,
-                                                  state="disabled")
-        self.batch_vsx_query_button.pack(side=tk.LEFT, padx=(5, 5))
+        self.batch_pympc_server_query_button.pack(side=tk.LEFT, padx=(0, 5))
 
         # 变星server批量查询按钮（调用本地server接口）
         self.batch_vsx_server_query_button = ttk.Button(
@@ -531,7 +499,7 @@ class FitsImageViewer:
         self.batch_vsx_server_query_button.pack(side=tk.LEFT, padx=(5, 5))
         
         # 记录按钮初始状态
-        self.logger.info(f"批量变星查询按钮已创建，初始状态: {self.batch_vsx_query_button['state']}")
+        self.logger.info(f"变星server批量查询按钮已创建，初始状态: {self.batch_vsx_server_query_button['state']}")
 
         # 批量删除查询结果按钮
         self.batch_delete_query_button = ttk.Button(toolbar_frame6, text="删除查询结果",
@@ -539,8 +507,8 @@ class FitsImageViewer:
                                                     state="disabled")
         self.batch_delete_query_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        # Skybot查询按钮 (使用tk.Button以支持背景色)
-        self.skybot_button = tk.Button(toolbar_frame6, text="查询小行星(Skybot)",
+        # 小行星查询按钮（仅 server 版本）
+        self.skybot_button = tk.Button(toolbar_frame6, text="查询小行星(server)",
                                        command=self._query_skybot, state="disabled",
                                        bg="#FFA500", relief=tk.RAISED, padx=5, pady=2)  # 默认橙黄色(未查询)
         self.skybot_button.pack(side=tk.LEFT, padx=(5, 5))
@@ -556,8 +524,8 @@ class FitsImageViewer:
         self.vsx_mag_limit_entry = ttk.Entry(toolbar_frame6, textvariable=self.vsx_mag_limit_var, width=6)
         self.vsx_mag_limit_entry.pack(side=tk.LEFT, padx=(0, 5))
 
-        # 变星查询按钮 (使用tk.Button以支持背景色)
-        self.vsx_button = tk.Button(toolbar_frame6, text="查询变星(VSX)",
+        # 变星查询按钮（仅 server 版本）
+        self.vsx_button = tk.Button(toolbar_frame6, text="查询变星(server)",
                                      command=self._query_vsx, state="disabled",
                                      bg="#FFA500", relief=tk.RAISED, padx=5, pady=2)  # 默认橙黄色(未查询)
         self.vsx_button.pack(side=tk.LEFT, padx=(5, 5))
@@ -2007,9 +1975,10 @@ class FitsImageViewer:
             self.selected_file_path = None
             self.display_button.config(state="disabled")
             self.diff_button.config(state="disabled")
-            self.batch_query_button.config(state="disabled")
-            if hasattr(self, 'batch_local_query_button'):
-                self.batch_local_query_button.config(state="disabled")
+            if hasattr(self, 'batch_pympc_server_query_button'):
+                self.batch_pympc_server_query_button.config(state="disabled")
+            if hasattr(self, 'batch_vsx_server_query_button'):
+                self.batch_vsx_server_query_button.config(state="disabled")
             if self.astap_processor:
                 self.astap_button.config(state="disabled")
             if self.wcs_checker:
@@ -2091,19 +2060,12 @@ class FitsImageViewer:
                 except Exception:
                     pass
 
-            # 启用批量查询按钮（单个文件也支持批量查询其所有检测目标）
-            self.batch_query_button.config(state="normal")
-            if hasattr(self, 'batch_local_query_button'):
-                self.batch_local_query_button.config(state="normal")
-            if hasattr(self, 'batch_pympc_query_button'):
-                self.batch_pympc_query_button.config(state="normal")
+            # 启用 server 批量查询按钮（单个文件也支持批量查询其所有检测目标）
             if hasattr(self, 'batch_pympc_server_query_button'):
                 self.batch_pympc_server_query_button.config(state="normal")
-            if hasattr(self, 'batch_vsx_query_button'):
-                self.batch_vsx_query_button.config(state="normal")
-                self.logger.info("批量变星查询按钮状态更新: 启用 (选中FITS文件)")
             if hasattr(self, 'batch_vsx_server_query_button'):
                 self.batch_vsx_server_query_button.config(state="normal")
+                self.logger.info("变星server批量查询按钮状态更新: 启用 (选中FITS文件)")
             # 启用批量删除查询结果按钮
             self.batch_delete_query_button.config(state="normal")
         else:
@@ -2123,33 +2085,19 @@ class FitsImageViewer:
             # 检查是否选中了目录，如果是则启用批量查询按钮
             # 包括：天区(region)、日期(date)、望远镜(telescope) 以及根目录(root_dir，例如“下载目录”根节点)
             if values and any(tag in tags for tag in ["region", "date", "telescope", "root_dir"]):
-                self.batch_query_button.config(state="normal")
-                if hasattr(self, 'batch_local_query_button'):
-                    self.batch_local_query_button.config(state="normal")
-                if hasattr(self, 'batch_pympc_query_button'):
-                    self.batch_pympc_query_button.config(state="normal")
                 if hasattr(self, 'batch_pympc_server_query_button'):
                     self.batch_pympc_server_query_button.config(state="normal")
-                if hasattr(self, 'batch_vsx_query_button'):
-                    self.batch_vsx_query_button.config(state="normal")
-                    self.logger.info("批量变星查询按钮状态更新: 启用 (选中目录节点)")
                 if hasattr(self, 'batch_vsx_server_query_button'):
                     self.batch_vsx_server_query_button.config(state="normal")
+                    self.logger.info("变星server批量查询按钮状态更新: 启用 (选中目录节点)")
                 self.batch_delete_query_button.config(state="normal")
                 self.file_info_label.config(text="已选择目录 [可批量查询]")
             else:
-                self.batch_query_button.config(state="disabled")
-                if hasattr(self, 'batch_local_query_button'):
-                    self.batch_local_query_button.config(state="disabled")
-                if hasattr(self, 'batch_pympc_query_button'):
-                    self.batch_pympc_query_button.config(state="disabled")
                 if hasattr(self, 'batch_pympc_server_query_button'):
                     self.batch_pympc_server_query_button.config(state="disabled")
-                if hasattr(self, 'batch_vsx_query_button'):
-                    self.batch_vsx_query_button.config(state="disabled")
-                    self.logger.info("批量变星查询按钮状态更新: 禁用 (未选中有效文件或目录)")
                 if hasattr(self, 'batch_vsx_server_query_button'):
                     self.batch_vsx_server_query_button.config(state="disabled")
+                    self.logger.info("变星server批量查询按钮状态更新: 禁用 (未选中有效文件或目录)")
                 self.batch_delete_query_button.config(state="disabled")
                 self.file_info_label.config(text="未选择FITS文件")
 
@@ -7348,10 +7296,10 @@ class FitsImageViewer:
             self.logger.error(f"应用DSS图像翻转失败: {str(e)}", exc_info=True)
 
     def _query_skybot(self, use_pympc=False, skip_gui=False):
-        """使用当前配置/覆盖逻辑查询小行星（Skybot / 本地MPCORB / pympc）。
+        """查询当前目标的小行星（仅 server 版本，pympc server）。
 
         Args:
-            use_pympc: 是否强制使用pympc查询
+            use_pympc: 兼容旧参数，当前保留但不再影响后端选择
             skip_gui: 是否跳过GUI操作（在非主线程调用时应设为True）
         """
         try:
@@ -7447,66 +7395,17 @@ class FitsImageViewer:
                 self.skybot_result_label.config(text="查询中...", foreground="orange")
                 self.skybot_result_label.update_idletasks()  # 强制刷新界面
 
-            # 执行小行星查询（根据设置/覆盖开关和高级选项选择后端）
-            # 1) 先读取配置中的小行星查询方式: auto / skybot / local / pympc
-            method = "auto"
-            if use_pympc:
-                method = "pympc"
-            elif self.config_manager:
-                try:
-                    ls = self.config_manager.get_local_catalog_settings() or {}
-                    method_cfg = str(ls.get("asteroid_query_method", "auto")).lower()
-                    if method_cfg in ("auto", "skybot", "local", "pympc"):
-                        method = method_cfg
-                except Exception:
-                    pass
-
-            # 2) 应用临时覆盖开关
-            force_online = getattr(self, '_force_online_query', False)
-            use_local_override = getattr(self, '_use_local_query_override', False)
-
-            if force_online:
-                # 强制在线: 一律使用 Skybot
-                method_effective = "skybot"
-            elif use_local_override:
-                # 临时强制本地: auto -> local，其它保持用户显式选择
-                if method == "auto":
-                    method_effective = "local"
-                else:
-                    method_effective = method
-            else:
-                method_effective = method
-
-            # 3) auto 模式下沿用原有逻辑: 按钮"手动按钮本地查询"为 True 时走本地MPCORB，否则走Skybot
-            if method_effective == "auto" and self.config_manager:
-                try:
-                    ls = self.config_manager.get_local_catalog_settings() or {}
-                    if bool(ls.get("buttons_use_local_query", False)):
-                        method_effective = "local"
-                    else:
-                        method_effective = "skybot"
-                except Exception:
-                    method_effective = "skybot"
-
-            # 4) 根据最终方式选择后端并输出模式日志
-            if method_effective == "local":
-                source = "离线MPCORB"
-            elif method_effective == "pympc":
-                source = "pympc"
-            else:
-                source = "Skybot"
+            # 仅保留 server 版本：统一走 pympc server
+            source = "pympc server"
 
             mode_msg = f"查询模式: {source}"
             self.logger.info(mode_msg)
             if self.log_callback:
                 self.log_callback(mode_msg, "INFO")
 
-            if method_effective == "local":
-                results = self._perform_local_skybot_query(ra, dec, utc_time, mpc_code, latitude, longitude, search_radius)
-            elif method_effective == "pympc":
-                results = self._perform_pympc_query(ra, dec, utc_time, mpc_code, latitude, longitude, search_radius)
-            else:
-                results = self._perform_skybot_query(ra, dec, utc_time, mpc_code, latitude, longitude, search_radius)
+            results = self._perform_pympc_server_query(
+                ra, dec, utc_time, mpc_code, latitude, longitude, search_radius
+            )
 
             if results is not None:
                 # 保存查询结果到当前cutout
@@ -7684,26 +7583,11 @@ class FitsImageViewer:
                 pass
 
     def _query_skybot_force_online_current(self):
-        """仅使用 Skybot 在线查询当前检测结果的小行星。
-
-        无论高级设置里配置的是 auto / local / pympc，本按钮都
-        只对“当前 cutout”执行一次 Skybot 在线查询，不影响其它
-        查询按钮和批量查询的行为。
-        """
-        # 仅作用于当前cutout，复用 _query_skybot 的全部参数/结果处理逻辑
-        # 通过临时将 _force_online_query 置为 True 来强制使用 Skybot
-        old_force_online = getattr(self, "_force_online_query", False)
-        try:
-            self._force_online_query = True
-            self.logger.info("[仅Skybot查当前] 临时强制使用 Skybot 在线查询当前检测结果")
-            if self.log_callback:
-                self.log_callback("[仅Skybot查当前] 临时强制使用 Skybot 在线查询当前检测结果", "INFO")
-
-            # 直接复用标准的小行星查询流程（仅当前 cutout）
-            self._query_skybot()
-        finally:
-            # 恢复之前的强制在线标志，避免影响后续其它查询逻辑
-            self._force_online_query = old_force_online
+        """保留兼容入口：当前统一使用 server 版查询。"""
+        self.logger.info("[仅Skybot查当前] 已切换为 server 版小行星查询")
+        if self.log_callback:
+            self.log_callback("[仅Skybot查当前] 已切换为 server 版小行星查询", "INFO")
+        self._query_skybot()
 
 
     def _perform_skybot_query(self, ra, dec, utc_time, mpc_code, latitude, longitude, search_radius=0.01):
@@ -7999,7 +7883,7 @@ class FitsImageViewer:
 
 
 
-    def _query_vsx(self, skip_gui=False, use_server=False):
+    def _query_vsx(self, skip_gui=False, use_server=True):
         """使用VSX查询变星数据
 
         Args:
@@ -8007,6 +7891,7 @@ class FitsImageViewer:
             use_server: 是否使用本地变星server接口查询
         """
         try:
+            use_server = True
             # 立即重置结果标签，确保用户能看到查询状态变化
             if not skip_gui:
                 self.vsx_result_label.config(text="准备中...", foreground="gray")
@@ -8070,25 +7955,8 @@ class FitsImageViewer:
                 self.vsx_result_label.config(text="查询中...", foreground="orange")
                 self.vsx_result_label.update_idletasks()  # 强制刷新界面
 
-            # 执行VSX查询（根据设置/覆盖开关选择本地/在线/本地server）
-            force_online = getattr(self, '_force_online_query', False)
-            use_local = getattr(self, '_use_local_query_override', False)
-            if use_server:
-                results = self._perform_vsx_server_query(ra, dec, mag_limit, search_radius)
-            elif force_online:
-                use_local = False
-            else:
-                if (not use_local) and self.config_manager:
-                    try:
-                        _ls = self.config_manager.get_local_catalog_settings()
-                        if bool((_ls or {}).get("buttons_use_local_query", False)):
-                            use_local = True
-                    except Exception:
-                        pass
-                if use_local:
-                    results = self._perform_local_vsx_query(ra, dec, mag_limit, search_radius)
-                else:
-                    results = self._perform_vsx_query(ra, dec, mag_limit, search_radius)
+            # 仅保留 server 版本：统一走变星server
+            results = self._perform_vsx_server_query(ra, dec, mag_limit, search_radius)
 
             if results is not None:
                 # 保存查询结果到当前cutout
@@ -10639,74 +10507,23 @@ class FitsImageViewer:
 
         return deleted_count
     def _batch_query_local_asteroids_and_variables(self):
-        """   :   batch
-           Local
-        """
-        prev = getattr(self, "_use_local_query_override", False)
-        self._use_local_query_override = True
-        try:
-            return self._batch_query_asteroids_and_variables()
-        finally:
-            self._use_local_query_override = prev
-
+        """已移除：旧离线/混合批量查询入口；统一转到 server 版。"""
+        return self._batch_query_asteroids_and_variables()
 
     def _batch_query_asteroids_and_variables(self):
-        """批量查询小行星和变星"""
+        """仅保留 server 版：先 pympc server，再变星 server。"""
+        def _run_vsx_after_pympc():
+            try:
+                self._batch_vsx_server_query()
+            except Exception as e:
+                self.logger.error(f"变星server批量查询失败: {e}", exc_info=True)
+
         try:
-            # 获取当前选中的节点
-            selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showwarning("警告", "请先选择一个目录或文件")
-                return
-
-            item = selection[0]
-            values = self.directory_tree.item(item, "values")
-            tags = self.directory_tree.item(item, "tags")
-
-            if not values:
-                messagebox.showwarning("警告", "请选择一个目录或文件")
-                return
-
-            # 判断是文件还是目录
-            is_file = "fits_file" in tags
-
-            if is_file:
-                # 选中的是单个文件
-                file_path = values[0]
-
-                # 检查文件是否有diff结果
-                if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                    self.logger.warning("该文件没有检测结果，跳过批量查询")
-                    return
-
-                # 以前这里会检查 high_score_count 并阻止 high_score>=8 的文件进入批量查询，
-                # 现在改为：只要有检测结果，就允许用户批量查询；具体要查哪些目标由手动 GOOD 标记控制。
-                # high_score_count = self._get_high_score_count_from_current_detection()
-                # if high_score_count >= 8:
-                #     self.logger.info(f"该文件的high_score_count为{high_score_count}，不符合批量查询条件（需要<8）")
-                #     return
-
-                # 执行单文件批量查询（内部只对手动标记为 GOOD 的目标发起查询）
-                self._execute_single_file_batch_query()
-
-            else:
-                # 选中的是目录
-                directory = values[0]
-
-                # 收集目录下所有需要处理的文件
-                files_to_process = self._collect_files_for_batch_query(directory)
-
-                if not files_to_process:
-                    self.logger.info("没有找到需要查询的文件")
-                    return
-
-                # 执行批量查询
-                self._execute_batch_query(files_to_process)
-
-        except Exception as e:
-            error_msg = f"批量查询失败: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            messagebox.showerror("错误", error_msg)
+            return self._batch_pympc_server_query(on_complete=_run_vsx_after_pympc)
+        except TypeError:
+            # 兼容极端情况下回调参数不被接受
+            self._batch_pympc_server_query()
+            return self._batch_vsx_server_query()
 
     def _execute_single_file_batch_query(self):
         """对当前文件的所有检测目标执行批量查询"""
@@ -11140,8 +10957,9 @@ class FitsImageViewer:
         """执行批量 pympc server 小行星查询"""
         return self._batch_pympc_query(on_complete=on_complete, use_server=True)
 
-    def _batch_pympc_query(self, on_complete=None, use_server=False):
-        """执行批量pympc小行星查询"""
+    def _batch_pympc_query(self, on_complete=None, use_server=True):
+        """执行批量 pympc server 小行星查询（仅 server 版本）"""
+        use_server = True
         def _safe_invoke_on_complete():
             if callable(on_complete):
                 try:
@@ -11173,17 +10991,17 @@ class FitsImageViewer:
             saved_cutout_index = getattr(self, '_current_cutout_index', 0)
             saved_detection_result_dir = getattr(self, '_current_detection_result_dir', None)
 
-            backend_label = "pympc server批量查询" if use_server else "pympc批量查询"
-            query_runner = self._perform_pympc_server_query if use_server else self._perform_pympc_query
+            backend_label = "pympc server批量查询"
+            query_runner = self._perform_pympc_server_query
 
             # 获取线程数
             try:
-                thread_var = self.batch_pympc_server_threads_var if use_server else self.batch_query_threads_var
+                thread_var = self.batch_pympc_server_threads_var
                 thread_count = int(thread_var.get())
                 if thread_count < 1:
                     thread_count = 1
             except ValueError:
-                thread_count = 3 if use_server else 5  # 默认值
+                thread_count = 3  # 默认值
 
             self.logger.info(f"[{backend_label}] 线程数设置: {thread_count}")
 
@@ -11477,7 +11295,7 @@ class FitsImageViewer:
 
             # 显示进度窗口
             progress_window = tk.Toplevel(self.parent_frame)
-            progress_window.title("批量PYMPC Server查询进度" if use_server else "批量PYMPC查询进度")
+            progress_window.title("批量PYMPC Server查询进度")
             progress_window.geometry("500x250")
 
             # 进度标签
@@ -11568,10 +11386,7 @@ class FitsImageViewer:
             progress_window.after(100, update_progress)
 
         except Exception as e:
-            if use_server:
-                error_msg = f"批量pympc server查询失败: {str(e)}"
-            else:
-                error_msg = f"批量pympc查询失败: {str(e)}"
+            error_msg = f"批量pympc server查询失败: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
             messagebox.showerror("错误", error_msg)
 
@@ -11579,9 +11394,10 @@ class FitsImageViewer:
         """执行批量变星server查询（调用本地HTTP服务）"""
         return self._batch_vsx_query(on_complete=on_complete, use_server=True)
 
-    def _batch_vsx_query(self, on_complete=None, use_server=False):
-        """执行批量变星查询（跳过非GOOD和已有小行星结果的目标）"""
-        backend_label = "批量变星server查询" if use_server else "批量变星查询"
+    def _batch_vsx_query(self, on_complete=None, use_server=True):
+        """执行批量变星 server 查询（仅 server 版本）"""
+        use_server = True
+        backend_label = "批量变星server查询"
         self.logger.info(f"{backend_label}按钮被点击，开始执行批量查询")
 
         def _safe_invoke_on_complete():
@@ -11618,12 +11434,12 @@ class FitsImageViewer:
 
             # 获取线程数
             try:
-                thread_var = self.batch_vsx_server_threads_var if use_server else self.batch_query_threads_var
+                thread_var = self.batch_vsx_server_threads_var
                 thread_count = int(thread_var.get())
                 if thread_count < 1:
                     thread_count = 1
             except ValueError:
-                thread_count = 3 if use_server else 10  # 默认值
+                thread_count = 3  # 默认值
 
             # 处理单个文件
             def process_file(file_path):
@@ -11770,7 +11586,7 @@ class FitsImageViewer:
 
             # 显示进度窗口
             progress_window = tk.Toplevel(self.parent_frame)
-            progress_window.title("批量变星Server查询进度" if use_server else "批量变星查询进度")
+            progress_window.title("批量变星Server查询进度")
             progress_window.geometry("500x250")
 
             # 进度标签
@@ -11842,7 +11658,7 @@ class FitsImageViewer:
 
                     # 最终统计
                     final_stats = (
-                        f"{'批量变星server查询' if use_server else '批量变星查询'}完成！\n"+
+                        f"批量变星server查询完成！\n"+
                         f"总文件数: {len(files_to_process)}\n"+
                         f"成功处理: {success_count}\n"+
                         f"跳过: {skip_count}\n"+
@@ -11872,10 +11688,7 @@ class FitsImageViewer:
             progress_window.after(100, update_progress)
 
         except Exception as e:
-            if use_server:
-                error_msg = f"批量变星server查询失败: {str(e)}"
-            else:
-                error_msg = f"批量变星查询失败: {str(e)}"
+            error_msg = f"批量变星server查询失败: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
             messagebox.showerror("错误", error_msg)
         finally:

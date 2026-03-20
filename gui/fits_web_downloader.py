@@ -77,30 +77,8 @@ class FitsWebDownloaderGUI:
         self.batch_pause_event = threading.Event()  # 暂停事件
         self.batch_pause_event.set()  # 初始为非暂停状态
 
-        # 自动链：批量→查询→导出 控制开关
+        # 自动链：批量→AI标记→查询 控制开关
         self._auto_chain_followups = False
-        # 自动链：是否使用本地离线查询（初始化为配置中的值）
-        try:
-            _local_settings = self.config_manager.get_local_catalog_settings()
-            _auto_local_default = bool(_local_settings.get("auto_chain_use_local_query", False))
-        except Exception:
-            _auto_local_default = False
-        self.auto_chain_use_local_query_var = tk.BooleanVar(value=_auto_local_default)
-
-        # 手动查询按钮：是否使用本地离线查询（初始化为配置中的值）
-        try:
-            _local_settings = self.config_manager.get_local_catalog_settings()
-            _btn_local_default = bool(_local_settings.get("buttons_use_local_query", False))
-        except Exception:
-            _btn_local_default = False
-        self.buttons_use_local_query_var = tk.BooleanVar(value=_btn_local_default)
-        # 小行星查询方式（初始化为配置中的值）
-        try:
-            _local_settings = self.config_manager.get_local_catalog_settings()
-            _method_default = str(_local_settings.get("asteroid_query_method", "auto"))
-        except Exception:
-            _method_default = "auto"
-        self.asteroid_query_method_var = tk.StringVar(value=_method_default)
         # pympc 是否使用观测站代码（初始化为配置中的值，默认 False）
         try:
             _local_settings = self.config_manager.get_local_catalog_settings()
@@ -501,73 +479,22 @@ class FitsWebDownloaderGUI:
             save_mpc_btn = ttk.Button(row5_frame, text="保存MPC",
                                      command=self.fits_viewer._save_mpc_settings)
             save_mpc_btn.grid(row=1, column=2, sticky=tk.W, padx=(10, 5), pady=(10, 0), columnspan=2)
-        # 第六行：自动链设置
-        auto_chain_frame = ttk.LabelFrame(settings_container, text="自动链设置", padding=10)
-        auto_chain_frame.pack(fill=tk.X, pady=(0, 10))
+        # 第六行：查询后端设置（仅保留 server 版本）
+        query_backend_frame = ttk.LabelFrame(settings_container, text="查询后端设置", padding=10)
+        query_backend_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # 手动查询按钮：是否使用本地离线查询
-        btn_local_chk = ttk.Checkbutton(
-            auto_chain_frame,
-            text="手动查询按钮使用本地查询(离线)",
-            variable=self.buttons_use_local_query_var,
-            command=self._on_toggle_buttons_use_local_query
-        )
-        btn_local_chk.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        ttk.Label(
+            query_backend_frame,
+            text="当前仅保留 server 版本：pympc server + 变星server。",
+            foreground="gray",
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
 
-        # 自动链：是否使用本地离线查询
-        auto_local_chk = ttk.Checkbutton(
-            auto_chain_frame,
-            text="自动链使用本地查询(离线)",
-            variable=self.auto_chain_use_local_query_var,
-            command=self._on_toggle_auto_chain_use_local_query
-        )
-        auto_local_chk.grid(row=0, column=0, sticky=tk.W)
-
-        # 小行星查询方式设置
-        asteroid_method_frame = ttk.LabelFrame(settings_container, text="小行星查询方式", padding=10)
-        asteroid_method_frame.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(asteroid_method_frame, text="选择小行星查询后端:").grid(row=0, column=0, sticky=tk.W)
-
-        ttk.Radiobutton(
-            asteroid_method_frame,
-            text="自动(推荐)",
-            value="auto",
-            variable=self.asteroid_query_method_var,
-            command=self._on_change_asteroid_query_method,
-        ).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
-
-        ttk.Radiobutton(
-            asteroid_method_frame,
-            text="Skybot(在线)",
-            value="skybot",
-            variable=self.asteroid_query_method_var,
-            command=self._on_change_asteroid_query_method,
-        ).grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=(5, 0))
-
-        ttk.Radiobutton(
-            asteroid_method_frame,
-            text="本地MPCORB(离线)",
-            value="local",
-            variable=self.asteroid_query_method_var,
-            command=self._on_change_asteroid_query_method,
-        ).grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
-
-        ttk.Radiobutton(
-            asteroid_method_frame,
-            text="pympc(轨道库)",
-            value="pympc",
-            variable=self.asteroid_query_method_var,
-            command=self._on_change_asteroid_query_method,
-        ).grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=(5, 0))
-
-        # pympc 观测站代码使用开关（仅在选择 pympc 时生效）
         ttk.Checkbutton(
-            asteroid_method_frame,
-            text="pympc 使用观测站代码(N87)",
+            query_backend_frame,
+            text="pympc server 使用观测站代码(N87)",
             variable=self.pympc_use_observatory_var,
             command=self._on_toggle_pympc_use_observatory,
-        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
 
         # 本地查询资源设置
@@ -2053,40 +1980,6 @@ class FitsWebDownloaderGUI:
                 f.write("}")
         except Exception as e:
             self._log(f"写入GY1索引文件失败: {e}")
-    def _on_toggle_auto_chain_use_local_query(self):
-        """高级设置：切换自动链是否使用本地查询（立即保存到配置）"""
-        try:
-            enabled = bool(self.auto_chain_use_local_query_var.get())
-            self.config_manager.update_local_catalog_settings(auto_chain_use_local_query=enabled)
-            self._log(f"[设置] 自动链本地查询: {'开启' if enabled else '关闭'}")
-        except Exception as e:
-            self._log(f"保存自动链本地查询设置失败: {e}")
-        # 同步H上限与星历状态
-        try:
-            settings_local = self.config_manager.get_local_catalog_settings()
-        except Exception:
-            settings_local = {}
-        try:
-            h_val = self.mpc_h_limit_var.get() if hasattr(self, 'mpc_h_limit_var') else str(settings_local.get('mpc_h_limit', 20))
-            if hasattr(self, 'mpc_h_status_label'):
-                self.mpc_h_status_label.config(text=f"当前H上限: {h_val}")
-        except Exception:
-            pass
-        ephem_path = settings_local.get("ephemeris_file_path", "") or ""
-        if hasattr(self, 'ephemeris_status_label'):
-            ephem_name = Path(ephem_path).name if ephem_path else "未设置"
-            self.ephemeris_status_label.config(text=f"星历: {ephem_name}")
-
-    def _on_toggle_buttons_use_local_query(self):
-        """高级设置：切换手动查询按钮是否使用本地查询（立即保存到配置）"""
-        try:
-            enabled = bool(self.buttons_use_local_query_var.get())
-            self.config_manager.update_local_catalog_settings(buttons_use_local_query=enabled)
-            self._log(f"[设置] 手动按钮本地查询: {'开启' if enabled else '关闭'}")
-        except Exception as e:
-            self._log(f"保存手动按钮本地查询设置失败: {e}")
-
-
     def _on_toggle_pympc_use_observatory(self):
         """高级设置：切换使用pympc时是否使用观测站代码（立即保存到配置）"""
         try:
@@ -2095,15 +1988,6 @@ class FitsWebDownloaderGUI:
             self._log(f"[设置] pympc 使用观测站代码: {'开启' if enabled else '关闭'}")
         except Exception as e:
             self._log(f"保存 pympc 观测站代码设置失败: {e}")
-
-    def _on_change_asteroid_query_method(self):
-        """高级设置：切换小行星查询方式（立即保存到配置）"""
-        try:
-            method = str(self.asteroid_query_method_var.get() or "auto")
-            self.config_manager.update_local_catalog_settings(asteroid_query_method=method)
-            self._log(f"[设置] 小行星查询方式: {method}")
-        except Exception as e:
-            self._log(f"保存小行星查询方式失败: {e}")
 
 
 
@@ -4811,24 +4695,24 @@ Diff统计:
                 if self._auto_select_download_root_in_viewer():
                     def _run_vsx_after_pympc():
                         try:
-                            self._log("[自动模式] 开始执行批量变星查询...")
-                            self.fits_viewer._batch_vsx_query(on_complete=lambda: self.root.after(500, _step4_update_pympc))
+                            self._log("[自动模式] 开始执行变星server批量查询...")
+                            self.fits_viewer._batch_vsx_server_query(on_complete=lambda: self.root.after(500, _step4_update_pympc))
                         except TypeError:
                             # 兼容旧版变星查询（无回调参数）
-                            self.fits_viewer._batch_vsx_query()
+                            self.fits_viewer._batch_vsx_server_query()
                             self.root.after(500, _step4_update_pympc)
                         except Exception as e:
-                            self._log(f"[自动模式] 批量变星查询时出错: {e}")
+                            self._log(f"[自动模式] 变星server批量查询时出错: {e}")
                             self.root.after(500, _step4_update_pympc)
 
                     try:
-                        # 先执行pympc批量查询，完成后再启动变星查询
-                        self._log("[自动模式] 开始执行pympc批量查询...")
-                        self.fits_viewer._batch_pympc_query(on_complete=_run_vsx_after_pympc)
+                        # 先执行pympc server批量查询，完成后再启动变星server查询
+                        self._log("[自动模式] 开始执行pympc server批量查询...")
+                        self.fits_viewer._batch_pympc_server_query(on_complete=_run_vsx_after_pympc)
                         return
                     except TypeError:
                         # 兼容旧版FitsImageViewer（无回调参数）
-                        self.fits_viewer._batch_pympc_query()
+                        self.fits_viewer._batch_pympc_server_query()
                         _run_vsx_after_pympc()
                     except Exception as e:
                         self._log(f"[自动模式] 批量查询时出错: {e}")
@@ -5053,10 +4937,10 @@ Diff统计:
             # 标记后续需要自动执行后处理链：AI标记GOOD/BAD → 批量查询
             self._auto_chain_followups = True
 
-            # 开启静默模式，避免任何弹窗阻塞（包含后续查询/导出/上传链）
+            # 开启静默模式，避免任何弹窗阻塞（包含后续查询链）
             setattr(self, "_auto_silent_mode", True)
             try:
-                # 需要静默 viewer 里的导出弹窗
+                # 需要静默 viewer 里的提示弹窗
                 self.fits_viewer._auto_silent_mode = True
             except Exception:
                 pass
@@ -5123,22 +5007,22 @@ Diff统计:
                 if self._auto_select_download_root_in_viewer():
                     def _run_vsx_after_pympc():
                         try:
-                            self._log("[自动链] 开始执行批量变星查询...")
-                            self.fits_viewer._batch_vsx_query(on_complete=_finish_after_queries)
+                            self._log("[自动链] 开始执行变星server批量查询...")
+                            self.fits_viewer._batch_vsx_server_query(on_complete=_finish_after_queries)
                         except TypeError:
-                            self.fits_viewer._batch_vsx_query()
+                            self.fits_viewer._batch_vsx_server_query()
                             _finish_after_queries()
                         except Exception as e:
-                            self._log(f"[自动链] 批量变星查询时出错: {e}")
+                            self._log(f"[自动链] 变星server批量查询时出错: {e}")
                             _finish_after_queries()
 
                     try:
-                        # 先执行pympc批量查询
-                        self._log("[自动链] 开始执行pympc批量查询...")
-                        self.fits_viewer._batch_pympc_query(on_complete=_run_vsx_after_pympc)
+                        # 先执行pympc server批量查询
+                        self._log("[自动链] 开始执行pympc server批量查询...")
+                        self.fits_viewer._batch_pympc_server_query(on_complete=_run_vsx_after_pympc)
                         return
                     except TypeError:
-                        self.fits_viewer._batch_pympc_query()
+                        self.fits_viewer._batch_pympc_server_query()
                         _run_vsx_after_pympc()
                     except Exception as e:
                         self._log(f"[自动链] 批量查询时出错: {e}")
@@ -5273,10 +5157,10 @@ Diff统计:
                 setattr(mb, name, fn)
 
     def _auto_batch_query(self):
-        """自动：在图像查看器中定位到当前天区目录并执行“批量查询(小行星/变星)”"""
+        """自动：在图像查看器中定位当前天区并执行 server 批量查询。"""
         import os
         try:
-            self._log("[自动] 开始批量查询(小行星/变星)...")
+            self._log("[自动] 开始 server 批量查询（pympc server + 变星server）...")
             # 切换到“FITS查看”页签
             self.notebook.select(self.viewer_frame)
 
@@ -5302,20 +5186,17 @@ Diff统计:
             else:
                 self._log(f"[自动] 未找到天区目录节点: {region_dir}，将仍尝试执行批量查询")
 
-            # 静默执行批量查询，屏蔽可能的弹窗
-            use_local = False
-            try:
-                settings = self.config_manager.get_local_catalog_settings()
-                use_local = bool(settings.get("auto_chain_use_local_query", False))
-            except Exception:
-                use_local = False
-            if use_local and hasattr(self.fits_viewer, "_batch_query_local_asteroids_and_variables"):
-                self._run_without_messageboxes(self.fits_viewer._batch_query_local_asteroids_and_variables)
-            else:
-                self._run_without_messageboxes(self.fits_viewer._batch_query_asteroids_and_variables)
+            # 静默执行 server 版批量查询：先小行星，再变星
+            def _run_vsx_after_pympc():
+                try:
+                    self._run_without_messageboxes(self.fits_viewer._batch_vsx_server_query)
+                finally:
+                    self.root.after(500, self._finish_auto_chain_after_auto_batch_query)
 
-            # 查询完成后结束自动链（已移除“批量导出未查询”）
-            self.root.after(500, self._finish_auto_chain_after_auto_batch_query)
+            self._run_without_messageboxes(
+                self.fits_viewer._batch_pympc_server_query,
+                on_complete=_run_vsx_after_pympc
+            )
         except Exception as e:
             self._log(f"[自动] 批量查询失败: {e}")
             import traceback

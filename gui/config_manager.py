@@ -97,9 +97,6 @@ class ConfigManager:
                 "auto_select_from_download_dir": True
             },
             "local_catalog_settings": {
-                "use_local_query": False,
-                "auto_chain_use_local_query": False,
-                "buttons_use_local_query": False,
                 "asteroid_catalog_path": self._default_asteroid_catalog_path,
                 "vsx_catalog_path": self._default_vsx_catalog_path,
                 "last_asteroid_update": "",
@@ -107,7 +104,6 @@ class ConfigManager:
                 "mpc_h_limit": 20,
                 "ephemeris_file_path": "",
                 "last_ephemeris_update": "",
-                "asteroid_query_method": "auto",  # 小行星查询方式: auto/skybot/local/pympc
                 "pympc_catalog_path": "",
                 "last_pympc_update": "",
                 "pympc_use_observatory": False  # 使用pympc时是否使用观测站代码，默认不使用
@@ -243,16 +239,7 @@ class ConfigManager:
         except Exception:
             pass
 
-        # 兼容旧版本: 填充小行星查询方式和pympc相关字段
-        valid_methods = ("auto", "skybot", "local", "pympc")
-        method = settings.get("asteroid_query_method")
-        if method not in valid_methods:
-            try:
-                buttons_local = bool(settings.get("buttons_use_local_query", False))
-            except Exception:
-                buttons_local = False
-            settings["asteroid_query_method"] = "local" if buttons_local else "auto"
-            changed = True
+        # 兼容旧版本: 填充pympc相关字段
 
         if "pympc_catalog_path" not in settings:
             settings["pympc_catalog_path"] = ""
