@@ -9,11 +9,10 @@
     - 基于 ConfigManager 与 url_config_manager 构建 URL
     - 使用自带的网页解析逻辑 + DirectoryScanner/WebFitsScanner 扫描可用天区和 FITS 列表（不依赖 Tk）
     - 使用 FitsDownloader 下载 FITS 文件，并按 GUI 中的目录结构组织
-    - 使用 DiffOrbIntegration 直接调用 diff_orb 核心算法执行对齐 + diff
+    - Diff 流水线已从 DiffOrbIntegration.process_diff 移除；当前仅下载（可选 ASTAP），不执行对齐+差分。
 
 注意：
 - 本脚本不导入任何 Tk / GUI 组件，可在无 DISPLAY 的服务器上运行（虽然脚本放在 gui 目录下）。
-- 依赖项目已有的 diff_orb、simple_noise、astap_processor 等模块。
 """
 
 import os
@@ -26,10 +25,9 @@ from typing import List, Tuple
 # run_console.py 现在位于 gui 目录下，这里需要回到仓库根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GUI_DIR = os.path.join(PROJECT_ROOT, "gui")
-DIFF_ORB_DIR = os.path.join(PROJECT_ROOT, "diff_orb")
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
 
-for d in (PROJECT_ROOT, GUI_DIR, DIFF_ORB_DIR, CONFIG_DIR):
+for d in (PROJECT_ROOT, GUI_DIR, CONFIG_DIR):
     if d not in sys.path:
         sys.path.insert(0, d)
 
@@ -213,7 +211,7 @@ def run_pipeline_for_files(
 
     # 下载目录：与 GUI 一致：download_root/tel_name/date/region
     download_dir = ensure_directory(os.path.join(download_root, tel_name, date, region))
-    diff_output_root = ensure_directory(os.path.join(diff_root, tel_name, date))
+    ensure_directory(os.path.join(diff_root, tel_name, date))  # 保持与 GUI 相同的输出根目录结构（供后续 Diff 使用）
 
     downloader = FitsDownloader(
         max_workers=args.max_workers,
@@ -226,88 +224,13 @@ def run_pipeline_for_files(
     logging.info("[%s %s %s] 开始下载 %d 个文件到 %s", tel_name, date, region, len(urls), download_dir)
     downloader.download_files(urls, download_dir)
 
-    # 下载完成后，对下载目录中的所有 FITS 做 diff
-    for entry in os.scandir(download_dir):
-        if not entry.is_file():
-            continue
-        if not entry.name.lower().endswith((".fits", ".fit", ".fts")):
-            continue
-
-        download_file = entry.path
-        filename = entry.name
-        logging.info("[Diff] 开始处理: %s", filename)
-
-        template_file = diff_integration.find_template_file(download_file, template_dir)
-        if not template_file:
-            logging.info("[Diff] 未找到模板，跳过: %s", filename)
-            continue
-
-        # 输出目录结构与 GUI 中 _get_thread_safe_diff_output_directory 一致：
-        # diff_root/tel_name/date/region/文件名无扩展
-        name_wo_ext = os.path.splitext(filename)[0]
-        output_dir = ensure_directory(os.path.join(diff_output_root, region, name_wo_ext))
-
-        # 如果已有 detection_ 目录，认为处理完成，跳过
-        existed = False
-        for d in os.listdir(output_dir):
-            full = os.path.join(output_dir, d)
-            if d.startswith("detection_") and os.path.isdir(full):
-                existed = True
-                break
-        if existed:
-            logging.info("[Diff] 结果已存在，跳过: %s", filename)
-            continue
-
-        # 这里直接使用 ConfigManager 中 batch_process_settings 的默认参数
-        batch_cfg = cfg.get_batch_process_settings()
-        noise_methods = []
-        if batch_cfg.get("noise_method") == "median":
-            noise_methods.append("adaptive_median")
-        elif batch_cfg.get("noise_method") in ("gaussian", "gaussian_hot_cold"):
-            noise_methods.append("outlier")
-
-        alignment_method = {
-            "orb": "rigid",
-            "ecc": "wcs",
-            "astropy_reproject": "astropy_reproject",
-            "swarp": "swarp",
-        }.get(batch_cfg.get("alignment_method", "ecc"), "wcs")
-
-        remove_bright_lines = bool(batch_cfg.get("remove_bright_lines", True))
-        fast_mode = bool(batch_cfg.get("fast_mode", True))
-        try:
-            overlap_edge_exclusion_px = int(float(batch_cfg.get("overlap_edge_exclusion_px", 40)))
-            overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-        except Exception:
-            overlap_edge_exclusion_px = 40
-        wcs_use_sparse = bool(batch_cfg.get("wcs_use_sparse", False))
-        generate_gif = bool(batch_cfg.get("generate_gif", False))
-        subpixel_refine_mode = str(batch_cfg.get("subpixel_refine_mode", "off"))
-        diff_calc_mode = str(batch_cfg.get("diff_calc_mode", "abs"))
-        apply_diff_postprocess = bool(batch_cfg.get("apply_diff_postprocess", False))
-
-        result = diff_integration.process_diff(
-            download_file,
-            template_file,
-            output_dir=output_dir,
-            noise_methods=noise_methods,
-            alignment_method=alignment_method,
-            remove_bright_lines=remove_bright_lines,
-            fast_mode=fast_mode,
-            max_jaggedness_ratio=float(batch_cfg.get("max_jaggedness_ratio", 2.0)),
-            detection_method=batch_cfg.get("detection_method", "contour"),
-            overlap_edge_exclusion_px=overlap_edge_exclusion_px,
-            wcs_use_sparse=wcs_use_sparse,
-            generate_gif=generate_gif,
-            subpixel_refine_mode=subpixel_refine_mode,
-            diff_calc_mode=diff_calc_mode,
-            apply_diff_postprocess=apply_diff_postprocess,
+    if not diff_integration.is_diff_pipeline_implemented():
+        logging.warning(
+            "[Diff] 已跳过：process_diff 旧流水线已移除，请在 gui/diff_orb_integration.py 中接入新实现"
         )
-
-        if result and result.get("success"):
-            logging.info("[Diff] 成功: %s - 新亮点 %s 个", filename, result.get("new_bright_spots", 0))
-        else:
-            logging.warning("[Diff] 失败: %s", filename)
+    else:
+        # 预留：新 Diff 流水线可在此处遍历 download_dir 中的 FITS
+        pass
 
 
 def main():
@@ -333,9 +256,6 @@ def main():
     )
 
     diff_integration = DiffOrbIntegration(gui_callback=None)
-    if not diff_integration.is_available():
-        logging.error("diff_orb 模块不可用，请检查 diff_orb 依赖是否安装正确")
-        raise SystemExit(1)
 
     # 决定处理模式
     if args.region and args.telescope:

@@ -301,17 +301,6 @@ class FitsWebDownloaderGUI:
 
         ttk.Button(detected_frame, text="选择保存目录", command=self._select_detected_dir).pack(side=tk.RIGHT)
 
-        # 未查询导出目录选择
-        unqueried_export_frame = ttk.Frame(download_frame)
-        unqueried_export_frame.pack(fill=tk.X, pady=(5, 5))
-
-        ttk.Label(unqueried_export_frame, text="未查询导出目录:").pack(side=tk.LEFT)
-        self.unqueried_export_dir_var = tk.StringVar()
-        self.unqueried_export_dir_entry = ttk.Entry(unqueried_export_frame, textvariable=self.unqueried_export_dir_var, width=50)
-        self.unqueried_export_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-
-        ttk.Button(unqueried_export_frame, text="选择导出目录", command=self._select_unqueried_export_dir).pack(side=tk.RIGHT)
-
         # 下载参数
         params_frame = ttk.Frame(download_frame)
         params_frame.pack(fill=tk.X, pady=(0, 5))
@@ -421,60 +410,8 @@ class FitsWebDownloaderGUI:
         # 创建设置区域
         settings_container = ttk.Frame(main_container)
         settings_container.pack(fill=tk.BOTH, expand=True)
-        # AI训练导出根目录变量
-        if not hasattr(self, 'ai_export_root_var'):
-            self.ai_export_root_var = tk.StringVar()
 
-
-
-        # 第一行：降噪方式和去除亮线
-        row1_frame = ttk.LabelFrame(settings_container, text="降噪设置", padding=10)
-        row1_frame.pack(fill=tk.X, pady=(0, 10))
-
-        # 降噪方式
-        noise_label = ttk.Label(row1_frame, text="降噪方式:")
-        noise_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-
-        # 获取fits_viewer的降噪变量（如果已创建）
-        if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            outlier_check = ttk.Checkbutton(row1_frame, text="Outlier",
-                                          variable=self.fits_viewer.outlier_var)
-            outlier_check.grid(row=0, column=1, sticky=tk.W, padx=5)
-
-            hot_cold_check = ttk.Checkbutton(row1_frame, text="Hot/Cold",
-                                           variable=self.fits_viewer.hot_cold_var)
-            hot_cold_check.grid(row=0, column=2, sticky=tk.W, padx=5)
-
-            adaptive_median_check = ttk.Checkbutton(row1_frame, text="Adaptive Median",
-                                                  variable=self.fits_viewer.adaptive_median_var)
-            adaptive_median_check.grid(row=0, column=3, sticky=tk.W, padx=5)
-
-            # 去除亮线
-            remove_lines_check = ttk.Checkbutton(row1_frame, text="去除亮线",
-                                               variable=self.fits_viewer.remove_lines_var)
-            remove_lines_check.grid(row=0, column=4, sticky=tk.W, padx=(20, 5))
-
-        # 第二行：对齐方式
-        row2_frame = ttk.LabelFrame(settings_container, text="对齐设置", padding=10)
-        row2_frame.pack(fill=tk.X, pady=(0, 10))
-
-        alignment_label = ttk.Label(row2_frame, text="对齐方式:")
-        alignment_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-
-        if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            alignment_methods = [
-                ("Rigid", "rigid"),
-                ("WCS", "wcs"),
-                ("Astropy", "astropy_reproject"),
-                ("SWarp", "swarp")
-            ]
-
-            for i, (text, value) in enumerate(alignment_methods):
-                rb = ttk.Radiobutton(row2_frame, text=text,
-                                   variable=self.fits_viewer.alignment_var, value=value)
-                rb.grid(row=0, column=i+1, sticky=tk.W, padx=5)
-
-        # 第三行：检测参数
+        # 检测参数 / 显示设置（已移除降噪与对齐配置项）
         # 显示/查询设置
         display_row = ttk.LabelFrame(settings_container, text="显示/查询设置", padding=10)
         display_row.pack(fill=tk.X, pady=(0, 10))
@@ -512,75 +449,9 @@ class FitsWebDownloaderGUI:
         row3_frame.pack(fill=tk.X, pady=(0, 10))
 
         if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            ttk.Label(row3_frame, text="检测参数已简化：固定使用内置检测配置").grid(
+            ttk.Label(row3_frame, text="Diff 流水线已移除；批量流程仍执行下载与 ASTAP，Diff 步骤将跳过直至新实现接入。").grid(
                 row=0, column=0, sticky=tk.W, padx=(0, 5)
             )
-            ttk.Label(row3_frame, text="重叠边界剔除(px):").grid(row=0, column=1, sticky=tk.W, padx=(20, 5))
-            ttk.Entry(row3_frame, textvariable=self.fits_viewer.overlap_edge_exclusion_px_var, width=8).grid(
-                row=0, column=2, sticky=tk.W, padx=(0, 5)
-            )
-
-        # 第四行：阈值和排序
-        row4_frame = ttk.LabelFrame(settings_container, text="筛选和排序", padding=10)
-        row4_frame.pack(fill=tk.X, pady=(0, 10))
-
-        if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            # Aligned SNR阈值
-            snr_label = ttk.Label(row4_frame, text="Aligned SNR >")
-            snr_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-
-            snr_entry = ttk.Entry(row4_frame, textvariable=self.fits_viewer.aligned_snr_threshold_var, width=8)
-            snr_entry.grid(row=0, column=1, sticky=tk.W, padx=5)
-
-            # 直线检测过滤开关
-            line_detection_check = ttk.Checkbutton(row4_frame, text="批量导出时过滤过中心直线",
-                                                  variable=self.fits_viewer.enable_line_detection_filter_var)
-            line_detection_check.grid(row=0, column=2, sticky=tk.W, padx=(20, 5))
-
-        # 第五行：GPS和MPC设置
-        # 第六行：直线检测设置（灵敏度与中心距离）
-        row6_frame = ttk.LabelFrame(settings_container, text="直线检测设置", padding=10)
-        row6_frame.pack(fill=tk.X, pady=(0, 10))
-
-        if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            ttk.Label(row6_frame, text="灵敏度(1-100):").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-            e_sens = ttk.Entry(row6_frame, textvariable=self.fits_viewer.line_sensitivity_var, width=8)
-            e_sens.grid(row=0, column=1, sticky=tk.W, padx=(0, 10))
-
-            ttk.Label(row6_frame, text="过中心距离(px):").grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
-            e_center = ttk.Entry(row6_frame, textvariable=self.fits_viewer.line_center_distance_var, width=8)
-            e_center.grid(row=0, column=3, sticky=tk.W, padx=(0, 10))
-
-        # 第七行：对齐性能设置（速度/稳健性权衡）
-        row7_frame = ttk.LabelFrame(settings_container, text="对齐性能设置", padding=10)
-        row7_frame.pack(fill=tk.X, pady=(0, 10))
-
-        if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            # 第一排
-            ttk.Label(row7_frame, text="星点上限:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-            e_starmax = ttk.Entry(row7_frame, textvariable=self.fits_viewer.align_star_max_points_var, width=8)
-            e_starmax.grid(row=0, column=1, sticky=tk.W, padx=(0, 10))
-
-            ttk.Label(row7_frame, text="最小间距(px):").grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
-            e_starmind = ttk.Entry(row7_frame, textvariable=self.fits_viewer.align_star_min_distance_var, width=8)
-            e_starmind.grid(row=0, column=3, sticky=tk.W, padx=(0, 10))
-
-            ttk.Label(row7_frame, text="亮星点池(三角):").grid(row=0, column=4, sticky=tk.W, padx=(10, 5))
-            e_tripoints = ttk.Entry(row7_frame, textvariable=self.fits_viewer.align_tri_points_var, width=8)
-            e_tripoints.grid(row=0, column=5, sticky=tk.W, padx=(0, 10))
-
-            # 第二排
-            ttk.Label(row7_frame, text="内点阈值(px):").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(8, 0))
-            e_trithr = ttk.Entry(row7_frame, textvariable=self.fits_viewer.align_tri_inlier_thr_var, width=8)
-            e_trithr.grid(row=1, column=1, sticky=tk.W, padx=(0, 10), pady=(8, 0))
-
-            ttk.Label(row7_frame, text="形状量化:").grid(row=1, column=2, sticky=tk.W, padx=(10, 5), pady=(8, 0))
-            e_tribin = ttk.Entry(row7_frame, textvariable=self.fits_viewer.align_tri_bin_scale_var, width=8)
-            e_tribin.grid(row=1, column=3, sticky=tk.W, padx=(0, 10), pady=(8, 0))
-
-            ttk.Label(row7_frame, text="可视化Top-K:").grid(row=1, column=4, sticky=tk.W, padx=(10, 5), pady=(8, 0))
-            e_tritopk = ttk.Entry(row7_frame, textvariable=self.fits_viewer.align_tri_topk_var, width=8)
-            e_tritopk.grid(row=1, column=5, sticky=tk.W, padx=(0, 10), pady=(8, 0))
 
         row5_frame = ttk.LabelFrame(settings_container, text="观测站设置", padding=10)
         row5_frame.pack(fill=tk.X, pady=(0, 10))
@@ -725,24 +596,6 @@ class FitsWebDownloaderGUI:
         ttk.Button(local_catalog_frame, text="保存H上限", command=self._save_mpc_h_limit).grid(row=2, column=2, sticky=tk.W, pady=(5, 0))
         self.mpc_h_status_label = ttk.Label(local_catalog_frame, text=f"当前H上限: {current_h}")
         self.mpc_h_status_label.grid(row=2, column=3, sticky=tk.W, padx=(10, 0), pady=(5, 0))
-
-        # AI训练数据导出设置
-        ai_export_frame = ttk.LabelFrame(settings_container, text="AI训练数据导出", padding=10)
-        ai_export_frame.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(ai_export_frame, text="AI训练导出根目录:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        ai_export_entry = ttk.Entry(ai_export_frame, textvariable=self.ai_export_root_var, width=50)
-        ai_export_entry.grid(row=0, column=1, sticky=tk.W, padx=(5, 5))
-
-        ttk.Button(ai_export_frame, text="选择目录", command=self._select_ai_training_export_root).grid(
-            row=0, column=2, sticky=tk.W, padx=(5, 0)
-        )
-
-        ttk.Label(
-            ai_export_frame,
-            text="说明：用于导出当前选择目录下所有标记为 GOOD/BAD 的检测cutout，用于AI训练。",
-            foreground="gray"
-        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         # AI GOOD/BAD 自动标记设置
         ai_mark_frame = ttk.LabelFrame(settings_container, text="AI自动标记(GOOD/BAD)", padding=10)
@@ -2481,19 +2334,9 @@ class FitsWebDownloaderGUI:
             detected_dir = last_selected.get("detected_directory", "")
             if detected_dir:
                 self.detected_dir_var.set(detected_dir)
-
-            unqueried_export_dir = last_selected.get("unqueried_export_directory", "")
-            if unqueried_export_dir:
-                self.unqueried_export_dir_var.set(unqueried_export_dir)
             elif diff_output_dir:
-                # 如果没有设置detected目录，但有diff输出目录，自动设置为diff输出目录下的detected子目录
-                detected_dir = os.path.join(diff_output_dir, "detected")
-                self.detected_dir_var.set(detected_dir)
-
-            # 加载AI训练数据导出根目录
-            ai_export_root = last_selected.get("ai_training_export_root", "")
-            if ai_export_root and hasattr(self, "ai_export_root_var"):
-                self.ai_export_root_var.set(ai_export_root)
+                # 未配置 detected 时，默认使用 diff 输出下的 detected 子目录
+                self.detected_dir_var.set(os.path.join(diff_output_dir, "detected"))
 
             self._log("配置加载完成")
 
@@ -2884,37 +2727,6 @@ class FitsWebDownloaderGUI:
             self.config_manager.update_last_selected(detected_directory=directory)
             self._log(f"detected保存目录已设置: {directory}")
             self._log(f"检测结果将保存到: {directory}/YYYYMMDD/saved_HHMMSS_NNN/")
-
-    def _select_unqueried_export_dir(self):
-        """选择未查询导出目录"""
-        # 获取当前目录作为初始目录
-        current_dir = self.unqueried_export_dir_var.get()
-        initial_dir = current_dir if current_dir and os.path.exists(current_dir) else os.path.expanduser("~")
-
-        directory = filedialog.askdirectory(title="选择未查询导出目录", initialdir=initial_dir)
-        if directory:
-            self.unqueried_export_dir_var.set(directory)
-            # 保存到配置
-            self.config_manager.update_last_selected(unqueried_export_directory=directory)
-            self._log(f"未查询导出目录已设置: {directory}")
-            self._log(f"未查询检测结果将导出到: {directory}/系统名/日期/天区/文件名/detection_xxx/")
-
-    def _select_ai_training_export_root(self):
-        """选择AI训练数据导出根目录"""
-        # 获取当前目录作为初始目录
-        current_dir = self.ai_export_root_var.get()
-        initial_dir = current_dir if current_dir and os.path.exists(current_dir) else os.path.expanduser("~")
-
-        directory = filedialog.askdirectory(title="选择AI训练导出根目录", initialdir=initial_dir)
-        if directory:
-            self.ai_export_root_var.set(directory)
-            if self.config_manager:
-                # 保存到配置的 last_selected 中
-                self.config_manager.update_last_selected(ai_training_export_root=directory)
-            self._log(f"AI训练导出根目录已设置: {directory}")
-            self._log("导出AI训练数据时，GOOD/BAD 图像将分别保存到该目录下的子目录中。")
-
-
 
     def _get_selected_files(self):
         """获取选中的文件"""
@@ -3474,10 +3286,6 @@ Diff统计:
         """获取diff输出根目录的回调函数"""
         return self.diff_output_dir_var.get().strip()
 
-    def _get_unqueried_export_dir(self):
-        """获取未查询导出目录的回调函数"""
-        return self.unqueried_export_dir_var.get().strip()
-
     def _open_batch_output_directory(self):
         """打开批量处理的输出根目录"""
         if not self.last_batch_output_root or not os.path.exists(self.last_batch_output_root):
@@ -3583,10 +3391,7 @@ Diff统计:
 
         return output_dir
 
-    def _process_single_diff(self, download_file, template_dir, noise_methods, alignment_method,
-                            remove_bright_lines, fast_mode,
-                            science_bg_mode='off', subpixel_refine_mode='off',
-                            diff_calc_mode='abs', apply_diff_postprocess=False):
+    def _process_single_diff(self, download_file, template_dir):
         """
         处理单个文件的diff操作（线程安全）
 
@@ -3622,27 +3427,10 @@ Diff统计:
                     result_dict['skipped'] = True
                     return result_dict
 
-            # 执行diff操作
-            overlap_edge_exclusion_px = 40
-            try:
-                batch_settings = self.config_manager.get_batch_process_settings()
-                overlap_edge_exclusion_px = int(batch_settings.get("overlap_edge_exclusion_px", 40))
-            except Exception:
-                overlap_edge_exclusion_px = 40
-
             diff_result = self.fits_viewer.diff_orb.process_diff(
                 download_file,
                 template_file,
                 output_dir,
-                noise_methods=noise_methods,
-                alignment_method=alignment_method,
-                remove_bright_lines=remove_bright_lines,
-                fast_mode=fast_mode,
-                overlap_edge_exclusion_px=overlap_edge_exclusion_px,
-                science_bg_mode=science_bg_mode,
-                subpixel_refine_mode=subpixel_refine_mode,
-                diff_calc_mode=diff_calc_mode,
-                apply_diff_postprocess=apply_diff_postprocess
             )
 
             if diff_result and diff_result.get('success'):
@@ -3650,7 +3438,7 @@ Diff统计:
                 result_dict['new_spots'] = diff_result.get('new_bright_spots', 0)
                 result_dict['message'] = f"{result_dict['new_spots']}个亮点"
             else:
-                result_dict['message'] = "处理失败"
+                result_dict['message'] = "Diff 未实现"
 
         except Exception as e:
             result_dict['message'] = str(e)
@@ -3860,7 +3648,7 @@ Diff统计:
                 pass
 
             if getattr(self, "_auto_chain_followups", False):
-                # 启动完整的自动后处理链：批量检测对齐 → AI标记GOOD/BAD → 批量查询
+                # 启动完整的自动后处理链：AI标记GOOD/BAD → 批量查询
                 self.root.after(500, self._start_auto_postprocessing_chain)
 
             self.root.after(0, lambda: self.url_builder.set_scan_button_state("normal"))
@@ -4194,23 +3982,7 @@ Diff统计:
         # 停止标志
         stop_event = threading.Event()
 
-        # 获取diff配置参数
         template_dir = self.template_dir_var.get().strip()
-        noise_methods = []
-        if self.fits_viewer.outlier_var.get():
-            noise_methods.append('outlier')
-        if self.fits_viewer.hot_cold_var.get():
-            noise_methods.append('hot_cold')
-        if self.fits_viewer.adaptive_median_var.get():
-            noise_methods.append('adaptive_median')
-        alignment_method = self.fits_viewer.alignment_var.get()
-        remove_bright_lines = self.fits_viewer.remove_lines_var.get()
-        fast_mode = self.fits_viewer.fast_mode_var.get()
-        science_bg_mode = self.fits_viewer._get_science_bg_mode()
-        subpixel_refine_mode = self.fits_viewer._get_subpixel_refine_mode()
-        diff_calc_mode = self.fits_viewer._get_diff_calc_mode()
-        apply_diff_postprocess = self.fits_viewer.apply_diff_postprocess_var.get()
-
         # 启动ASTAP工作线程池
         def astap_worker():
             """ASTAP处理工作线程"""
@@ -4321,11 +4093,7 @@ Diff统计:
                             f, BatchStatusWidget.STATUS_DIFF_PROCESSING))
 
                         # 执行Diff处理
-                        result = self._process_single_diff(
-                            file_path, template_dir, noise_methods, alignment_method,
-                            remove_bright_lines, fast_mode, science_bg_mode, subpixel_refine_mode,
-                            diff_calc_mode, apply_diff_postprocess
-                        )
+                        result = self._process_single_diff(file_path, template_dir)
 
                         with stats_lock:
                             stats['diff_completed'] += 1
@@ -4612,24 +4380,9 @@ Diff统计:
 
         template_dir = self.template_dir_var.get().strip()
 
-        # 从fits_viewer的控件获取配置参数（控件已从配置文件加载）
-        noise_methods = []
-        if self.fits_viewer.outlier_var.get():
-            noise_methods.append('outlier')
-        if self.fits_viewer.hot_cold_var.get():
-            noise_methods.append('hot_cold')
-        if self.fits_viewer.adaptive_median_var.get():
-            noise_methods.append('adaptive_median')
-
-        alignment_method = self.fits_viewer.alignment_var.get()
-        remove_bright_lines = self.fits_viewer.remove_lines_var.get()
         fast_mode = self.fits_viewer.fast_mode_var.get()
-        science_bg_mode = self.fits_viewer._get_science_bg_mode()
-        subpixel_refine_mode = self.fits_viewer._get_subpixel_refine_mode()
-        diff_calc_mode = self.fits_viewer._get_diff_calc_mode()
-        apply_diff_postprocess = self.fits_viewer.apply_diff_postprocess_var.get()
 
-        self._log(f"使用配置: 降噪={noise_methods}, 对齐={alignment_method}, 去亮线={remove_bright_lines}, 快速模式={fast_mode}, 科学图背景={science_bg_mode}, 亚像素精修={subpixel_refine_mode}, 差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}")
+        self._log(f"使用配置: 快速模式={fast_mode}（Diff 已移除）")
         self._log(f"使用 {thread_count} 个线程并行处理")
 
         # 使用线程池并行处理
@@ -4652,9 +4405,7 @@ Diff统计:
 
                 future = executor.submit(
                     self._process_single_diff,
-                    download_file, template_dir, noise_methods, alignment_method,
-                    remove_bright_lines, fast_mode, science_bg_mode, subpixel_refine_mode,
-                    diff_calc_mode, apply_diff_postprocess
+                    download_file, template_dir,
                 )
                 future_to_file[future] = download_file
 
@@ -4964,10 +4715,10 @@ Diff统计:
             self.root.after(0, lambda: self.url_builder.set_stop_batch_button_state("disabled"))
 
             # 若为“仅 --date” 自动模式，则在全天全系统 diff 完成后，继续执行自动后处理链
-            # 步骤：刷新目录树并选择下载根目录 → 批量检测对齐 → AI 标记 GOOD/BAD → 批量查询 → 更新 pympc 轨道目录
+            # 步骤：刷新目录树并选择下载根目录 → AI 标记 GOOD/BAD → 批量查询 → 更新 pympc 轨道目录
             try:
                 if getattr(self, "_auto_date_only_mode", False):
-                    self._log("[自动模式] 全天全系统diff已完成，开始执行后续: 批量检测对齐 → AI标记GOOD/BAD → 批量查询 → 更新pympc轨道目录")
+                    self._log("[自动模式] 全天全系统diff已完成，开始执行后续: AI标记GOOD/BAD → 批量查询 → 更新pympc轨道目录")
                     # 在主线程中调度执行自动后处理链
                     self.root.after(500, self._auto_postprocess_for_date_only_mode)
                 else:
@@ -5041,15 +4792,8 @@ Diff统计:
             self._auto_silent_mode = True
 
             def _step1_alignment():
-                # 刷新目录树并选中下载根目录，然后执行批量检测对齐
-                if self._auto_select_download_root_in_viewer():
-                    try:
-                        self._log("[自动模式] 开始批量检测对齐质量……")
-                        self.fits_viewer._batch_evaluate_alignment_quality()
-                    except Exception as e:
-                        self._log(f"[自动模式] 批量检测对齐质量时出错: {e}")
-
-                # 下一步：AI GOOD/BAD 标记
+                # 已移除批量检测对齐；刷新目录树后直接进行 AI 标记
+                self._auto_select_download_root_in_viewer()
                 self.root.after(500, _step2_ai_mark)
 
             def _step2_ai_mark():
@@ -5148,13 +4892,12 @@ Diff统计:
                 timeout=self.timeout_var.get()
             )
 
-            # 保存下载目录、模板目录、diff输出目录和未查询导出目录
+            # 保存下载目录、模板目录、diff输出目录、detected 目录
             download_dir = self.download_dir_var.get().strip()
             template_dir = self.template_dir_var.get().strip()
             diff_output_dir = self.diff_output_dir_var.get().strip()
             detected_dir = self.detected_dir_var.get().strip()
-            unqueried_export_dir = self.unqueried_export_dir_var.get().strip()
-            if download_dir or template_dir or diff_output_dir or detected_dir or unqueried_export_dir:
+            if download_dir or template_dir or diff_output_dir or detected_dir:
                 update_data = {}
                 if download_dir:
                     update_data['download_directory'] = download_dir
@@ -5164,8 +4907,6 @@ Diff统计:
                     update_data['diff_output_directory'] = diff_output_dir
                 if detected_dir:
                     update_data['detected_directory'] = detected_dir
-                if unqueried_export_dir:
-                    update_data['unqueried_export_directory'] = unqueried_export_dir
                 self.config_manager.update_last_selected(**update_data)
 
             self._log("配置已保存")
@@ -5247,7 +4988,7 @@ Diff统计:
                 # 仅日期模式下，提前记录日志，提示后续会自动执行图像后处理与pympc更新
                 try:
                     if getattr(self, "_auto_date_only_mode", False):
-                        self._log("[自动模式] 全天全系统diff结束后，将自动执行: 批量检测对齐 → AI标记GOOD/BAD → 批量查询 → 更新pympc轨道目录")
+                        self._log("[自动模式] 全天全系统diff结束后，将自动执行: AI标记GOOD/BAD → 批量查询 → 更新pympc轨道目录")
                 except Exception:
                     pass
 
@@ -5309,7 +5050,7 @@ Diff统计:
         try:
             self._log("开始批量下载并diff...")
 
-            # 标记后续需要自动执行完整后处理链：批量检测对齐 → AI标记GOOD/BAD → 批量查询
+            # 标记后续需要自动执行后处理链：AI标记GOOD/BAD → 批量查询
             self._auto_chain_followups = True
 
             # 开启静默模式，避免任何弹窗阻塞（包含后续查询/导出/上传链）
@@ -5347,12 +5088,12 @@ Diff统计:
             if not getattr(self, "_auto_silent_mode", False):
                 messagebox.showerror("错误", error_msg)
 
-    # ========================= 自动链：批量 → 批量检测对齐 → AI标记GOOD/BAD → 批量查询 =========================
-    
+    # ========================= 自动链：AI标记GOOD/BAD → 批量查询 =========================
+
     def _start_auto_postprocessing_chain(self):
-        """启动完整的自动后处理链：批量检测对齐 → AI标记GOOD/BAD → 批量查询"""
+        """启动自动后处理链：AI标记GOOD/BAD → 批量查询（已移除批量检测对齐与导出）"""
         try:
-            self._log("[自动链] 开始完整的后处理链：批量检测对齐 → AI标记GOOD/BAD → 批量查询")
+            self._log("[自动链] 开始后处理链：AI标记GOOD/BAD → 批量查询")
             
             # 保存当前的静默模式状态
             prev_silent = getattr(self, "_auto_silent_mode", False)
@@ -5360,15 +5101,8 @@ Diff统计:
             self._auto_silent_mode = True
 
             def _step1_alignment():
-                # 刷新目录树并选中下载根目录，然后执行批量检测对齐
-                if self._auto_select_download_root_in_viewer():
-                    try:
-                        self._log("[自动链] 开始批量检测对齐质量……")
-                        self.fits_viewer._batch_evaluate_alignment_quality()
-                    except Exception as e:
-                        self._log(f"[自动链] 批量检测对齐质量时出错: {e}")
-
-                # 下一步：AI GOOD/BAD 标记
+                # 已移除批量检测对齐；刷新目录树后直接进行 AI 标记
+                self._auto_select_download_root_in_viewer()
                 self.root.after(500, _step2_ai_mark)
 
             def _step2_ai_mark():
@@ -5580,40 +5314,28 @@ Diff统计:
             else:
                 self._run_without_messageboxes(self.fits_viewer._batch_query_asteroids_and_variables)
 
-            # 查询完成后，继续执行“批量导出未查询”
-            self.root.after(500, self._auto_batch_export_unqueried)
+            # 查询完成后结束自动链（已移除“批量导出未查询”）
+            self.root.after(500, self._finish_auto_chain_after_auto_batch_query)
         except Exception as e:
             self._log(f"[自动] 批量查询失败: {e}")
             import traceback
             self._log(traceback.format_exc())
 
-    def _auto_batch_export_unqueried(self):
-        """自动：执行“批量导出未查询”并静默处理所有弹窗"""
+    def _finish_auto_chain_after_auto_batch_query(self):
+        """自动批量查询步骤结束后清理标志与静默模式。"""
         try:
-            self._log("[自动] 开始批量导出未查询...")
-            # 确保停留在查看器页签并刷新目录树
-            self.notebook.select(self.viewer_frame)
-            self.fits_viewer._refresh_directory_tree()
-
-            # 静默执行导出（将自动确认导出，且不会弹出“打开目录”提示）
-            self._run_without_messageboxes(self.fits_viewer._batch_export_unqueried)
-
-            self._log("[自动] 批量导出未查询完成")
-        except Exception as e:
-            self._log(f"[自动] 批量导出未查询失败: {e}")
-            import traceback
-            self._log(traceback.format_exc())
-        finally:
-            # 关闭自动链并恢复静默标志
-            self._auto_chain_followups = False
-            try:
-                self._auto_silent_mode = False
-            except Exception:
-                pass
-            try:
-                self.fits_viewer._auto_silent_mode = False
-            except Exception:
-                pass
+            self._log("[自动] 批量查询步骤已完成")
+        except Exception:
+            pass
+        self._auto_chain_followups = False
+        try:
+            self._auto_silent_mode = False
+        except Exception:
+            pass
+        try:
+            self.fits_viewer._auto_silent_mode = False
+        except Exception:
+            pass
 
     def _auto_full_day_all_systems_batch(self):
         """自动执行：全天全系统diff"""

@@ -36,8 +36,6 @@ import cv2
 # 添加项目根目录到路径以导入dss_cds_downloader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cds_dss_download.dss_cds_downloader import download_dss_rot
-from line_in_pic.detect_center_lines import detect_lines_near_center, annotate_image, point_to_segment_distance, compute_line_saliency_map
-
 
 # 尝试导入ASTAP处理器
 try:
@@ -173,12 +171,6 @@ class FitsImageViewer:
         # 从配置文件加载查询设置
         self._load_query_settings()
 
-        # 从配置文件加载检测过滤设置
-        self._load_detection_filter_settings()
-
-        # 绑定检测过滤设置变化事件
-        self._bind_detection_filter_settings_events()
-
         # 延迟执行首次刷新（确保界面完全创建后）
         self.parent_frame.after(100, self._first_time_refresh)
 
@@ -254,22 +246,6 @@ class FitsImageViewer:
         self.jaggedness_ratio_var = tk.StringVar(value="2.0")
         self.detection_method_var = tk.StringVar(value="contour")
         self.overlap_edge_exclusion_px_var = tk.StringVar(value="40")
-        self.score_threshold_var = tk.StringVar(value="3.0")
-        self.aligned_snr_threshold_var = tk.StringVar(value="1.1")
-        self.sort_by_var = tk.StringVar(value="aligned_snr")
-        self.enable_line_detection_filter_var = tk.BooleanVar(value=True)  # 默认启用直线检测过滤
-        # 直线检测灵敏度/中心距离 与 对齐性能调优变量
-        self.line_sensitivity_var = tk.IntVar(value=50)
-        self.line_center_distance_var = tk.IntVar(value=50)
-        self.align_star_max_points_var = tk.IntVar(value=600)
-        self.align_star_min_distance_var = tk.DoubleVar(value=2.0)
-        self.align_tri_points_var = tk.IntVar(value=35)
-        self.align_tri_inlier_thr_var = tk.DoubleVar(value=4.0)
-        self.align_tri_bin_scale_var = tk.IntVar(value=60)
-        self.align_tri_topk_var = tk.IntVar(value=5)
-
-        # 显著性阈值（用于直线检测过滤/绘制），默认与CLI一致：0.65
-        self.saliency_thresh_var = tk.DoubleVar(value=0.65)
 
         # AI GOOD/BAD 自动标记置信度阈值（在高级设置中可调）
         self.ai_confidence_threshold_var = tk.DoubleVar(value=0.5)
@@ -510,19 +486,6 @@ class FitsImageViewer:
         # 变星server批量查询线程数，在高级设置中配置
         self.batch_vsx_server_threads_var = tk.StringVar(value="3")
 
-        # 批量检测对齐按钮（移动至此，位于“批量本地查询(离线)”左侧）
-        self.batch_alignment_button = ttk.Button(
-            toolbar_frame6, text="批量检测对齐",
-            command=self._batch_evaluate_alignment_quality,
-            state="disabled"
-        )
-        self.batch_alignment_button.pack(side=tk.LEFT, padx=(5, 5))
-
-        # 显著性阈值控件（与CLI一致，默认0.5）
-        ttk.Label(toolbar_frame6, text="显著性阈值:").pack(side=tk.LEFT, padx=(10, 2))
-        self.saliency_thresh_entry = ttk.Entry(toolbar_frame6, width=5, textvariable=self.saliency_thresh_var)
-        self.saliency_thresh_entry.pack(side=tk.LEFT, padx=(0, 5))
-
         # 批量本地查询按钮（离线）
         self.batch_local_query_button = ttk.Button(
             toolbar_frame6, text="批量本地查询(离线)",
@@ -630,12 +593,6 @@ class FitsImageViewer:
         top.bind('g', lambda e: self._mark_detection_good())
         top.bind('b', lambda e: self._mark_detection_bad())
 
-        # ` - 下一个未标记高分检测
-        top.bind('`', lambda e: self._jump_to_next_unlabeled_high_score())
-
-        # j - 跳转高分文件
-        top.bind('j', lambda e: self._jump_to_next_high_score())
-
         # - / [ / k - 上一组
         top.bind('-', lambda e: self._show_previous_cutout())
         top.bind('[', lambda e: self._show_previous_cutout())
@@ -657,7 +614,7 @@ class FitsImageViewer:
         top.bind('o', lambda e: self._query_vsx())
 
         self.logger.info(
-            "已绑定全局快捷键: g(标记GOOD), b(标记BAD), ` (下一个未标记高分检测), j(跳转高分文件), "
+            "已绑定全局快捷键: g(标记GOOD), b(标记BAD), "
             "-/[ /k(上一组), =/]/l(下一组), n/N(下一个GOOD), i(查询小行星), o(查询变星)"
         )
 
@@ -673,26 +630,8 @@ class FitsImageViewer:
         refresh_frame.pack(fill=tk.X, pady=(0, 5))
 
         ttk.Button(refresh_frame, text="刷新目录", command=self._refresh_directory_tree).pack(side=tk.LEFT)
-        ttk.Button(refresh_frame, text="跳转高分", command=self._jump_to_next_high_score).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(refresh_frame, text="跳转未查询", command=self._jump_to_next_unqueried).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Button(refresh_frame, text="批量导出未查询", command=self._batch_export_unqueried).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Button(refresh_frame, text="导出AI训练数据", command=self._export_ai_training_data).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Button(refresh_frame, text="导出GOOD/BAD列表", command=self._export_good_bad_list).pack(side=tk.LEFT, padx=(5, 0))
-
-        # 高分检测结果跳转按钮（单独一行）
-        high_score_frame = ttk.Frame(left_frame)
-        high_score_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Button(
-            high_score_frame,
-            text="下一个未标记高分检测 (`)",
-            command=self._jump_to_next_unlabeled_high_score
-        ).pack(side=tk.LEFT)
-
-        ttk.Button(
-            high_score_frame,
-            text="AI标记 GOOD/BAD",
-            command=self._ai_mark_detections
-        ).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
 
         # 创建目录树
@@ -756,23 +695,7 @@ class FitsImageViewer:
         cmap_combo.pack(side=tk.LEFT, padx=(0, 10))
         cmap_combo.bind('<<ComboboxSelected>>', self._on_colormap_change)
 
-        # 中心距离过滤设置
-        self.enable_center_distance_filter_var = tk.BooleanVar(value=False)
-        self.enable_center_distance_filter_checkbox = ttk.Checkbutton(
-            control_frame1,
-            text="启用中心距离过滤",
-            variable=self.enable_center_distance_filter_var,
-            command=self._on_enable_center_distance_filter_change
-        )
-        self.enable_center_distance_filter_checkbox.pack(side=tk.LEFT, padx=(10, 5))
-
-        ttk.Label(control_frame1, text="最大距离:").pack(side=tk.LEFT, padx=(5, 5))
-        self.max_center_distance_var = tk.StringVar(value="2400")
-        self.max_center_distance_entry = ttk.Entry(control_frame1, textvariable=self.max_center_distance_var, width=8)
-        self.max_center_distance_entry.pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Label(control_frame1, text="像素").pack(side=tk.LEFT, padx=(0, 5))
-
-        # 当前检测目标的中心距离显示
+        # 当前检测目标的中心距离显示（仅展示，不再提供筛选配置）
         ttk.Label(control_frame1, text="当前距离:").pack(side=tk.LEFT, padx=(10, 5))
         self.current_center_distance_label = ttk.Label(control_frame1, text="--", foreground="blue", font=("Arial", 9, "bold"))
         self.current_center_distance_label.pack(side=tk.LEFT, padx=(0, 2))
@@ -841,15 +764,6 @@ class FitsImageViewer:
             command=self._mark_detection_bad, state="disabled"
         )
         self.mark_bad_button.pack(side=tk.LEFT, padx=(0, 10))
-
-        # 标记后自动跳转到下一个未标记高分检测（选项，默认不勾选）
-        self.auto_jump_unlabeled_high_score_var = tk.BooleanVar(value=False)
-        self.auto_jump_unlabeled_high_score_check = ttk.Checkbutton(
-            control_frame3,
-            text="标记后自动跳未标记高分",
-            variable=self.auto_jump_unlabeled_high_score_var
-        )
-        self.auto_jump_unlabeled_high_score_check.pack(side=tk.LEFT, padx=(0, 10))
 
         # 下一个 GOOD/BAD 按钮行（始终保持可点击，不随cutout加载状态禁用）
         next_line1_frame = ttk.Frame(control_container)
@@ -997,33 +911,8 @@ class FitsImageViewer:
             overlap_edge_exclusion_px = batch_settings.get('overlap_edge_exclusion_px', 40)
             self.overlap_edge_exclusion_px_var.set(str(overlap_edge_exclusion_px))
 
-            # 综合得分阈值
-            score_threshold = batch_settings.get('score_threshold', 3.0)
-            self.score_threshold_var.set(str(score_threshold))
-
-            # Aligned SNR阈值
-            aligned_snr_threshold = batch_settings.get('aligned_snr_threshold', 1.1)
-            self.aligned_snr_threshold_var.set(str(aligned_snr_threshold))
-
-            # 排序方式
-            sort_by = batch_settings.get('sort_by', 'quality_score')
-            self.sort_by_var.set(sort_by)
-
-            # WCS稀疏采样优化
-            # 直线检测与对齐调优设置，以及AI自动标记相关设置
+            # AI GOOD/BAD 自动标记相关设置
             try:
-                lds = self.config_manager.get_line_detection_settings()
-                self.line_sensitivity_var.set(int(lds.get('sensitivity', 50)))
-                self.line_center_distance_var.set(int(lds.get('center_distance_px', 50)))
-                ats = self.config_manager.get_alignment_tuning_settings()
-                self.align_star_max_points_var.set(int(ats.get('star_max_points', 600)))
-                self.align_star_min_distance_var.set(float(ats.get('star_min_distance_px', 2.0)))
-                self.align_tri_points_var.set(int(ats.get('tri_points', 35)))
-                self.align_tri_inlier_thr_var.set(float(ats.get('tri_inlier_thr_px', 4.0)))
-                self.align_tri_bin_scale_var.set(int(ats.get('tri_bin_scale', 60)))
-                self.align_tri_topk_var.set(int(ats.get('tri_topk', 5)))
-
-                # AI GOOD/BAD 自动标记相关设置
                 ais = self.config_manager.get_ai_classification_settings()
                 self.ai_confidence_threshold_var.set(float(ais.get('confidence_threshold', 0.5)))
             except Exception:
@@ -1050,11 +939,13 @@ class FitsImageViewer:
             apply_diff_postprocess = batch_settings.get('apply_diff_postprocess', False)
             self.apply_diff_postprocess_var.set(bool(apply_diff_postprocess))
 
-            # 直线检测过滤开关
-            enable_line_detection_filter = batch_settings.get('enable_line_detection_filter', True)
-            self.enable_line_detection_filter_var.set(enable_line_detection_filter)
-
-            self.logger.info(f"批量处理参数已加载到控件: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={remove_bright_lines}, 快速模式={fast_mode}, 拉伸={stretch_method}, 百分位={percentile_low}%, 锯齿比率={max_jaggedness_ratio}, 检测方法={detection_method}, 边界剔除宽度={overlap_edge_exclusion_px}px, 综合得分阈值={score_threshold}, Aligned SNR阈值={aligned_snr_threshold}, 排序方式={sort_by}, WCS稀疏采样={wcs_use_sparse}, 生成GIF={generate_gif}, 科学图背景={science_bg_mode}, 亚像素精修={subpixel_refine_mode}, 差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}, 直线检测过滤={enable_line_detection_filter}")
+            self.logger.info(
+                f"批量处理参数已加载到控件: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={remove_bright_lines}, "
+                f"快速模式={fast_mode}, 拉伸={stretch_method}, 百分位={percentile_low}%, 锯齿比率={max_jaggedness_ratio}, "
+                f"检测方法={detection_method}, 边界剔除宽度={overlap_edge_exclusion_px}px, WCS稀疏采样={wcs_use_sparse}, "
+                f"生成GIF={generate_gif}, 科学图背景={science_bg_mode}, 亚像素精修={subpixel_refine_mode}, "
+                f"差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}"
+            )
 
         except Exception as e:
             self.logger.error(f"加载批量处理参数失败: {str(e)}")
@@ -1082,21 +973,6 @@ class FitsImageViewer:
             # 绑定拉伸方法单选框
             self.stretch_method_var.trace('w', self._on_batch_settings_change)
 
-            # 绑定直线检测灵敏度/中心距离
-            self.line_sensitivity_var.trace('w', self._on_line_settings_change)
-            self.line_center_distance_var.trace('w', self._on_line_settings_change)
-
-            # 绑定对齐调优参数
-            for _v in [
-                self.align_star_max_points_var,
-                self.align_star_min_distance_var,
-                self.align_tri_points_var,
-                self.align_tri_inlier_thr_var,
-                self.align_tri_bin_scale_var,
-                self.align_tri_topk_var,
-            ]:
-                _v.trace('w', self._on_alignment_tuning_change)
-
             # 绑定百分位输入框（使用延迟保存，避免每次按键都保存）
             self.percentile_var.trace('w', self._on_percentile_change)
 
@@ -1109,17 +985,8 @@ class FitsImageViewer:
             # 绑定重叠边界剔除宽度输入框
             self.overlap_edge_exclusion_px_var.trace('w', self._on_overlap_edge_exclusion_px_change)
 
-            # 绑定综合得分阈值输入框
-            self.score_threshold_var.trace('w', self._on_score_threshold_change)
-
-            # 绑定Aligned SNR阈值输入框
-            self.aligned_snr_threshold_var.trace('w', self._on_aligned_snr_threshold_change)
-
             # 绑定AI置信度阈值输入框
             self.ai_confidence_threshold_var.trace('w', self._on_ai_confidence_threshold_change)
-
-            # 绑定排序方式下拉框
-            self.sort_by_var.trace('w', self._on_batch_settings_change)
 
             # 绑定WCS稀疏采样复选框
             self.wcs_sparse_var.trace('w', self._on_batch_settings_change)
@@ -1134,9 +1001,6 @@ class FitsImageViewer:
             # 绑定差异计算方式
             self.diff_calc_mode_display_var.trace('w', self._on_batch_settings_change)
             self.apply_diff_postprocess_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定直线检测过滤复选框
-            self.enable_line_detection_filter_var.trace('w', self._on_batch_settings_change)
 
             self.logger.info("批量处理参数控件事件已绑定")
 
@@ -1192,9 +1056,6 @@ class FitsImageViewer:
             diff_calc_mode = self._get_diff_calc_mode()
             apply_diff_postprocess = self.apply_diff_postprocess_var.get()
 
-            # 获取直线检测过滤设置
-            enable_line_detection_filter = self.enable_line_detection_filter_var.get()
-
             # 保存到配置文件
             self.config_manager.update_batch_process_settings(
                 noise_method=noise_method,
@@ -1209,10 +1070,14 @@ class FitsImageViewer:
                 subpixel_refine_mode=subpixel_refine_mode,
                 diff_calc_mode=diff_calc_mode,
                 apply_diff_postprocess=apply_diff_postprocess,
-                enable_line_detection_filter=enable_line_detection_filter
             )
 
-            self.logger.info(f"批量处理参数已保存: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={self.remove_lines_var.get()}, 快速模式={self.fast_mode_var.get()}, 检测方法={detection_method}, 边界剔除={overlap_edge_exclusion_px}px, WCS稀疏采样={wcs_use_sparse}, 生成GIF={generate_gif}, 科学图背景={science_bg_mode}, 亚像素精修={subpixel_refine_mode}, 差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}, 直线检测过滤={enable_line_detection_filter}")
+            self.logger.info(
+                f"批量处理参数已保存: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={self.remove_lines_var.get()}, "
+                f"快速模式={self.fast_mode_var.get()}, 检测方法={detection_method}, 边界剔除={overlap_edge_exclusion_px}px, "
+                f"WCS稀疏采样={wcs_use_sparse}, 生成GIF={generate_gif}, 科学图背景={science_bg_mode}, "
+                f"亚像素精修={subpixel_refine_mode}, 差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}"
+            )
 
         except Exception as e:
             self.logger.error(f"保存批量处理参数失败: {str(e)}")
@@ -1269,18 +1134,6 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"保存锯齿比率参数失败: {str(e)}")
 
-    def _on_score_threshold_change(self, *args):
-        """综合得分阈值参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_score_save_timer'):
-            self.parent_frame.after_cancel(self._score_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._score_save_timer = self.parent_frame.after(1000, self._save_score_threshold)
-
     def _on_overlap_edge_exclusion_px_change(self, *args):
         """重叠边界剔除宽度变化时保存到配置文件（延迟保存）"""
         if not self.config_manager:
@@ -1293,52 +1146,6 @@ class FitsImageViewer:
             1000, self._save_overlap_edge_exclusion_px
         )
 
-
-    def _on_line_settings_change(self, *args):
-        """直线检测灵敏度/中心距离 改变时保存到配置"""
-        if not self.config_manager:
-            return
-        try:
-            sens = int(self.line_sensitivity_var.get())
-            center_px = int(self.line_center_distance_var.get())
-            self.config_manager.update_line_detection_settings(
-                sensitivity=max(1, min(100, sens)),
-                center_distance_px=max(1, center_px)
-            )
-            self.logger.info(f"直线检测参数已保存: 灵敏度={sens}, 中心距离={center_px}px")
-        except Exception as e:
-            self.logger.error(f"保存直线检测参数失败: {str(e)}")
-
-    def _on_alignment_tuning_change(self, *args):
-        """对齐调优参数改变时保存到配置"""
-        if not self.config_manager:
-            return
-        try:
-            self.config_manager.update_alignment_tuning_settings(
-                star_max_points=int(self.align_star_max_points_var.get()),
-                star_min_distance_px=float(self.align_star_min_distance_var.get()),
-                tri_points=int(self.align_tri_points_var.get()),
-                tri_inlier_thr_px=float(self.align_tri_inlier_thr_var.get()),
-                tri_bin_scale=int(self.align_tri_bin_scale_var.get()),
-                tri_topk=int(self.align_tri_topk_var.get()),
-            )
-            self.logger.info("对齐调优参数已保存")
-        except Exception as e:
-            self.logger.error(f"保存对齐调优参数失败: {str(e)}")
-
-    def _save_score_threshold(self):
-        """保存综合得分阈值参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            score_threshold = float(self.score_threshold_var.get())
-            self.config_manager.update_batch_process_settings(score_threshold=score_threshold)
-            self.logger.info(f"综合得分阈值参数已保存: {score_threshold}")
-        except ValueError:
-            self.logger.warning(f"无效的综合得分阈值值: {self.score_threshold_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存综合得分阈值参数失败: {str(e)}")
 
     def _save_overlap_edge_exclusion_px(self):
         """保存重叠边界剔除宽度到配置文件"""
@@ -1382,32 +1189,6 @@ class FitsImageViewer:
             self.logger.warning(f"无效的AI置信度阈值: {self.ai_confidence_threshold_var.get()}")
         except Exception as e:
             self.logger.error(f"保存AI置信度阈值失败: {str(e)}")
-
-    def _on_aligned_snr_threshold_change(self, *args):
-        """Aligned SNR阈值参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_aligned_snr_save_timer'):
-            self.parent_frame.after_cancel(self._aligned_snr_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._aligned_snr_save_timer = self.parent_frame.after(1000, self._save_aligned_snr_threshold)
-
-    def _save_aligned_snr_threshold(self):
-        """保存Aligned SNR阈值参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            aligned_snr_threshold = float(self.aligned_snr_threshold_var.get())
-            self.config_manager.update_batch_process_settings(aligned_snr_threshold=aligned_snr_threshold)
-            self.logger.info(f"Aligned SNR阈值参数已保存: {aligned_snr_threshold}")
-        except ValueError:
-            self.logger.warning(f"无效的Aligned SNR阈值值: {self.aligned_snr_threshold_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存Aligned SNR阈值参数失败: {str(e)}")
 
     def _load_dss_flip_settings(self):
         """从配置文件加载DSS翻转设置"""
@@ -1748,201 +1529,6 @@ class FitsImageViewer:
         except Exception:
             return default_interval
 
-    def _load_detection_filter_settings(self):
-        """从配置文件加载检测过滤设置"""
-        if not self.config_manager:
-            return
-
-        try:
-            filter_settings = self.config_manager.get_detection_filter_settings()
-
-            # 不从配置读取该开关，强制默认关闭
-            enable_filter = False
-            self.enable_center_distance_filter_var.set(False)
-
-            # 加载最大中心距离，默认值：2400像素
-            max_center_distance = filter_settings.get('max_center_distance', 2400)
-            self.max_center_distance_var.set(str(max_center_distance))
-
-            # 加载自动启用阈值，默认值：50
-            auto_enable_threshold = filter_settings.get('auto_enable_threshold', 50)
-            self._auto_enable_threshold = auto_enable_threshold
-
-            self.logger.info(f"检测过滤设置已加载: 启用过滤={enable_filter}, 最大中心距离={max_center_distance}像素, 自动启用阈值={auto_enable_threshold}")
-
-        except Exception as e:
-            self.logger.error(f"加载检测过滤设置失败: {str(e)}")
-            # 使用默认值
-            self.enable_center_distance_filter_var.set(False)
-            self.max_center_distance_var.set("2400")
-            self._auto_enable_threshold = 50
-
-    def _bind_detection_filter_settings_events(self):
-        """绑定检测过滤设置的变化事件"""
-        if not self.config_manager:
-            return
-
-        try:
-            # 绑定最大中心距离输入框（使用延迟保存）
-            self.max_center_distance_var.trace('w', self._on_max_center_distance_change)
-
-            self.logger.info("检测过滤设置事件已绑定")
-
-        except Exception as e:
-            self.logger.error(f"绑定检测过滤设置事件失败: {str(e)}")
-
-    def _on_max_center_distance_change(self, *args):
-        """最大中心距离参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_max_center_distance_save_timer'):
-            self.parent_frame.after_cancel(self._max_center_distance_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._max_center_distance_save_timer = self.parent_frame.after(1000, self._save_max_center_distance)
-
-    def _save_max_center_distance(self):
-        """保存最大中心距离参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            max_center_distance = float(self.max_center_distance_var.get())
-
-            if max_center_distance < 0:
-                self.logger.warning(f"最大中心距离不能为负数: {max_center_distance}")
-                return
-
-            self.config_manager.update_detection_filter_settings(max_center_distance=max_center_distance)
-            self.logger.info(f"最大中心距离参数已保存: {max_center_distance}像素")
-        except ValueError:
-            self.logger.warning(f"无效的最大中心距离值: {self.max_center_distance_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存最大中心距离参数失败: {str(e)}")
-
-    def _on_enable_center_distance_filter_change(self):
-        """启用/禁用中心距离过滤开关变化时保存到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            enable_filter = self.enable_center_distance_filter_var.get()
-            self.config_manager.update_detection_filter_settings(enable_center_distance_filter=enable_filter)
-            self.logger.info(f"中心距离过滤开关已{'启用' if enable_filter else '禁用'}")
-        except Exception as e:
-            self.logger.error(f"保存中心距离过滤开关状态失败: {str(e)}")
-
-    def _get_high_score_count_from_current_detection(self):
-        """从当前detection目录的analysis.txt文件中读取高分检测目标数量"""
-        try:
-            # 从第一个cutout获取detection目录路径
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                return None
-
-            first_cutout = self._all_cutout_sets[0]
-            detection_img = first_cutout.get('detection')
-            if not detection_img:
-                return None
-
-            # detection图片路径: .../detection_xxx/cutouts/xxx_3_detection.png
-            # detection目录路径: .../detection_xxx
-            cutout_dir = Path(detection_img).parent
-            detection_dir = cutout_dir.parent
-
-            # 查找 analysis.txt 文件（支持带参数的长文件名）
-            analysis_files = [f for f in detection_dir.iterdir()
-                            if '_analysis' in f.name and f.suffix == '.txt']
-
-            if not analysis_files:
-                self.logger.warning(f"未找到analysis.txt文件: {detection_dir}")
-                return None
-
-            analysis_path = analysis_files[0]
-
-            # 解析analysis.txt文件
-            with open(analysis_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            # 获取配置的阈值和排序方式
-            score_threshold = 3.0  # 默认综合得分阈值
-            aligned_snr_threshold = 1.1  # 默认Aligned SNR阈值
-            sort_by = 'aligned_snr'  # 默认排序方式
-            if self.config_manager:
-                try:
-                    batch_settings = self.config_manager.get_batch_process_settings()
-                    score_threshold = batch_settings.get('score_threshold', 3.0)
-                    aligned_snr_threshold = batch_settings.get('aligned_snr_threshold', 1.1)
-                    sort_by = batch_settings.get('sort_by', 'aligned_snr')
-                except Exception:
-                    pass
-
-            # 解析每一行检测结果
-            high_score_count = 0
-            lines = content.split('\n')
-            in_data_section = False
-            for line in lines:
-                line_stripped = line.strip()
-
-                # 检测到分隔线后，下一行开始是数据
-                if line_stripped.startswith('-' * 10):
-                    in_data_section = True
-                    continue
-
-                # 跳过表头
-                if '综合得分' in line or '序号' in line:
-                    continue
-
-                # 只在数据区域解析
-                if in_data_section and line_stripped:
-                    # 尝试解析数据行
-                    parts = line_stripped.split()
-                    if len(parts) >= 14:  # 需要至少14列才能读取Aligned中心7x7SNR
-                        try:
-                            # 第一列是序号，第二列是综合得分，第14列是Aligned中心7x7SNR
-                            seq = int(parts[0])  # 验证第一列是数字
-                            score = float(parts[1])
-                            aligned_snr_str = parts[13]  # 第14列（索引13）
-
-                            # 解析Aligned SNR（可能是数字或"N/A"）
-                            aligned_snr = None
-                            if aligned_snr_str != 'N/A':
-                                try:
-                                    aligned_snr = float(aligned_snr_str)
-                                except ValueError:
-                                    aligned_snr = None
-
-                            # 根据排序方式决定判断条件
-                            is_high_score = False
-                            if sort_by == 'aligned_snr':
-                                # 使用 aligned_snr 排序时，只判断 aligned_snr > 阈值
-                                if aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                    is_high_score = True
-                            else:
-                                # 使用其他排序方式时，判断综合得分 > score_threshold 且 Aligned SNR > aligned_snr_threshold
-                                if score > score_threshold and aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                    is_high_score = True
-
-                            if is_high_score:
-                                high_score_count += 1
-                        except (ValueError, IndexError):
-                            continue
-
-            self.logger.info(f"从analysis.txt读取到高分检测目标数量: {high_score_count}")
-            return high_score_count
-
-        except Exception as e:
-            self.logger.warning(f"读取高分检测目标数量失败: {str(e)}")
-            import traceback
-            self.logger.debug(traceback.format_exc())
-            return None
-
-    def _check_auto_enable_center_distance_filter(self):
-        """自动启用/禁用中心距离过滤逻辑已关闭：仅保留手动控制"""
-        # 按用户要求，不再根据数量自动切换开关
-        return
-
     def _first_time_refresh(self):
         """首次打开时自动刷新目录树"""
         if not self.first_refresh_done:
@@ -2124,11 +1710,12 @@ class FitsImageViewer:
                 detection_info = self._check_file_diff_result(file_path, directory)
 
                 if detection_info:
-                    if detection_info['high_score_count'] > 0:
-                        file_tags.append("diff_gold_red")
-                        file_text = f"📄 [{detection_info['high_score_count']}] {filename} ({size_str})"
-                    elif detection_info['is_empty']:
+                    dc = detection_info.get('detection_count', 0)
+                    if detection_info['is_empty']:
                         file_tags.append("diff_purple")
+                    elif dc > 0:
+                        file_tags.append("diff_blue")
+                        file_text = f"📄 [{dc}] {filename} ({size_str})"
                     else:
                         file_tags.append("diff_blue")
 
@@ -2208,13 +1795,11 @@ class FitsImageViewer:
             if not detection_dir_path:
                 return None
 
-            # 分析 analysis.txt 文件
+            # 分析 analysis.txt 文件（仅读取检测总数，不再做高分/阈值筛选）
             detection_count = 0
-            high_score_count = 0
             is_empty_detection = False
 
             try:
-                # 查找 analysis.txt 文件（支持带参数的长文件名）
                 analysis_files = [f for f in os.listdir(detection_dir_path)
                                 if '_analysis' in f and f.endswith('.txt')]
 
@@ -2224,86 +1809,19 @@ class FitsImageViewer:
                     with open(analysis_path, 'r', encoding='utf-8') as f:
                         content = f.read()
 
-                        # 查找检测数量行
                         count_match = re.search(r'检测到\s+(\d+)\s+个斑点', content)
                         if count_match:
                             detection_count = int(count_match.group(1))
-
                             if detection_count == 0:
                                 is_empty_detection = True
-                            else:
-                                # 获取配置的阈值和排序方式
-                                score_threshold = 3.0  # 默认综合得分阈值
-                                aligned_snr_threshold = 1.1  # 默认Aligned SNR阈值
-                                sort_by = 'aligned_snr'  # 默认排序方式
-                                if self.config_manager:
-                                    try:
-                                        batch_settings = self.config_manager.get_batch_process_settings()
-                                        score_threshold = batch_settings.get('score_threshold', 3.0)
-                                        aligned_snr_threshold = batch_settings.get('aligned_snr_threshold', 1.1)
-                                        sort_by = batch_settings.get('sort_by', 'aligned_snr')
-                                    except Exception:
-                                        pass
-
-                                # 解析每一行检测结果
-                                lines = content.split('\n')
-                                in_data_section = False
-                                for line in lines:
-                                    line_stripped = line.strip()
-
-                                    # 检测到分隔线后，下一行开始是数据
-                                    if line_stripped.startswith('-' * 10):
-                                        in_data_section = True
-                                        continue
-
-                                    # 跳过表头
-                                    if '综合得分' in line or '序号' in line:
-                                        continue
-
-                                    # 只在数据区域解析
-                                    if in_data_section and line_stripped:
-                                        # 尝试解析数据行
-                                        parts = line_stripped.split()
-                                        if len(parts) >= 14:  # 需要至少14列才能读取Aligned中心7x7SNR
-                                            try:
-                                                # 第一列是序号，第二列是综合得分，第14列是Aligned中心7x7SNR
-                                                seq = int(parts[0])  # 验证第一列是数字
-                                                score = float(parts[1])
-                                                aligned_snr_str = parts[13]  # 第14列（索引13）
-
-                                                # 解析Aligned SNR（可能是数字或"N/A"）
-                                                aligned_snr = None
-                                                if aligned_snr_str != 'N/A':
-                                                    try:
-                                                        aligned_snr = float(aligned_snr_str)
-                                                    except ValueError:
-                                                        aligned_snr = None
-
-                                                # 根据排序方式决定判断条件
-                                                is_high_score = False
-                                                if sort_by == 'aligned_snr':
-                                                    # 使用 aligned_snr 排序时，只判断 aligned_snr > 阈值
-                                                    if aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                                        is_high_score = True
-                                                else:
-                                                    # 使用其他排序方式时，判断综合得分 > score_threshold 且 Aligned SNR > aligned_snr_threshold
-                                                    if score > score_threshold and aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                                        is_high_score = True
-
-                                                if is_high_score:
-                                                    high_score_count += 1
-                                            except (ValueError, IndexError):
-                                                continue
             except Exception as e:
-                # 记录异常但不中断
                 import traceback
                 self.logger.debug(f"解析analysis.txt异常: {e}\n{traceback.format_exc()}")
-                pass
 
             return {
                 'has_result': True,
                 'is_empty': is_empty_detection,
-                'high_score_count': high_score_count,
+                'high_score_count': 0,
                 'detection_count': detection_count
             }
 
@@ -2492,8 +2010,6 @@ class FitsImageViewer:
             self.batch_query_button.config(state="disabled")
             if hasattr(self, 'batch_local_query_button'):
                 self.batch_local_query_button.config(state="disabled")
-            if hasattr(self, 'batch_alignment_button'):
-                self.batch_alignment_button.config(state="disabled")
             if self.astap_processor:
                 self.astap_button.config(state="disabled")
             if self.wcs_checker:
@@ -2579,8 +2095,6 @@ class FitsImageViewer:
             self.batch_query_button.config(state="normal")
             if hasattr(self, 'batch_local_query_button'):
                 self.batch_local_query_button.config(state="normal")
-            if hasattr(self, 'batch_alignment_button'):
-                self.batch_alignment_button.config(state="normal")
             if hasattr(self, 'batch_pympc_query_button'):
                 self.batch_pympc_query_button.config(state="normal")
             if hasattr(self, 'batch_pympc_server_query_button'):
@@ -2612,8 +2126,6 @@ class FitsImageViewer:
                 self.batch_query_button.config(state="normal")
                 if hasattr(self, 'batch_local_query_button'):
                     self.batch_local_query_button.config(state="normal")
-                if hasattr(self, 'batch_alignment_button'):
-                    self.batch_alignment_button.config(state="normal")
                 if hasattr(self, 'batch_pympc_query_button'):
                     self.batch_pympc_query_button.config(state="normal")
                 if hasattr(self, 'batch_pympc_server_query_button'):
@@ -2629,8 +2141,6 @@ class FitsImageViewer:
                 self.batch_query_button.config(state="disabled")
                 if hasattr(self, 'batch_local_query_button'):
                     self.batch_local_query_button.config(state="disabled")
-                if hasattr(self, 'batch_alignment_button'):
-                    self.batch_alignment_button.config(state="disabled")
                 if hasattr(self, 'batch_pympc_query_button'):
                     self.batch_pympc_query_button.config(state="disabled")
                 if hasattr(self, 'batch_pympc_server_query_button'):
@@ -2642,12 +2152,6 @@ class FitsImageViewer:
                     self.batch_vsx_server_query_button.config(state="disabled")
                 self.batch_delete_query_button.config(state="disabled")
                 self.file_info_label.config(text="未选择FITS文件")
-
-                # 允许在选择根目录(总目录)时启用“批量检测对齐”
-                if values and "root_dir" in tags:
-                    if hasattr(self, 'batch_alignment_button'):
-                        self.batch_alignment_button.config(state="normal")
-
 
     def _on_tree_double_click(self, event):
         """目录树双击事件"""
@@ -2805,13 +2309,10 @@ class FitsImageViewer:
 
                     # 如果有diff结果，分析检测结果并标记颜色
                     if has_diff_result and detection_dir_path:
-                        # 分析 analysis.txt 文件
                         detection_count = 0
-                        high_score_count = 0
                         is_empty_detection = False
 
                         try:
-                            # 查找 analysis.txt 文件（支持带参数的长文件名）
                             analysis_files = [f for f in os.listdir(detection_dir_path) if '_analysis' in f and f.endswith('.txt')]
 
                             if analysis_files:
@@ -2821,127 +2322,34 @@ class FitsImageViewer:
                                 with open(analysis_path, 'r', encoding='utf-8') as f:
                                     content = f.read()
 
-                                    # 查找检测数量行，例如："检测到 5 个斑点"
-                                    count_match = re.search(r'检测到\s+(\d+)\s+个斑点', content)
-                                    if count_match:
-                                        detection_count = int(count_match.group(1))
-                                        self.logger.info(f"  检测数量: {detection_count}")
-
-                                        if detection_count == 0:
-                                            is_empty_detection = True
-                                        else:
-                                            # 获取配置的阈值和排序方式
-                                            score_threshold = 3.0  # 默认综合得分阈值
-                                            aligned_snr_threshold = 1.1  # 默认Aligned SNR阈值
-                                            sort_by = 'aligned_snr'  # 默认排序方式
-                                            if self.config_manager:
-                                                try:
-                                                    batch_settings = self.config_manager.get_batch_process_settings()
-                                                    score_threshold = batch_settings.get('score_threshold', 3.0)
-                                                    aligned_snr_threshold = batch_settings.get('aligned_snr_threshold', 1.1)
-                                                    sort_by = batch_settings.get('sort_by', 'aligned_snr')
-                                                except Exception:
-                                                    pass
-
-                                            # 解析每一行检测结果
-                                            # 格式: 序号 综合得分 面积 圆度 ... Aligned中心7x7SNR
-                                            lines = content.split('\n')
-                                            in_data_section = False
-                                            for line in lines:
-                                                line_stripped = line.strip()
-
-                                                # 检测到分隔线后，下一行开始是数据
-                                                if line_stripped.startswith('-' * 10):
-                                                    in_data_section = True
-                                                    continue
-
-                                                # 跳过表头
-                                                if '综合得分' in line or '序号' in line:
-                                                    continue
-
-                                                # 只在数据区域解析
-                                                if in_data_section and line_stripped:
-                                                    # 尝试解析数据行
-                                                    parts = line_stripped.split()
-                                                    if len(parts) >= 14:  # 需要至少14列才能读取Aligned中心7x7SNR
-                                                        try:
-                                                            # 第一列是序号，第二列是综合得分，第14列是Aligned中心7x7SNR
-                                                            seq = int(parts[0])  # 验证第一列是数字
-                                                            score = float(parts[1])
-                                                            aligned_snr_str = parts[13]  # 第14列（索引13）
-
-                                                            # 解析Aligned SNR（可能是数字或"N/A"）
-                                                            aligned_snr = None
-                                                            if aligned_snr_str != 'N/A':
-                                                                try:
-                                                                    aligned_snr = float(aligned_snr_str)
-                                                                except ValueError:
-                                                                    aligned_snr = None
-
-                                                            # 根据排序方式决定判断条件
-                                                            is_high_score = False
-                                                            if sort_by == 'aligned_snr':
-                                                                # 使用 aligned_snr 排序时，只判断 aligned_snr > 阈值
-                                                                if aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                                                    is_high_score = True
-                                                            else:
-                                                                # 使用其他排序方式时，判断综合得分 > score_threshold 且 Aligned SNR > aligned_snr_threshold
-                                                                if score > score_threshold and aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                                                    is_high_score = True
-
-                                                            if is_high_score:
-                                                                high_score_count += 1
-                                                                self.logger.debug(f"    找到高分: 序号{seq}, 得分{score}, Aligned SNR{aligned_snr}")
-                                                        except (ValueError, IndexError):
-                                                            continue
-
-                                            # 获取配置的阈值和排序方式用于日志显示
-                                            score_threshold_for_log = 3.0
-                                            aligned_snr_threshold_for_log = 1.1
-                                            sort_by_for_log = 'aligned_snr'
-                                            if self.config_manager:
-                                                try:
-                                                    batch_settings = self.config_manager.get_batch_process_settings()
-                                                    score_threshold_for_log = batch_settings.get('score_threshold', 3.0)
-                                                    aligned_snr_threshold_for_log = batch_settings.get('aligned_snr_threshold', 1.1)
-                                                    sort_by_for_log = batch_settings.get('sort_by', 'aligned_snr')
-                                                except Exception:
-                                                    pass
-
-                                            # 根据排序方式显示不同的日志信息
-                                            if sort_by_for_log == 'aligned_snr':
-                                                self.logger.info(f"  高分检测数量 (Aligned SNR>{aligned_snr_threshold_for_log}): {high_score_count}")
-                                            else:
-                                                self.logger.info(f"  高分检测数量 (综合得分>{score_threshold_for_log} 且 Aligned SNR>{aligned_snr_threshold_for_log}): {high_score_count}")
+                                count_match = re.search(r'检测到\s+(\d+)\s+个斑点', content)
+                                if count_match:
+                                    detection_count = int(count_match.group(1))
+                                    self.logger.info(f"  检测数量: {detection_count}")
+                                    if detection_count == 0:
+                                        is_empty_detection = True
                             else:
                                 self.logger.warning(f"  未找到 analysis.txt 文件")
 
                         except Exception as analysis_error:
                             self.logger.error(f"  分析检测结果失败: {analysis_error}")
 
-                        # 根据分析结果标记颜色
                         current_tags = list(child_tags)
-                        # 移除其他颜色标记
                         current_tags = [t for t in current_tags if t not in ["wcs_green", "wcs_orange", "diff_blue", "diff_purple", "diff_gold_red"]]
 
-                        # 获取当前显示的文本
                         current_text = self.directory_tree.item(child, "text")
-                        # 移除可能存在的数量前缀
                         current_text = re.sub(r'^\[\d+\]\s*', '', current_text)
 
-                        if high_score_count > 0:
-                            # 有高分检测，标记为金红色，并在前面加上数量
-                            current_tags.append("diff_gold_red")
-                            new_text = f"[{high_score_count}] {current_text}"
-                            self.directory_tree.item(child, text=new_text, tags=current_tags)
-                            self.logger.info(f"  ✓ 已标记为金红色: {filename}，高分检测数: {high_score_count}")
-                        elif is_empty_detection:
-                            # 检测列表为空，标记为蓝紫色
+                        if is_empty_detection:
                             current_tags.append("diff_purple")
                             self.directory_tree.item(child, tags=current_tags)
                             self.logger.info(f"  ✓ 已标记为蓝紫色: {filename}（检测列表为空）")
+                        elif detection_count > 0:
+                            current_tags.append("diff_blue")
+                            new_text = f"[{detection_count}] {current_text}"
+                            self.directory_tree.item(child, text=new_text, tags=current_tags)
+                            self.logger.info(f"  ✓ 已标记为蓝色: {filename}，检测数: {detection_count}")
                         else:
-                            # 有检测但无高分，标记为蓝色
                             current_tags.append("diff_blue")
                             self.directory_tree.item(child, tags=current_tags)
                             self.logger.info(f"  ✓ 已标记为蓝色: {filename}")
@@ -3478,520 +2886,20 @@ class FitsImageViewer:
             self.logger.info("已清除跳转未查询的候选列表缓存")
 
     def _jump_to_next_unqueried(self):
-        """跳转到下一个未查询的检测结果
-
-        新逻辑：
-        1. 收集整个目录树中所有符合条件的检测结果（高分数目 < 8 的文件中的高分项）
-           - 使用缓存机制，避免每次都重新收集
-        2. 从当前位置向下查找下一个符合条件的检测结果：
-           - 已查询小行星和变星，但都未找到
-           - 或者有结果，但所有结果的像素距离都 >= 10像素
-        3. 跳转到该检测结果
-        """
-        try:
-            # 检查是否有缓存的候选列表
-            if hasattr(self, '_jump_candidates_cache') and self._jump_candidates_cache:
-                self.logger.info("=" * 60)
-                self.logger.info(f"使用缓存的候选列表（共 {len(self._jump_candidates_cache)} 个候选）")
-                all_candidates = self._jump_candidates_cache
-            else:
-                # 步骤1: 收集整个目录树中所有符合条件的检测结果
-                self.logger.info("=" * 60)
-                self.logger.info("开始收集整个目录树中所有符合条件的检测结果")
-
-                # 获取目录树的根节点
-                root_items = self.directory_tree.get_children()
-                if not root_items:
-                    messagebox.showinfo("提示", "目录树为空")
-                    return
-
-                # 收集所有符合条件的检测结果
-                # 每个元素是一个元组: (file_node, detection_index, file_path)
-                all_candidates = []
-
-                def collect_candidates(parent_node):
-                    """递归收集所有符合条件的检测结果"""
-                    for child in self.directory_tree.get_children(parent_node):
-                        tags = self.directory_tree.item(child, "tags")
-
-                        if "fits_file" in tags:
-                            # 检查是否有检测结果
-                            if any(tag in tags for tag in ["diff_gold_red", "diff_blue", "diff_purple"]):
-                                # 提取高分数目
-                                file_text = self.directory_tree.item(child, 'text')
-                                high_score_count = self._extract_high_score_count_from_text(file_text)
-
-                                # 只处理高分数目 > 0 且 < 8 的文件
-                                if high_score_count is not None and high_score_count > 0 and high_score_count < 8:
-                                    # 获取文件路径
-                                    values = self.directory_tree.item(child, "values")
-                                    if values:
-                                        file_path = values[0]
-
-                                        # 读取该文件的检测结果，找出符合条件的检测索引
-                                        qualified_indices = self._get_qualified_detection_indices(file_path, high_score_count)
-
-                                        # 将符合条件的检测结果添加到候选列表
-                                        for detection_index in qualified_indices:
-                                            all_candidates.append((child, detection_index, file_path))
-
-                        # 递归处理子节点
-                        collect_candidates(child)
-
-                # 从根节点开始收集
-                for root_item in root_items:
-                    collect_candidates(root_item)
-
-                self.logger.info(f"收集到 {len(all_candidates)} 个候选检测结果")
-
-                # 缓存候选列表
-                self._jump_candidates_cache = all_candidates
-
-            if not all_candidates:
-                messagebox.showinfo("提示", "目录树中没有符合条件的检测结果\n（条件：高分数目 > 0 且 < 8，且小行星/变星都未找到或距离>=10px）")
-                return
-
-            # 步骤2: 确定当前位置
-            self.logger.info("确定当前位置")
-            current_position = -1  # 当前位置在候选列表中的索引
-
-            # 获取当前文件路径和检测索引
-            current_file_path = None
-            current_detection_index = -1
-
-            if hasattr(self, 'selected_file_path') and self.selected_file_path:
-                current_file_path = self.selected_file_path
-                self.logger.info(f"当前文件路径: {current_file_path}")
-
-            if hasattr(self, '_current_cutout_index'):
-                current_detection_index = self._current_cutout_index
-                self.logger.info(f"当前检测索引: {current_detection_index}")
-
-            # 在候选列表中查找当前位置
-            if current_file_path:
-                self.logger.info(f"在 {len(all_candidates)} 个候选中查找当前位置")
-                self.logger.info(f"  当前文件: {os.path.basename(current_file_path) if current_file_path else 'None'}")
-                self.logger.info(f"  当前检测索引: {current_detection_index}")
-
-                # 规范化当前路径（统一使用反斜杠）
-                current_file_path_normalized = os.path.normpath(current_file_path)
-
-                for i, (file_node, detection_index, file_path) in enumerate(all_candidates):
-                    # 规范化候选路径（统一使用反斜杠）
-                    file_path_normalized = os.path.normpath(file_path)
-
-                    if file_path_normalized == current_file_path_normalized and detection_index == current_detection_index:
-                        current_position = i
-                        self.logger.info(f"✓ 找到当前位置在候选列表中的索引: {current_position}")
-                        break
-
-                if current_position == -1:
-                    self.logger.info(f"✗ 未在候选列表中找到当前位置")
-
-            if current_position == -1:
-                self.logger.info("未找到当前位置，从第一个候选开始查找")
-                start_position = 0
-            else:
-                start_position = current_position + 1
-                self.logger.info(f"从当前位置的下一个开始查找: {start_position}")
-
-            # 步骤3: 从当前位置向下查找符合条件的检测结果
-            self.logger.info(f"开始从位置 {start_position} 查找符合条件的检测结果")
-
-            # 保存需要检查的候选（用于延迟加载和检查）
-            self._jump_candidates = all_candidates
-            self._jump_current_position = start_position
-
-            # 开始检查
-            self._check_next_candidate()
-
-        except Exception as e:
-            error_msg = f"跳转失败: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            messagebox.showerror("错误", error_msg)
+        """已移除：原按未查询条件筛选跳转逻辑。"""
+        messagebox.showinfo("提示", "跳转未查询功能已移除。")
 
     def _get_qualified_detection_indices(self, file_path, high_score_count):
-        """
-        获取文件中符合条件的检测索引列表
-
-        条件：
-        1. 小行星和变星都已查询且未找到
-        2. 或者有结果，但所有结果的像素距离都 >= 10像素
-
-        Args:
-            file_path: FITS文件路径
-            high_score_count: 高分检测目标数量
-
-        Returns:
-            符合条件的检测索引列表
-        """
-        qualified_indices = []
-
-        try:
-            # 获取detection目录
-            from pathlib import Path
-            fits_path = Path(file_path)
-            filename_without_ext = fits_path.stem
-
-            self.logger.info(f"检查文件: {filename_without_ext}, 高分数目={high_score_count}")
-
-            # 构建diff输出目录路径
-            # 从文件名解析系统名、日期、天区
-            # 文件名格式: GY5_K052-1_No%20Filter_60S_Bin2_UTC20251102_131726_-19.9C_
-            import re
-
-            # 提取系统名（第一个下划线之前）
-            system_match = re.match(r'([A-Z0-9]+)_', filename_without_ext)
-            if not system_match:
-                self.logger.warning(f"无法从文件名提取系统名: {filename_without_ext}")
-                return qualified_indices
-            system_name = system_match.group(1)
-
-            # 提取日期（UTC后面的8位数字）
-            date_match = re.search(r'UTC(\d{8})_', filename_without_ext)
-            if not date_match:
-                self.logger.warning(f"无法从文件名提取日期: {filename_without_ext}")
-                return qualified_indices
-            date_str = date_match.group(1)
-
-            # 提取天区（从第二个下划线后提取，K052-1 -> K052）
-            # 文件名格式: GY5_K052-1_No%20Filter...
-            # 第一个下划线后是天区
-            parts = filename_without_ext.split('_')
-            if len(parts) < 2:
-                self.logger.warning(f"无法从文件名提取天区: {filename_without_ext}")
-                return qualified_indices
-
-            # 从第二部分提取天区（K052-1 -> K052）
-            region_part = parts[1]  # K052-1
-            region_match = re.match(r'([A-Z]\d+)', region_part)
-            if not region_match:
-                self.logger.warning(f"无法从天区部分提取天区: {region_part}")
-                return qualified_indices
-            region = region_match.group(1)  # K052
-
-            # 构建diff输出目录 - 从配置文件读取
-            diff_base_dir = None
-            if self.get_diff_output_dir_callback:
-                diff_base_dir = self.get_diff_output_dir_callback()
-
-            if not diff_base_dir:
-                self.logger.warning("diff输出目录未配置")
-                return qualified_indices
-
-            diff_base_dir = Path(diff_base_dir)
-            # 使用原始文件名（包含%20）构建路径
-            file_dir = diff_base_dir / system_name / date_str / region / filename_without_ext
-
-            self.logger.info(f"  diff输出目录: {file_dir}")
-            self.logger.info(f"  目录是否存在: {file_dir.exists()}")
-
-            if not file_dir.exists():
-                # 列出父目录中的内容，看看实际的目录名是什么
-                parent_dir = file_dir.parent
-                if parent_dir.exists():
-                    actual_dirs = [d.name for d in parent_dir.iterdir() if d.is_dir()]
-                    self.logger.info(f"  父目录存在，包含的目录: {actual_dirs[:5]}")  # 只显示前5个
-                else:
-                    self.logger.info(f"  父目录也不存在: {parent_dir}")
-                self.logger.info(f"  diff输出目录不存在，跳过")
-                return qualified_indices
-
-            # 查找detection目录
-            detection_dirs = list(file_dir.glob("detection_*"))
-            if not detection_dirs:
-                self.logger.info(f"  未找到detection目录")
-                return qualified_indices
-
-            # 使用最新的detection目录
-            detection_dir = max(detection_dirs, key=lambda p: p.name)
-            cutouts_dir = detection_dir / "cutouts"
-
-            self.logger.info(f"  detection目录: {detection_dir.name}")
-            self.logger.info(f"  cutouts目录: {cutouts_dir}")
-            self.logger.info(f"  cutouts目录是否存在: {cutouts_dir.exists()}")
-
-            if not cutouts_dir.exists():
-                self.logger.info(f"  cutouts目录不存在，跳过")
-                return qualified_indices
-
-            # 检查每个高分检测目标
-            self.logger.info(f"  检查 {high_score_count} 个高分检测目标")
-            for i in range(high_score_count):
-                query_file = cutouts_dir / f"query_results_{i+1:03d}.txt"
-
-                self.logger.info(f"    检查索引 {i}: {query_file.name}")
-
-                if not query_file.exists():
-                    self.logger.info(f"      查询结果文件不存在")
-                    continue
-
-                # 读取查询结果
-                try:
-                    with open(query_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-
-                    # 打印文件内容的前200个字符，用于调试
-                    if i == 0:  # 只打印第一个文件的内容
-                        self.logger.info(f"      文件内容预览: {content[:200]}")
-
-                    # 检查小行星查询结果
-                    skybot_queried = False
-                    skybot_not_found = False
-                    skybot_all_far = False  # 所有小行星都距离>=10像素
-                    if "小行星列表:" in content:
-                        skybot_queried = True
-                        # 检查小行星列表后面是否包含 "(已查询，未找到)"
-                        skybot_section = content.split("小行星列表:")[1].split("变星列表:")[0] if "变星列表:" in content else content.split("小行星列表:")[1]
-                        if "(已查询，未找到)" in skybot_section:
-                            skybot_not_found = True
-                        else:
-                            # 检查是否所有小行星的像素距离都>=10像素
-                            skybot_all_far = self._check_all_distances_far(skybot_section, 10.0)
-
-                    # 检查变星查询结果
-                    vsx_queried = False
-                    vsx_not_found = False
-                    vsx_all_far = False  # 所有变星都距离>=10像素
-                    if "变星列表:" in content:
-                        vsx_queried = True
-                        # 检查变星列表后面是否包含 "(已查询，未找到)"
-                        vsx_section = content.split("变星列表:")[1].split("卫星列表:")[0] if "卫星列表:" in content else content.split("变星列表:")[1]
-                        if "(已查询，未找到)" in vsx_section:
-                            vsx_not_found = True
-                        else:
-                            # 检查是否所有变星的像素距离都>=10像素
-                            vsx_all_far = self._check_all_distances_far(vsx_section, 10.0)
-
-                    self.logger.info(f"      skybot: queried={skybot_queried}, not_found={skybot_not_found}, all_far={skybot_all_far}")
-                    self.logger.info(f"      vsx: queried={vsx_queried}, not_found={vsx_not_found}, all_far={vsx_all_far}")
-
-                    # 判断是否符合条件
-                    # 条件1: 小行星和变星都已查询且未找到
-                    # 条件2: 小行星和变星都已查询，且所有结果的像素距离都>=10像素
-                    skybot_no_close_match = skybot_not_found or skybot_all_far
-                    vsx_no_close_match = vsx_not_found or vsx_all_far
-
-                    if skybot_queried and vsx_queried and skybot_no_close_match and vsx_no_close_match:
-                        qualified_indices.append(i)
-                        reason = []
-                        if skybot_not_found:
-                            reason.append("小行星未找到")
-                        elif skybot_all_far:
-                            reason.append("小行星距离>=10px")
-                        if vsx_not_found:
-                            reason.append("变星未找到")
-                        elif vsx_all_far:
-                            reason.append("变星距离>=10px")
-                        self.logger.info(f"  ✓ 文件 {filename_without_ext}, 索引 {i} 符合条件 ({', '.join(reason)})")
-
-                except Exception as e:
-                    self.logger.warning(f"读取查询结果文件失败: {query_file}, {e}")
-                    continue
-
-        except Exception as e:
-            self.logger.error(f"获取符合条件的检测索引失败: {e}", exc_info=True)
-
-        if qualified_indices:
-            self.logger.debug(f"  找到 {len(qualified_indices)} 个符合条件的检测索引: {qualified_indices}")
-        else:
-            self.logger.debug(f"  未找到符合条件的检测索引")
-
-        return qualified_indices
+        """已移除：原未查询/导出候选筛选逻辑。"""
+        return []
 
     def _jump_to_next_high_score(self):
-        """
-        按照当前目录树选择位置，向下跳转到下一个"高分"文件（diff_gold_red）。
-        - 单向查找：仅从当前选中节点之后开始，直到树末尾；不循环。
-        - 找到后仅选中并聚焦该文件节点（将自动触发已存在的选择逻辑与diff结果自动加载）。
-        """
-        try:
-            selection = self.directory_tree.selection()
-            current = selection[0] if selection else None
+        """已移除：原跳转高分文件逻辑。"""
+        messagebox.showinfo("提示", "跳转高分功能已移除。")
 
-            # 生成整棵树的先序遍历序列（从根到叶，按可见顺序）
-            order = []
-
-            def walk(parent):
-                for child in self.directory_tree.get_children(parent):
-                    order.append(child)
-                    walk(child)
-
-            for root in self.directory_tree.get_children(""):
-                order.append(root)
-                walk(root)
-
-            try:
-                start_idx = order.index(current) + 1
-            except ValueError:
-                start_idx = 0
-
-            # 从当前位置之后开始查找带有高分标记的FITS文件
-            for i in range(start_idx, len(order)):
-                node = order[i]
-                tags = self.directory_tree.item(node, "tags")
-                if "fits_file" in tags and "diff_gold_red" in tags:
-                    # 程序自动选择，避免重置部分查找状态
-                    self._auto_selecting = True
-                    self.directory_tree.selection_set(node)
-                    self.directory_tree.focus(node)
-                    self.directory_tree.see(node)
-                    self.parent_frame.after(10, lambda: setattr(self, '_auto_selecting', False))
-                    try:
-                        text = self.directory_tree.item(node, 'text')
-                        self.logger.info(f"跳转到下一个高分文件: {text}")
-                    except Exception:
-                        pass
-                    return
-
-            # 未找到后续高分文件
-            messagebox.showinfo("提示", "已到末尾，后续没有高分项")
-        except Exception as e:
-            self.logger.error(f"跳转高分失败: {e}", exc_info=True)
     def _jump_to_next_unlabeled_high_score(self):
-        """从目录树当前选中节点开始，向下查找下一个“高分”且未被 GOOD/BAD 标记的检测结果。
-
-        - 起点：当前选中的目录树节点；如果没有选中，则从根节点开始；
-        - 仅遍历带 diff_gold_red 标记的高分文件；
-        - 仅在高分检测列表（analysis 中的前 N 个条目）内查找 manual_label 不是 'good'/'bad' 的 cutout；
-        - 找到后选中文件节点并显示对应检测目标。
-        """
-        try:
-            if not hasattr(self, 'directory_tree'):
-                messagebox.showinfo("提示", "目录树未初始化")
-                return
-
-            # 构造整棵树的遍历顺序（与可见顺序一致）
-            order = []
-
-            def walk(parent):
-                for child in self.directory_tree.get_children(parent):
-                    order.append(child)
-                    walk(child)
-
-            for root in self.directory_tree.get_children(""):
-                order.append(root)
-                walk(root)
-
-            if not order:
-                messagebox.showinfo("提示", "目录树为空")
-                return
-
-            # 起始节点：当前选中，否则树的第一个根节点
-            selection = self.directory_tree.selection()
-            start_node = selection[0] if selection else order[0]
-
-            try:
-                start_index = order.index(start_node)
-            except ValueError:
-                start_index = 0
-
-            current_file_path = getattr(self, 'selected_file_path', None)
-            current_has_cutouts = hasattr(self, '_all_cutout_sets') and bool(self._all_cutout_sets)
-            current_index = getattr(self, '_current_cutout_index', -1)
-
-            # 辅助函数：从文件节点向上找到所属的天区目录(region)路径
-            def get_region_dir_for_node(node, file_path):
-                parent = self.directory_tree.parent(node)
-                while parent:
-                    tags_parent = self.directory_tree.item(parent, "tags")
-                    vals_parent = self.directory_tree.item(parent, "values")
-                    if "region" in tags_parent and vals_parent:
-                        return vals_parent[0]
-                    parent = self.directory_tree.parent(parent)
-                # 兜底：找不到 region 节点时，使用文件所在目录
-                return os.path.dirname(file_path)
-
-            # 1）如果当前选中的是文件节点，优先在该文件中从当前索引之后查找
-            if selection and "fits_file" in self.directory_tree.item(start_node, "tags"):
-                values = self.directory_tree.item(start_node, "values")
-                if values:
-                    start_file_path = values[0]
-                    tags = self.directory_tree.item(start_node, "tags")
-                    text = self.directory_tree.item(start_node, "text")
-                    high_score_count = self._extract_high_score_count_from_text(text)
-
-                    if (
-                        "diff_gold_red" in tags
-                        and high_score_count is not None
-                        and high_score_count > 0
-                        and current_file_path
-                        and os.path.normpath(start_file_path) == os.path.normpath(current_file_path)
-                        and current_has_cutouts
-                    ):
-                        end_idx = min(len(self._all_cutout_sets), high_score_count)
-                        start_cutout_idx = max(current_index + 1, 0)
-                        for idx in range(start_cutout_idx, end_idx):
-                            cutout_set = self._all_cutout_sets[idx]
-                            manual_label = cutout_set.get('manual_label')
-                            if manual_label not in ('good', 'bad'):
-                                self._display_cutout_by_index(idx)
-                                self.logger.info(
-                                    f"跳转到下一个未标记高分检测: {os.path.basename(current_file_path)} - 检测 #{idx + 1} (同一文件)"
-                                )
-                                return
-
-            # 2）从起始节点在树中向下查找后续文件
-            for idx_tree in range(start_index, len(order)):
-                node = order[idx_tree]
-                tags = self.directory_tree.item(node, "tags")
-
-                # 只处理带高分标记的 FITS 文件节点
-                if "fits_file" not in tags or "diff_gold_red" not in tags:
-                    continue
-
-                values = self.directory_tree.item(node, "values")
-                if not values:
-                    continue
-                file_path = values[0]
-
-                # 避免在同一调用中再次从当前文件开头搜索
-                if current_file_path and os.path.normpath(file_path) == os.path.normpath(current_file_path):
-                    continue
-
-                text = self.directory_tree.item(node, "text")
-                high_score_count = self._extract_high_score_count_from_text(text)
-                if high_score_count is None or high_score_count <= 0:
-                    continue
-
-                region_dir = get_region_dir_for_node(node, file_path)
-                if not self._load_diff_results_for_file(file_path, region_dir):
-                    continue
-                if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                    continue
-
-                end_idx = min(len(self._all_cutout_sets), high_score_count)
-                for cutout_idx in range(end_idx):
-                    cutout_set = self._all_cutout_sets[cutout_idx]
-                    manual_label = cutout_set.get('manual_label')
-                    if manual_label in ('good', 'bad'):
-                        continue
-
-                    # 在目录树中选中该文件节点（程序自动选择）
-                    self._auto_selecting = True
-                    # 复用 _jumping_to_labeled_next 标志，抑制 _on_tree_select 中的自动加载首个 cutout
-                    self._jumping_to_labeled_next = True
-                    self.directory_tree.selection_set(node)
-                    self.directory_tree.focus(node)
-                    self.directory_tree.see(node)
-
-                    def _clear_auto_select_flags():
-                        setattr(self, '_auto_selecting', False)
-                        setattr(self, '_jumping_to_labeled_next', False)
-
-                    self.parent_frame.after(10, _clear_auto_select_flags)
-
-                    self.selected_file_path = file_path
-                    self._display_cutout_by_index(cutout_idx)
-
-                    self.logger.info(
-                        f"跳转到下一个未标记高分检测: {os.path.basename(file_path)} - 检测 #{cutout_idx + 1}"
-                    )
-                    return
-
-            messagebox.showinfo("提示", "从当前节点开始，后续没有未标记的高分检测结果")
-        except Exception as e:
-            self.logger.error(f"跳转到下一个未标记高分检测失败: {e}", exc_info=True)
+        """已移除：原跳转未标记高分检测逻辑。"""
+        messagebox.showinfo("提示", "该功能已移除。")
 
     def _check_all_distances_far(self, section_text, min_distance):
         """检查文本中所有像素距离是否都>=指定距离
@@ -4093,877 +3001,16 @@ class FitsImageViewer:
                 delattr(self, '_jump_waiting_for_load')
 
     def _batch_export_unqueried(self):
-        """批量导出所有未查询的检测结果文件"""
-        try:
-            # 获取输出目录配置
-            if not self.config_manager:
-                messagebox.showerror("错误", "配置管理器未初始化")
-                return
+        """已移除：原批量导出未查询检测结果逻辑。"""
+        messagebox.showinfo("提示", "批量导出未查询功能已移除。")
 
-            last_selected = self.config_manager.get_last_selected()
-            output_dir = last_selected.get("unqueried_export_directory", "")
-
-            # 如果输出目录为空，提示用户设置
-            if not output_dir:
-                messagebox.showwarning("警告", "未设置未查询导出目录\n请在下载设置中设置未查询导出目录")
-                return
-
-            # 如果目录不存在，尝试创建
-            if not os.path.exists(output_dir):
-                try:
-                    os.makedirs(output_dir, exist_ok=True)
-                    self.logger.info(f"创建导出目录: {output_dir}")
-                except Exception as e:
-                    messagebox.showerror("错误", f"无法创建导出目录: {output_dir}\n{str(e)}")
-                    return
-
-            # 收集所有符合条件的检测结果（复用跳转未查询的逻辑）
-            self.logger.info("=" * 60)
-            self.logger.info("开始批量导出未查询的检测结果")
-            self.logger.info(f"输出目录: {output_dir}")
-
-            # 获取目录树的根节点
-            root_items = self.directory_tree.get_children()
-            if not root_items:
-                messagebox.showinfo("提示", "目录树为空")
-                return
-
-            # 收集所有符合条件的检测结果
-            all_candidates = []
-
-            def collect_candidates(parent_node):
-                """递归收集所有符合条件的检测结果"""
-                for child in self.directory_tree.get_children(parent_node):
-                    tags = self.directory_tree.item(child, "tags")
-
-                    if "fits_file" in tags:
-                        # 检查是否有检测结果
-                        if any(tag in tags for tag in ["diff_gold_red", "diff_blue", "diff_purple"]):
-                            # 提取高分数目
-                            file_text = self.directory_tree.item(child, 'text')
-                            high_score_count = self._extract_high_score_count_from_text(file_text)
-
-                            # 只处理高分数目 > 0 且 < 8 的文件
-                            if high_score_count is not None and high_score_count > 0 and high_score_count < 8:
-                                # 获取文件路径
-                                values = self.directory_tree.item(child, "values")
-                                if values:
-                                    file_path = values[0]
-
-                                    # 读取该文件的检测结果，找出符合条件的检测索引
-                                    qualified_indices = self._get_qualified_detection_indices(file_path, high_score_count)
-
-                                    # 将符合条件的检测结果添加到候选列表
-                                    for detection_index in qualified_indices:
-                                        all_candidates.append((child, detection_index, file_path))
-
-                    # 递归处理子节点
-                    collect_candidates(child)
-
-            # 从根节点开始收集
-            for root_item in root_items:
-                collect_candidates(root_item)
-
-            self.logger.info(f"收集到 {len(all_candidates)} 个符合条件的检测结果")
-
-            if not all_candidates:
-                messagebox.showinfo("提示", "没有找到符合条件的检测结果\n（条件：高分数目 > 0 且 < 8，且小行星/变星都未找到或距离>=10px）")
-                return
-
-            # 确认是否继续
-            result = messagebox.askyesno(
-                "确认导出",
-                f"找到 {len(all_candidates)} 个符合条件的检测结果\n是否开始导出？"
-            )
-            if not result:
-                return
-
-            # 开始导出
-            import shutil
-            exported_count = 0
-            failed_count = 0
-            skipped_count = 0  # 因直线检测而跳过的数量
-            exported_items = []  # 用于收集导出的检测目标信息
-
-            for i, (file_node, detection_index, file_path) in enumerate(all_candidates, 1):
-                try:
-                    self.logger.info(f"[{i}/{len(all_candidates)}] 导出: {os.path.basename(file_path)}, 索引 {detection_index}")
-
-                    # 获取detection目录
-                    from pathlib import Path
-                    fits_path = Path(file_path)
-                    filename_without_ext = fits_path.stem
-
-                    # 构建diff输出目录路径
-                    system_match = re.match(r'([A-Z0-9]+)_', filename_without_ext)
-                    if not system_match:
-                        self.logger.warning(f"  无法从文件名提取系统名: {filename_without_ext}")
-                        failed_count += 1
-                        continue
-                    system_name = system_match.group(1)
-
-                    date_match = re.search(r'UTC(\d{8})_', filename_without_ext)
-                    if not date_match:
-                        self.logger.warning(f"  无法从文件名提取日期: {filename_without_ext}")
-                        failed_count += 1
-                        continue
-                    date_str = date_match.group(1)
-
-                    parts = filename_without_ext.split('_')
-                    if len(parts) < 2:
-                        self.logger.warning(f"  无法从文件名提取天区: {filename_without_ext}")
-                        failed_count += 1
-                        continue
-
-                    region_part = parts[1]
-                    region_match = re.match(r'([A-Z]\d+)', region_part)
-                    if not region_match:
-                        self.logger.warning(f"  无法从天区部分提取天区: {region_part}")
-                        failed_count += 1
-                        continue
-                    region = region_match.group(1)
-
-                    # 构建diff输出目录 - 从配置文件读取
-                    diff_base_dir = None
-                    if self.get_diff_output_dir_callback:
-                        diff_base_dir = self.get_diff_output_dir_callback()
-
-                    if not diff_base_dir:
-                        self.logger.warning(f"  diff输出目录未配置，跳过文件: {filename_without_ext}")
-                        failed_count += 1
-                        continue
-
-                    diff_base_dir = Path(diff_base_dir)
-                    file_dir = diff_base_dir / system_name / date_str / region / filename_without_ext
-
-                    if not file_dir.exists():
-                        self.logger.warning(f"  diff输出目录不存在: {file_dir}")
-                        failed_count += 1
-                        continue
-
-                    # 查找detection目录
-                    detection_dirs = list(file_dir.glob("detection_*"))
-                    if not detection_dirs:
-                        self.logger.warning(f"  未找到detection目录")
-                        failed_count += 1
-                        continue
-
-                    detection_dir = max(detection_dirs, key=lambda p: p.name)
-                    cutouts_dir = detection_dir / "cutouts"
-
-                    if not cutouts_dir.exists():
-                        self.logger.warning(f"  cutouts目录不存在")
-                        failed_count += 1
-                        continue
-
-                    # 构建输出子目录：系统名/日期/天区/文件名/detection_xxx
-                    export_subdir = Path(output_dir) / system_name / date_str / region / filename_without_ext / detection_dir.name
-                    export_subdir.mkdir(parents=True, exist_ok=True)
-
-                    # 查找对应的cutout文件
-                    # 文件名格式: 001_RA285.123456_DEC43.567890_GY5_K096_1_reference.png
-                    # 或: 001_X1234_Y5678_GY5_K096_1_reference.png
-                    detection_num = detection_index + 1
-                    reference_pattern = f"{detection_num:03d}_*_1_reference.png"
-                    aligned_pattern = f"{detection_num:03d}_*_2_aligned.png"
-                    detection_pattern = f"{detection_num:03d}_*_3_detection.png"
-                    query_results_file = cutouts_dir / f"query_results_{detection_num:03d}.txt"
-
-                    # 查找文件
-                    reference_files = list(cutouts_dir.glob(reference_pattern))
-                    aligned_files = list(cutouts_dir.glob(aligned_pattern))
-                    detection_files = list(cutouts_dir.glob(detection_pattern))
-
-                    # 检查aligned图像是否有过中心的直线（如果启用了直线检测过滤）
-                    if self.enable_line_detection_filter_var.get() and aligned_files:
-                        aligned_file = aligned_files[0]
-                        if self._has_line_through_center(aligned_file):
-                            self.logger.warning(f"  ✗ 跳过: aligned图像中检测到过中心的直线")
-                            skipped_count += 1
-                            continue
-
-                    copied_files = []
-
-                    # 复制reference.png
-                    if reference_files:
-                        src_file = reference_files[0]
-                        dst_file = export_subdir / src_file.name
-                        shutil.copy2(src_file, dst_file)
-                        copied_files.append(src_file.name)
-                        self.logger.info(f"    已复制: {src_file.name}")
-                    else:
-                        self.logger.warning(f"    文件不存在: {reference_pattern}")
-
-                    # 复制aligned.png
-                    if aligned_files:
-                        src_file = aligned_files[0]
-                        dst_file = export_subdir / src_file.name
-                        shutil.copy2(src_file, dst_file)
-                        copied_files.append(src_file.name)
-                        self.logger.info(f"    已复制: {src_file.name}")
-                    else:
-                        self.logger.warning(f"    文件不存在: {aligned_pattern}")
-
-                    # 复制detection.png
-                    if detection_files:
-                        src_file = detection_files[0]
-                        dst_file = export_subdir / src_file.name
-                        shutil.copy2(src_file, dst_file)
-                        copied_files.append(src_file.name)
-                        self.logger.info(f"    已复制: {src_file.name}")
-                    else:
-                        self.logger.warning(f"    文件不存在: {detection_pattern}")
-
-                    # 复制query_results文件
-                    if query_results_file.exists():
-                        dst_file = export_subdir / query_results_file.name
-                        shutil.copy2(query_results_file, dst_file)
-                        copied_files.append(query_results_file.name)
-                        self.logger.info(f"    已复制: {query_results_file.name}")
-                    else:
-                        self.logger.warning(f"    文件不存在: {query_results_file.name}")
-
-                    if copied_files:
-                        exported_count += 1
-                        self.logger.info(f"  ✓ 导出成功，共复制 {len(copied_files)} 个文件")
-
-                        # 收集导出信息用于生成HTML
-                        item_info = {
-                            'index': exported_count,
-                            'system_name': system_name,
-                            'date_str': date_str,
-                            'region': region,
-                            'filename': filename_without_ext,
-                            'detection_num': detection_num,
-                            'reference_file': reference_files[0].name if reference_files else None,
-                            'aligned_file': aligned_files[0].name if aligned_files else None,
-                            'detection_file': detection_files[0].name if detection_files else None,
-                            'query_results_file': query_results_file.name if query_results_file.exists() else None,
-                            'relative_path': f"{system_name}/{date_str}/{region}/{filename_without_ext}/{detection_dir.name}"
-                        }
-
-                        # 读取query_results文件内容
-                        if query_results_file.exists():
-                            try:
-                                with open(query_results_file, 'r', encoding='utf-8') as f:
-                                    item_info['query_results_content'] = f.read()
-                            except Exception as e:
-                                self.logger.warning(f"    读取query_results文件失败: {e}")
-                                item_info['query_results_content'] = None
-                        else:
-                            item_info['query_results_content'] = None
-
-                        exported_items.append(item_info)
-                    else:
-                        failed_count += 1
-                        self.logger.warning(f"  ✗ 没有文件被复制")
-
-                except Exception as e:
-                    self.logger.error(f"  导出失败: {str(e)}", exc_info=True)
-                    failed_count += 1
-
-            # 生成HTML文件
-            if exported_count > 0:
-                try:
-                    html_file = self._generate_export_html(output_dir, exported_items)
-                    self.logger.info(f"已生成HTML文件: {html_file}")
-                except Exception as e:
-                    self.logger.error(f"生成HTML文件失败: {str(e)}", exc_info=True)
-
-            # 显示结果
-            result_msg = f"导出完成！\n\n成功: {exported_count}\n跳过(有直线): {skipped_count}\n失败: {failed_count}\n总计: {len(all_candidates)}\n\n输出目录: {output_dir}"
-            messagebox.showinfo("导出完成", result_msg)
-            self.logger.info("=" * 60)
-            self.logger.info(f"批量导出完成: 成功 {exported_count}, 跳过 {skipped_count}, 失败 {failed_count}")
-
-            # 打开输出目录
-            if exported_count > 0:
-                result = messagebox.askyesno("打开目录", "是否打开输出目录？")
-                if result:
-                    if platform.system() == 'Windows':
-                        os.startfile(output_dir)
-                    elif platform.system() == 'Darwin':  # macOS
-                        subprocess.run(['open', output_dir])
-                    else:  # Linux
-                        subprocess.run(['xdg-open', output_dir])
-
-        except Exception as e:
-            error_msg = f"批量导出失败: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            messagebox.showerror("错误", error_msg)
     def _export_ai_training_data(self):
-        """将当前选择目录/文件下所有手工标记为 GOOD/BAD 的目标对应的 reference/aligned 图像导出到配置的AI训练根目录。
-
-        导出规则：
-        - 仅导出手工标记 manual_label 为 'good' 或 'bad' 的目标；
-        - *成对*导出 cutout 的 "*_1_reference.png" 和 "*_2_aligned.png" 两张图；
-        - 同时导出 reference/aligned 对应的原始 FITS 图中，以目标中心为中心的 1024x1024 区域（若越界则自动补零）；
-        - GOOD/BAD 分别保存到 <根目录>/good 和 <根目录>/bad；
-        - 输出文件名采用 "<FITS文件名去扩展>_<原文件名>", 如有重名则自动追加序号。
-
-        1024x1024 FITS 裁剪（tile）导出规则（2026-02 更新）：
-        - 以 1024 网格 tile 为单位导出，每个 tile 只导出一次（即使同一个 tile 上有多个 good/bad）；
-        - tile 文件名使用从 1 开始的索引号，不再在文件名中包含目标的 XY 坐标；
-        - 目标位置通过 mask 文件输出（同一 tile 内可以包含多个 good 与多个 bad）：
-          normal: 0（非 good/bad 区域）
-          good:   1（good 目标附近 5x5 像素）
-          bad:    2（bad 目标附近 5x5 像素，优先级覆盖 good）
-        - tile FITS 与 mask 保存到 <根目录>/tiles 下；
-        - 同时在 <根目录>/mask_codebook.json 输出 mask 种类与码表。
-        """
-        try:
-            import re
-            from pathlib import Path
-            import numpy as np
-            from PIL import Image as PILImage
-
-            def _ensure_unique_path(dest_dir_: str, base_filename_: str) -> str:
-                """返回一个不会重名的目标路径（若已存在则追加 _1/_2...）。"""
-                dst_path_ = os.path.join(dest_dir_, base_filename_)
-                if not os.path.exists(dst_path_):
-                    return dst_path_
-                root_name_, ext_ = os.path.splitext(base_filename_)
-                idx_ = 1
-                while os.path.exists(os.path.join(dest_dir_, f"{root_name_}_{idx_}{ext_}")):
-                    idx_ += 1
-                return os.path.join(dest_dir_, f"{root_name_}_{idx_}{ext_}")
-
-            # mask 码表（uint8）
-            MASK_CODEBOOK = {
-                "normal": 0,
-                "good": 1,
-                "bad": 2,
-            }
-
-            def _paint_11x11(mask_: "np.ndarray", x_: int, y_: int, code_: int, overwrite_: bool = False):
-                """在 mask_ 上以 (x_, y_) 为中心绘制 11x11 方块（越界自动裁剪）。"""
-                if mask_ is None:
-                    return
-                h_, w_ = mask_.shape[:2]
-                # 11x11 => 半径 5（包含中心）
-                x0_ = max(0, int(x_) - 5)
-                x1_ = min(w_, int(x_) + 6)
-                y0_ = max(0, int(y_) - 5)
-                y1_ = min(h_, int(y_) + 6)
-                if x1_ <= x0_ or y1_ <= y0_:
-                    return
-                if overwrite_:
-                    mask_[y0_:y1_, x0_:x1_] = code_
-                else:
-                    block_ = mask_[y0_:y1_, x0_:x1_]
-                    block_[block_ == MASK_CODEBOOK["normal"]] = code_
-                    mask_[y0_:y1_, x0_:x1_] = block_
-
-            def _sanitize_export_prefix(name_: str) -> str:
-                """清洗导出文件名前缀，去掉不想要的相机参数片段。
-
-                例如：
-                GY5_K053-1_No%20Filter_60S_Bin2_UTC20250628_190147_-15C
-                -> GY5_K053-1_20250628_190147
-                """
-                if not name_:
-                    return name_
-
-                s_ = str(name_)
-                try:
-                    # 去掉 No%20Filter / 曝光 / Bin / UTC 标记（保留后面的日期时间）
-                    s_ = re.sub(r"(?i)No%20Filter_?", "", s_)
-                    s_ = re.sub(r"(?i)_\d+S", "", s_)
-                    s_ = re.sub(r"(?i)_Bin\d+", "", s_)
-                    s_ = re.sub(r"(?i)_UTC(?=\d)", "_", s_)
-
-                    # 去掉温度，如 _-15C 或 -15C
-                    s_ = re.sub(r"(?i)_-?\d+C", "", s_)
-                    s_ = re.sub(r"(?i)-?\d+C", "", s_)
-
-                    # 去掉 _1024（避免把裁剪尺寸写进名字）
-                    s_ = re.sub(r"(?i)_1024$", "", s_)
-
-                    # 清理多余分隔符
-                    s_ = re.sub(r"__+", "_", s_)
-                    s_ = s_.strip("_- ")
-                    return s_
-                except Exception:
-                    return name_
-
-            def _pick_reference_and_aligned_fits(fits_dir_: Path):
-                """在 fits_dir_ 中选择 reference(模板) / aligned(对齐后下载图) 两个 FITS。
-
-                约定（来自 diff_orb 输出）：
-                - 模板文件通常以 "K" 开头（如 K053-1_noise_cleaned_aligned.fits）
-                - 下载/对齐文件通常以 "GY" 开头（如 GY1_K053-1_noise_cleaned_aligned.fits）
-                """
-                if not fits_dir_ or not fits_dir_.exists():
-                    return None, None
-
-                all_fits_ = []
-                for pat in ("*.fits", "*.fit", "*.fts"):
-                    all_fits_.extend(list(fits_dir_.glob(pat)))
-
-                if not all_fits_:
-                    return None, None
-
-                # 优先 noise_cleaned_aligned（且非 stretched）
-                preferred_ = [
-                    f for f in all_fits_
-                    if ("noise_cleaned_aligned" in f.name.lower() and "stretched" not in f.name.lower())
-                ]
-                candidates_ = preferred_ if preferred_ else all_fits_
-
-                # 再次收缩到 aligned 相关文件，避免误选原始未对齐 FITS
-                aligned_like_ = [f for f in candidates_ if "aligned" in f.name.lower()]
-                candidates_ = aligned_like_ if aligned_like_ else candidates_
-
-                # 选择模板(reference) 与 对齐图(aligned)
-                ref_ = next((f for f in candidates_ if re.match(r"^k\d", f.name, re.IGNORECASE)), None)
-                ali_ = next((f for f in candidates_ if re.match(r"^gy\d", f.name, re.IGNORECASE)), None)
-
-                if ref_ and not ali_:
-                    ali_ = next((f for f in candidates_ if f != ref_), None)
-                if ali_ and not ref_:
-                    ref_ = next((f for f in candidates_ if f != ali_), None)
-
-                # 兜底：如果仍无法区分，但恰好两个候选，则按名字排序取前后
-                if (ref_ is None or ali_ is None) and len(candidates_) == 2:
-                    s_ = sorted(candidates_, key=lambda p: p.name.lower())
-                    ref_ = ref_ or s_[0]
-                    ali_ = ali_ or s_[1]
-
-                return ref_, ali_
-
-            def _get_cutout_center_xy_from_detection_filename(detection_img_path_: str, aligned_fits_path_: Path):
-                """从 detection cutout 文件名提取中心像素坐标（在 aligned 坐标系下）。"""
-                if not detection_img_path_:
-                    return None
-                name_ = os.path.basename(detection_img_path_)
-
-                m_xy_ = re.search(r"X(\d+)_Y(\d+)", name_)
-                if m_xy_:
-                    return float(m_xy_.group(1)), float(m_xy_.group(2))
-
-                m_radec_ = re.search(r"RA([\d.]+)_DEC([-\d.]+)", name_, re.IGNORECASE)
-                if m_radec_ and aligned_fits_path_ and aligned_fits_path_.exists():
-                    try:
-                        from astropy.io import fits as _fits
-                        from astropy.wcs import WCS as _WCS
-                        ra_ = float(m_radec_.group(1))
-                        dec_ = float(m_radec_.group(2))
-                        with _fits.open(aligned_fits_path_, memmap=True) as hdul_:
-                            hdr_ = hdul_[0].header
-                            wcs_ = _WCS(hdr_)
-                            pix_ = wcs_.all_world2pix([[ra_, dec_]], 0)
-                            return float(pix_[0][0]), float(pix_[0][1])
-                    except Exception:
-                        return None
-                return None
-
-            def _export_fits_cutout_1024(src_fits_path_: Path, center_x_: float, center_y_: float, dest_dir_: str, out_basename_: str) -> bool:
-                """从 src_fits_path_ 按 1024x1024 网格分块导出目标所在 tile，并写入 dest_dir_。
-
-                规则：
-                - 先用目标像素坐标(center_x_/center_y_)计算所属 tile：
-                  x0=floor(x/1024)*1024, y0=floor(y/1024)*1024
-                - 导出该 tile（越界补零到 1024x1024）
-                - 同步更新 header 中 CRPIX1/CRPIX2（若存在）
-
-                Returns:
-                    (ok, new_x, new_y): new_x/new_y 为目标在 tile 内的新像素坐标（0-based）
-                """
-                try:
-                    from astropy.io import fits as _fits
-                    import numpy as _np
-
-                    if not src_fits_path_ or not src_fits_path_.exists():
-                        return False, None, None
-
-                    size_ = 1024
-                    cx_ = int(round(center_x_))
-                    cy_ = int(round(center_y_))
-
-                    # 计算所属 tile 的左上角（0-based）
-                    # cx_/cy_ 已是 int，直接用整除即可
-                    tile_x_ = cx_ // size_
-                    tile_y_ = cy_ // size_
-                    x0_ = tile_x_ * size_
-                    y0_ = tile_y_ * size_
-                    x1_ = x0_ + size_
-                    y1_ = y0_ + size_
-
-                    with _fits.open(src_fits_path_, memmap=True) as hdul_:
-                        hdr_ = hdul_[0].header
-                        data_ = hdul_[0].data
-                        if data_ is None:
-                            return False
-                        # 兼容多维，取最后两维作为图像
-                        if getattr(data_, "ndim", 0) > 2:
-                            data2_ = data_[0]
-                        else:
-                            data2_ = data_
-
-                        h_, w_ = data2_.shape[-2], data2_.shape[-1]
-                        out_ = _np.zeros((size_, size_), dtype=data2_.dtype)
-
-                        ox0_ = max(0, x0_)
-                        oy0_ = max(0, y0_)
-                        ox1_ = min(w_, x1_)
-                        oy1_ = min(h_, y1_)
-                        if ox1_ <= ox0_ or oy1_ <= oy0_:
-                            return False, None, None
-
-                        dx0_ = ox0_ - x0_
-                        dy0_ = oy0_ - y0_
-                        dx1_ = dx0_ + (ox1_ - ox0_)
-                        dy1_ = dy0_ + (oy1_ - oy0_)
-
-                        out_[dy0_:dy1_, dx0_:dx1_] = data2_[oy0_:oy1_, ox0_:ox1_]
-
-                        new_hdr_ = hdr_.copy()
-                        # 尝试更新 WCS 的参考像素（如果存在）
-                        try:
-                            if "CRPIX1" in new_hdr_:
-                                new_hdr_["CRPIX1"] = float(new_hdr_["CRPIX1"]) - float(x0_)
-                            if "CRPIX2" in new_hdr_:
-                                new_hdr_["CRPIX2"] = float(new_hdr_["CRPIX2"]) - float(y0_)
-                        except Exception:
-                            pass
-
-                        new_hdr_["NAXIS1"] = size_
-                        new_hdr_["NAXIS2"] = size_
-                        try:
-                            new_hdr_.add_history(
-                                f"AI export tile: {size_}x{size_}, target=({cx_},{cy_}), tile_origin=({x0_},{y0_}), "
-                                f"target_in_tile=({cx_ - x0_},{cy_ - y0_})"
-                            )
-                        except Exception:
-                            pass
-
-                    os.makedirs(dest_dir_, exist_ok=True)
-                    dst_path_ = _ensure_unique_path(dest_dir_, out_basename_)
-                    _fits.writeto(dst_path_, out_, header=new_hdr_, overwrite=True)
-                    return True, int(cx_ - x0_), int(cy_ - y0_)
-                except Exception as e_:
-                    try:
-                        self.logger.warning(f"导出FITS 1024x1024 失败: {src_fits_path_} -> {dest_dir_}, 错误: {e_}")
-                    except Exception:
-                        pass
-                    return False, None, None
-
-            # 1. 读取配置中的导出根目录
-            if not self.config_manager:
-                messagebox.showerror("错误", "配置管理器未初始化")
-                return
-
-            last_selected = self.config_manager.get_last_selected()
-            export_root = (last_selected or {}).get("ai_training_export_root", "").strip()
-            if not export_root:
-                messagebox.showwarning(
-                    "警告",
-                    "未设置AI训练导出根目录\n请在【高级设置】中设置 'AI训练导出根目录' 后再尝试导出。",
-                )
-                return
-
-            # 确保根目录存在
-            try:
-                os.makedirs(export_root, exist_ok=True)
-            except Exception as e:
-                messagebox.showerror("错误", f"无法创建AI训练导出根目录: {export_root}\n{str(e)}")
-                return
-
-            # 写入 mask 码表索引文件（幂等覆盖）
-            try:
-                codebook_path = os.path.join(export_root, "mask_codebook.json")
-                payload = {
-                    "version": "1.0",
-                    "mask_types": [
-                        {"name": "normal", "code": MASK_CODEBOOK["normal"], "desc": "非 good/bad 区域"},
-                        {"name": "good", "code": MASK_CODEBOOK["good"], "desc": "good 目标附近 11x11 像素"},
-                        {"name": "bad", "code": MASK_CODEBOOK["bad"], "desc": "bad 目标附近 11x11 像素（覆盖 good）"},
-                    ],
-                    "note": "mask 为 8-bit 灰度 PNG，像素值为 code；同一 tile 可包含多个 good/bad。",
-                }
-                import json as _json
-                with open(codebook_path, "w", encoding="utf-8") as f:
-                    _json.dump(payload, f, ensure_ascii=False, indent=2)
-            except Exception:
-                # 写码表失败不影响导出主流程
-                pass
-
-            # 2. 获取当前目录树选择
-            selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showwarning("警告", "请先在左侧目录树选择一个目录或文件")
-                return
-
-            root_node = selection[0]
-            root_tags = self.directory_tree.item(root_node, "tags")
-            root_values = self.directory_tree.item(root_node, "values")
-            if not root_values and "fits_file" not in root_tags:
-                messagebox.showwarning("警告", "请选择一个包含FITS文件的目录或FITS文件节点")
-                return
-
-            # 3. 收集该节点下的所有FITS文件节点
-            file_nodes = []
-
-            def collect_file_nodes(node):
-                for child in self.directory_tree.get_children(node):
-                    tags_child = self.directory_tree.item(child, "tags")
-                    if "fits_file" in tags_child:
-                        file_nodes.append(child)
-                    else:
-                        # 仅在目录节点中递归
-                        if any(tag in tags_child for tag in ["region", "date", "telescope", "root_dir", "template_dir"]):
-                            collect_file_nodes(child)
-
-            if "fits_file" in root_tags:
-                file_nodes.append(root_node)
-            else:
-                collect_file_nodes(root_node)
-
-            if not file_nodes:
-                messagebox.showinfo("提示", "所选目录下没有FITS文件")
-                return
-
-            # 4. 遍历文件，加载diff结果并导出 GOOD/BAD 的 reference/aligned 图像
-            import shutil
-
-            total_files = len(file_nodes)
-            exported_good_pairs = 0
-            exported_bad_pairs = 0
-            exported_tiles = 0
-            exported_tile_ref_ali_pairs = 0
-            exported_tile_masks = 0
-            processed_files = 0
-
-            self.logger.info("=" * 60)
-            self.logger.info(f"开始导出AI训练数据：文件数={total_files}，根目录={export_root}")
-
-            for file_node in file_nodes:
-                try:
-                    values = self.directory_tree.item(file_node, "values")
-                    if not values:
-                        continue
-                    file_path = values[0]
-                    if not os.path.isfile(file_path):
-                        continue
-
-                    region_dir = os.path.dirname(file_path)
-
-                    # 为该文件加载diff结果（包括手工GOOD/BAD标记）
-                    if not self._load_diff_results_for_file(file_path, region_dir):
-                        continue
-
-                    if not hasattr(self, "_all_cutout_sets") or not self._all_cutout_sets:
-                        continue
-
-                    fits_basename = os.path.splitext(os.path.basename(file_path))[0]
-                    export_prefix = _sanitize_export_prefix(fits_basename)
-
-                    # 尝试为该 FITS 文件确定 reference/aligned 原始 FITS 路径（整文件复用，避免每个 cutout 重复查找）
-                    ref_fits_path = None
-                    ali_fits_path = None
-                    try:
-                        if self._all_cutout_sets:
-                            any_det_img = (self._all_cutout_sets[0] or {}).get("detection")
-                            if any_det_img:
-                                cutout_dir0 = Path(any_det_img).parent
-                                detection_dir0 = cutout_dir0.parent
-                                fits_dir0 = detection_dir0.parent
-                                ref_fits_path, ali_fits_path = _pick_reference_and_aligned_fits(fits_dir0)
-                    except Exception:
-                        ref_fits_path, ali_fits_path = None, None
-
-                    # 先收集该 FITS 文件中所有 tile 上的 good/bad 目标，用于导出 tile FITS 与 mask
-                    # tile_key = (tile_x, tile_y), values: {"first_cxcy": (cx, cy), "good": [(lx, ly)], "bad": [(lx, ly)]}
-                    tile_targets = {}
-                    for cutout_set in self._all_cutout_sets:
-                        label = (cutout_set or {}).get("manual_label")
-                        if not label:
-                            continue
-                        label_lower = str(label).lower()
-                        if label_lower not in ("good", "bad"):
-                            continue
-                        det_img = (cutout_set or {}).get("detection")
-                        if not det_img:
-                            continue
-                        if not (ref_fits_path or ali_fits_path):
-                            continue
-                        # 使用 aligned FITS（若存在）辅助解析 RA/DEC 格式
-                        center_xy = _get_cutout_center_xy_from_detection_filename(det_img, ali_fits_path or ref_fits_path)
-                        if not center_xy:
-                            continue
-                        cx, cy = center_xy
-                        cx_i = int(round(cx))
-                        cy_i = int(round(cy))
-                        tile_x = cx_i // 1024
-                        tile_y = cy_i // 1024
-                        local_x = cx_i - tile_x * 1024
-                        local_y = cy_i - tile_y * 1024
-                        key = (int(tile_x), int(tile_y))
-                        entry = tile_targets.get(key)
-                        if entry is None:
-                            entry = {"first_cxcy": (cx, cy), "good": [], "bad": []}
-                            tile_targets[key] = entry
-                        entry[label_lower].append((int(local_x), int(local_y)))
-
-                    for cutout_set in self._all_cutout_sets:
-                        label = (cutout_set or {}).get("manual_label")
-                        if not label:
-                            continue
-                        label_lower = str(label).lower()
-                        if label_lower not in ("good", "bad"):
-                            continue
-
-                        # 只导出 reference/aligned 两张图
-                        ref_img = (cutout_set or {}).get("reference")
-                        aligned_img = (cutout_set or {}).get("aligned")
-                        if (not ref_img or not os.path.exists(ref_img) or
-                                not aligned_img or not os.path.exists(aligned_img)):
-                            continue
-
-                        subdir = "good" if label_lower == "good" else "bad"
-                        dest_dir = os.path.join(export_root, subdir)
-                        try:
-                            os.makedirs(dest_dir, exist_ok=True)
-                        except Exception:
-                            continue
-
-                        def _copy_with_prefix(src_path: str) -> bool:
-                            """以 fits_basename 为前缀复制单个文件，处理重名，成功返回 True。"""
-                            src_name = os.path.basename(src_path)
-                            base_name = f"{export_prefix}_{src_name}"
-                            dst_path = os.path.join(dest_dir, base_name)
-
-                            if os.path.exists(dst_path):
-                                root_name, ext = os.path.splitext(base_name)
-                                idx = 1
-                                while os.path.exists(os.path.join(dest_dir, f"{root_name}_{idx}{ext}")):
-                                    idx += 1
-                                dst_path = os.path.join(dest_dir, f"{root_name}_{idx}{ext}")
-
-                            try:
-                                shutil.copy2(src_path, dst_path)
-                                return True
-                            except Exception as e:
-                                self.logger.warning(f"复制图像失败: {src_path} -> {dst_path}, 错误: {e}")
-                                return False
-
-                        ok_ref = _copy_with_prefix(ref_img)
-                        ok_aligned = _copy_with_prefix(aligned_img)
-                        if ok_ref and ok_aligned:
-                            if label_lower == "good":
-                                exported_good_pairs += 1
-                            else:
-                                exported_bad_pairs += 1
-
-                    # 导出 1024x1024 tile FITS + mask（同一个 tile 只导出一次，mask 可包含多个 good/bad）
-                    try:
-                        if tile_targets and (ref_fits_path or ali_fits_path):
-                            tiles_dir = os.path.join(export_root, "tiles")
-                            os.makedirs(tiles_dir, exist_ok=True)
-
-                            tile_index_map = {}  # key -> idx (1-based)
-                            next_tile_idx = 1
-
-                            for key, entry in tile_targets.items():
-                                if key not in tile_index_map:
-                                    tile_index_map[key] = next_tile_idx
-                                    next_tile_idx += 1
-                                tile_idx = tile_index_map[key]
-
-                                cx, cy = (entry or {}).get("first_cxcy") or (None, None)
-                                if cx is None or cy is None:
-                                    continue
-
-                                # 1) 导出 reference / aligned tile FITS（各一次）
-                                ok_rf = False
-                                ok_af = False
-                                if ref_fits_path:
-                                    ok_rf, _, _ = _export_fits_cutout_1024(
-                                        ref_fits_path,
-                                        cx,
-                                        cy,
-                                        tiles_dir,
-                                        f"{export_prefix}_tile{tile_idx:04d}_1_reference.fits",
-                                    )
-                                if ali_fits_path:
-                                    ok_af, _, _ = _export_fits_cutout_1024(
-                                        ali_fits_path,
-                                        cx,
-                                        cy,
-                                        tiles_dir,
-                                        f"{export_prefix}_tile{tile_idx:04d}_2_aligned.fits",
-                                    )
-                                if ok_rf and ok_af:
-                                    exported_tile_ref_ali_pairs += 1
-
-                                exported_tiles += 1
-
-                                # 2) 输出 mask（PNG，uint8 code）
-                                mask = np.zeros((1024, 1024), dtype=np.uint8)
-                                goods = (entry or {}).get("good") or []
-                                bads = (entry or {}).get("bad") or []
-
-                                # 先画 good（只覆盖 normal）
-                                for (lx, ly) in goods:
-                                    _paint_11x11(mask, lx, ly, MASK_CODEBOOK["good"], overwrite_=False)
-                                # 再画 bad（强制覆盖）
-                                for (lx, ly) in bads:
-                                    _paint_11x11(mask, lx, ly, MASK_CODEBOOK["bad"], overwrite_=True)
-
-                                mask_name = f"{export_prefix}_tile{tile_idx:04d}_mask.png"
-                                mask_path = _ensure_unique_path(tiles_dir, mask_name)
-                                try:
-                                    PILImage.fromarray(mask, mode="L").save(mask_path)
-                                    exported_tile_masks += 1
-                                except Exception as e:
-                                    self.logger.warning(f"保存mask失败: {mask_path}, 错误: {e}")
-                    except Exception:
-                        # tile FITS / mask 导出失败不影响 PNG 导出
-                        pass
-
-                    processed_files += 1
-
-                except Exception as e:
-                    self.logger.error(f"导出AI训练数据时处理文件失败: {e}", exc_info=True)
-
-            # 5. 导出完成提示
-            msg = (
-                f"导出完成！\n\n"
-                f"处理FITS文件数: {processed_files} / {total_files}\n"
-                f"GOOD 样本(对，ref+aligned): {exported_good_pairs}\n"
-                f"BAD 样本(对，ref+aligned): {exported_bad_pairs}\n\n"
-                f"tile 导出数(1024x1024): {exported_tiles}\n"
-                f"tile FITS对(ref+aligned): {exported_tile_ref_ali_pairs}\n"
-                f"tile mask 数: {exported_tile_masks}\n\n"
-                f"导出根目录: {export_root}"
-            )
-            messagebox.showinfo("导出AI训练数据", msg)
-            self.logger.info("=" * 60)
-            self.logger.info(
-                f"AI训练数据导出完成: GOOD_pairs={exported_good_pairs}, "
-                f"BAD_pairs={exported_bad_pairs}, tiles={exported_tiles}, 文件数={processed_files}"
-            )
-
-        except Exception as e:
-            err = f"导出AI训练数据失败: {str(e)}"
-            self.logger.error(err, exc_info=True)
-            messagebox.showerror("错误", err)
+        """已移除：原 AI 训练数据导出逻辑。"""
+        messagebox.showinfo("提示", "导出 AI 训练数据功能已移除。")
 
     def _export_good_bad_list(self):
-        """导出GOOD/BAD标记目标的详细信息列表。
-
-        导出内容包括：序号、文件目录、对齐后文件名、FITS中心坐标、
-        文件名中的时间、像素坐标、RA/DEC坐标。
-        """
-        if GoodBadListExporter is None:
-            messagebox.showerror("错误", "GOOD/BAD列表导出模块未加载")
-            return
-
-        exporter = GoodBadListExporter(self, self.logger)
-        exporter.export()
-
-
-
+        """已移除：原 GOOD/BAD 列表导出逻辑。"""
+        messagebox.showinfo("提示", "导出 GOOD/BAD 列表功能已移除。")
 
     def _get_ai_classifier(self):
         """懒加载 AI GOOD/BAD 分类器实例。
@@ -6808,9 +4855,6 @@ class FitsImageViewer:
                 # 读取手工标记失败不影响正常浏览
                 pass
 
-            # 检查是否需要自动启用中心距离过滤
-            self._check_auto_enable_center_distance_filter()
-
             # 显示第一组图片
             self._display_cutout_by_index(0)
 
@@ -7403,49 +5447,13 @@ class FitsImageViewer:
             return 0
 
     def _show_next_cutout(self):
-        """显示下一组cutout图片（如果启用过滤，则跳过距离中心过远的检测结果）"""
+        """显示下一组cutout图片"""
         if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
             messagebox.showinfo("提示", "没有可显示的检测结果")
             return
 
-        # 检查是否启用中心距离过滤
-        enable_filter = self.enable_center_distance_filter_var.get() if hasattr(self, 'enable_center_distance_filter_var') else False
-
-        # 如果未启用过滤，直接显示下一个
-        if not enable_filter:
-            next_index = (self._current_cutout_index + 1) % self._total_cutouts
-            self._display_cutout_by_index(next_index)
-            return
-
-        # 启用过滤时，获取最大中心距离阈值
-        try:
-            max_distance = float(self.max_center_distance_var.get())
-        except (ValueError, AttributeError):
-            max_distance = 2400  # 默认值
-
-        # 从当前索引开始查找下一个符合条件的检测结果
-        start_index = self._current_cutout_index
-        attempts = 0
-
-        while attempts < self._total_cutouts:
-            next_index = (start_index + attempts + 1) % self._total_cutouts
-            cutout_set = self._all_cutout_sets[next_index]
-
-            # 计算距离中心的距离
-            distance = self._get_detection_center_distance(cutout_set)
-
-            # 如果距离为0（无法计算）或小于等于阈值，则显示
-            if distance == 0 or distance <= max_distance:
-                self._display_cutout_by_index(next_index)
-                return
-            else:
-                self.logger.info(f"跳过检测结果 {next_index + 1}，距离中心 {distance:.1f} 像素 > {max_distance} 像素")
-
-            attempts += 1
-
-        # 如果所有检测结果都不符合条件，显示提示
-        messagebox.showinfo("提示", f"没有找到距离中心小于 {max_distance} 像素的检测结果")
-        self.logger.warning(f"所有检测结果都超过最大中心距离阈值 {max_distance} 像素")
+        next_index = (self._current_cutout_index + 1) % self._total_cutouts
+        self._display_cutout_by_index(next_index)
 
     def _update_coordinate_display(self, file_info):
         """
@@ -7662,49 +5670,13 @@ class FitsImageViewer:
             self.logger.error(f"更新时间显示失败: {e}")
 
     def _show_previous_cutout(self):
-        """显示上一组cutout图片（如果启用过滤，则跳过距离中心过远的检测结果）"""
+        """显示上一组cutout图片"""
         if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
             messagebox.showinfo("提示", "没有可显示的检测结果")
             return
 
-        # 检查是否启用中心距离过滤
-        enable_filter = self.enable_center_distance_filter_var.get() if hasattr(self, 'enable_center_distance_filter_var') else False
-
-        # 如果未启用过滤，直接显示上一个
-        if not enable_filter:
-            prev_index = (self._current_cutout_index - 1) % self._total_cutouts
-            self._display_cutout_by_index(prev_index)
-            return
-
-        # 启用过滤时，获取最大中心距离阈值
-        try:
-            max_distance = float(self.max_center_distance_var.get())
-        except (ValueError, AttributeError):
-            max_distance = 2400  # 默认值
-
-        # 从当前索引开始查找上一个符合条件的检测结果
-        start_index = self._current_cutout_index
-        attempts = 0
-
-        while attempts < self._total_cutouts:
-            prev_index = (start_index - attempts - 1) % self._total_cutouts
-            cutout_set = self._all_cutout_sets[prev_index]
-
-            # 计算距离中心的距离
-            distance = self._get_detection_center_distance(cutout_set)
-
-            # 如果距离为0（无法计算）或小于等于阈值，则显示
-            if distance == 0 or distance <= max_distance:
-                self._display_cutout_by_index(prev_index)
-                return
-            else:
-                self.logger.info(f"跳过检测结果 {prev_index + 1}，距离中心 {distance:.1f} 像素 > {max_distance} 像素")
-
-            attempts += 1
-
-        # 如果所有检测结果都不符合条件，显示提示
-        messagebox.showinfo("提示", f"没有找到距离中心小于 {max_distance} 像素的检测结果")
-        self.logger.warning(f"所有检测结果都超过最大中心距离阈值 {max_distance} 像素")
+        prev_index = (self._current_cutout_index - 1) % self._total_cutouts
+        self._display_cutout_by_index(prev_index)
 
     def _refresh_cutout_status_label(self):
         """根据当前cutout的手动标记(manual_label)和自动分类(auto_class_label)更新状态标签"""
@@ -7769,17 +5741,6 @@ class FitsImageViewer:
             except Exception as inner_e:
                 self.logger.error(f"写入aligned_comparison手动标记失败(GOOD): {inner_e}")
 
-            # 如果启用了选项，且当前确实标记为 GOOD，则自动跳转到下一个未标记高分检测
-            try:
-                if (
-                    new_label == 'good'
-                    and hasattr(self, 'auto_jump_unlabeled_high_score_var')
-                    and self.auto_jump_unlabeled_high_score_var.get()
-                ):
-                    self._jump_to_next_unlabeled_high_score()
-            except Exception as jump_e:
-                if hasattr(self, 'logger'):
-                    self.logger.error(f"自动跳转到下一个未标记高分检测失败(GOOD): {jump_e}", exc_info=True)
         except Exception as e:
             self.logger.error(f"标记检测结果为GOOD失败: {e}")
 
@@ -7810,17 +5771,6 @@ class FitsImageViewer:
             except Exception as inner_e:
                 self.logger.error(f"写入aligned_comparison手动标记失败(BAD): {inner_e}")
 
-            # 如果启用了选项，且当前确实标记为 BAD，则自动跳转到下一个未标记高分检测
-            try:
-                if (
-                    new_label == 'bad'
-                    and hasattr(self, 'auto_jump_unlabeled_high_score_var')
-                    and self.auto_jump_unlabeled_high_score_var.get()
-                ):
-                    self._jump_to_next_unlabeled_high_score()
-            except Exception as jump_e:
-                if hasattr(self, 'logger'):
-                    self.logger.error(f"自动跳转到下一个未标记高分检测失败(BAD): {jump_e}", exc_info=True)
         except Exception as e:
             self.logger.error(f"标记检测结果为BAD失败: {e}")
 
@@ -14350,1225 +12300,6 @@ class FitsImageViewer:
 
 
     def _batch_evaluate_alignment_quality(self):
-        """
-        批量评估所选目录/文件下所有"高分"检测目标的对齐程度（Rigid），并把“对齐误差(像素)”列追加/更新到现有 analysis.txt 文件中（不再另建 alignment_quality_rigid_* 文件）。
-        - 对齐程度以像素数表示：使用 ORB+RANSAC 估计刚体(相似)仿射的内点重投影平均误差；特征不足时回退相位相关平移量。
-        - 仅统计 analysis.txt 中判定为高分的目标（遵循当前批量设置阈值与排序逻辑）。
-        - 使用每个目标的 cutouts 中的 "*_1_reference.png" 与 "*_2_aligned.png" 进行评估。
-        输出列（顺序）：对齐误差(像素) 序号 综合得分 面积 圆度 锯齿比 Hull顶点 Poly顶点 X坐标 Y坐标 SNR 最大SNR 平均信号 最大信号 Aligned中心7x7SNR
-        """
-        try:
-            selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showwarning("警告", "请先在左侧目录树选择一个目录或文件")
-                return
+        """已移除：原批量对齐误差评估、analysis 清理与高分筛选逻辑。"""
+        messagebox.showinfo("提示", "批量检测对齐功能已移除。")
 
-            item = selection[0]
-            values = self.directory_tree.item(item, "values")
-            tags = self.directory_tree.item(item, "tags")
-            if not values:
-                messagebox.showwarning("警告", "请选择一个目录或文件")
-                return
-
-            # 读取阈值与排序方式（与_high_score_count逻辑保持一致），以及对齐清理相关配置
-            score_threshold = 3.0
-            aligned_snr_threshold = 1.1
-            sort_by = 'aligned_snr'
-            # 新增的对齐清理配置（默认值）
-            prune_non_high = True  # 清除非高分记录与文件
-            err_px_threshold = 2.0  # 误差阈值（像素）（默认2）
-            ratio_threshold = 0.5   # 占比阈值（超过则清空本文件）
-            cleanup_on_ratio = True # 是否执行清空
-            delete_bad_when_ratio_below = True  # 占比未超阈时，是否删除超标条目（默认删除）
-            if self.config_manager:
-                try:
-                    bs = self.config_manager.get_batch_process_settings()
-                    score_threshold = bs.get('score_threshold', 3.0)
-                    aligned_snr_threshold = bs.get('aligned_snr_threshold', 1.1)
-                    sort_by = bs.get('sort_by', 'aligned_snr')
-                    prune_non_high = bs.get('alignment_prune_non_high', True)
-                    err_px_threshold = bs.get('alignment_error_px_threshold', 2.0)
-                    ratio_threshold = bs.get('alignment_error_ratio_threshold', 0.5)
-                    cleanup_on_ratio = bs.get('alignment_cleanup_on_ratio_exceed', True)
-                    delete_bad_when_ratio_below = bs.get('alignment_delete_exceeding_when_ratio_below_threshold', True)
-                    # 读取快速模式设置；在非快速模式下不执行任何删除，仅输出可视化标记
-                    try:
-                        fast_mode = bs.get('fast_mode', True)
-                    except Exception:
-                        fast_mode = True
-                    if not fast_mode:
-                        # 禁用清理/删除相关动作
-                        prune_non_high = False
-                        cleanup_on_ratio = False
-                        delete_bad_when_ratio_below = False
-
-                except Exception:
-                    pass
-
-            # 工具函数：解析 analysis.txt，返回高分行的字典列表（包含字段和序号）
-            def parse_high_score_rows(analysis_path):
-                try:
-                    with open(analysis_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    lines = content.split('\n')
-                    data_started = False
-                    rows = []
-                    for line in lines:
-                        s = line.strip()
-                        if s.startswith('-' * 10):
-                            data_started = True
-                            continue
-                        if ('综合得分' in s) or ('序号' in s):
-                            continue
-                        if not data_started or not s:
-                            continue
-                        parts = s.split()
-                        if len(parts) < 14:
-                            continue
-                        try:
-                            seq = int(parts[0])
-                            score = float(parts[1])
-                            area = float(parts[2])
-                            circularity = float(parts[3])
-                            jag = float(parts[4])
-                            hull_v = int(parts[5])
-                            poly_v = int(parts[6])
-                            x = float(parts[7])
-                            y = float(parts[8])
-                            snr = float(parts[9])
-                            max_snr = float(parts[10])
-                            mean_sig = float(parts[11])
-                            max_sig = float(parts[12])
-                            aligned_snr_str = parts[13]
-                            aligned_snr = None if aligned_snr_str == 'N/A' else float(aligned_snr_str)
-                        except Exception:
-                            continue
-                        is_high = False
-                        if sort_by == 'aligned_snr':
-                            if aligned_snr is not None and aligned_snr > aligned_snr_threshold:
-                                is_high = True
-                        else:
-                            if score > score_threshold and (aligned_snr is not None and aligned_snr > aligned_snr_threshold):
-                                is_high = True
-                        if is_high:
-                            rows.append({
-                                'seq': seq,
-                                'score': score,
-                                'area': area,
-                                'circularity': circularity,
-                                'jag': jag,
-                                'hull_v': hull_v,
-                                'poly_v': poly_v,
-                                'x': x,
-                                'y': y,
-                                'snr': snr,
-                                'max_snr': max_snr,
-                                'mean_sig': mean_sig,
-                                'max_sig': max_sig,
-                                'aligned_snr': aligned_snr_str
-                            })
-                    return rows
-                except Exception:
-                    return []
-
-            # 工具函数：基于两张cutout图片计算刚体对齐误差（像素）
-            def rigid_error_px(ref_png, aligned_png):
-                img1 = cv2.imread(str(ref_png), cv2.IMREAD_GRAYSCALE)
-                img2 = cv2.imread(str(aligned_png), cv2.IMREAD_GRAYSCALE)
-                if img1 is None or img2 is None:
-                    return None
-                # 轻度预处理
-                img1b = cv2.GaussianBlur(img1, (3, 3), 0)
-                img2b = cv2.GaussianBlur(img2, (3, 3), 0)
-                # 优先：基于星点的多边形（三角形）刚性匹配，评估对齐误差
-                try:
-                    import math
-                    from itertools import combinations
-                    # 读取对齐调优设置（速度/稳健性）
-                    ats = {}
-                    try:
-                        ats = self.config_manager.get_alignment_tuning_settings() if self.config_manager else {}
-                    except Exception:
-                        ats = {}
-                    _STAR_MAX = int(ats.get('star_max_points', 600))
-                    _STAR_MIN_DIST = float(ats.get('star_min_distance_px', 2.0))
-                    _TRI_POINTS = int(ats.get('tri_points', 35))
-                    _TRI_THR = float(ats.get('tri_inlier_thr_px', 4.0))
-                    _TRI_BIN = int(ats.get('tri_bin_scale', 60))
-
-                    def _detect_stars(gray, max_points=600):
-                        g = cv2.GaussianBlur(gray, (3, 3), 0)
-                        m, s = cv2.meanStdDev(g)
-                        thr = float(m + 2.5 * s)
-                        _, bw = cv2.threshold(g, max(1, min(255, int(thr))), 255, cv2.THRESH_BINARY)
-                        num, labels, stats, centroids = cv2.connectedComponentsWithStats(bw, 8)
-                        cand = []
-                        H, W = gray.shape[:2]
-                        for i in range(1, num):
-                            area = int(stats[i, cv2.CC_STAT_AREA])
-                            if 2 <= area <= 200:
-                                cx, cy = float(centroids[i][0]), float(centroids[i][1])
-                                if 0 <= cx < W and 0 <= cy < H:
-                                    val = float(g[int(round(cy)), int(round(cx))])
-                                    cand.append((val, cx, cy))
-                        cand.sort(key=lambda t: t[0], reverse=True)
-                        pts = []
-                        min_d2 = float(_STAR_MIN_DIST * _STAR_MIN_DIST)
-                        for _, x, y in cand:
-                            if len(pts) >= max_points:
-                                break
-                            ok = True
-                            for ox, oy in pts:
-                                dx, dy = x - ox, y - oy
-                                if dx * dx + dy * dy < min_d2:
-                                    ok = False
-                                    break
-                            if ok:
-                                pts.append((x, y))
-                        return np.float32(pts)
-                    def _best_rigid_by_triangles(P1, P2, tri_points=35, thr=4.0, bin_scale=60):
-                        if P1.shape[0] < 3 or P2.shape[0] < 3:
-                            return None
-                        n1 = min(tri_points, P1.shape[0])
-                        n2 = min(tri_points, P2.shape[0])
-                        idxs1 = list(range(n1))
-                        idxs2 = list(range(n2))
-                        # 预建字典：按三角形形状比值量化
-                        def tri_key(pa, pb, pc):
-                            a = np.linalg.norm(pa - pb)
-                            b = np.linalg.norm(pb - pc)
-                            c = np.linalg.norm(pa - pc)
-                            l = sorted([a, b, c])
-                            if l[2] <= 1e-6:
-                                return None
-                            r1 = l[0] / l[2]
-                            r2 = l[1] / l[2]
-                            return (int(round(r1 * bin_scale)), int(round(r2 * bin_scale)))
-                        dct = {}
-                        for i, j, k in combinations(idxs1, 3):
-                            key = tri_key(P1[i], P1[j], P1[k])
-                            if key is None:
-                                continue
-                            dct.setdefault(key, []).append((i, j, k))
-                        if not dct:
-                            return None
-                        best = None  # (inliers_cnt, R, t, inlier_mask, err)
-                        # 遍历 P2 三角形，查找近邻桶
-                        for I, J, K in combinations(idxs2, 3):
-                            key = tri_key(P2[I], P2[J], P2[K])
-                            if key is None:
-                                continue
-                            bx, by = key
-                            cands = []
-                            for dx in (-1, 0, 1):
-                                for dy in (-1, 0, 1):
-                                    cands.extend(dct.get((bx + dx, by + dy), []))
-                            if not cands:
-                                continue
-                            B = np.stack([P2[I], P2[J], P2[K]], axis=0)
-                            for (i, j, k) in cands[:200]:  # 限制候选，控制耗时
-                                A = np.stack([P1[i], P1[j], P1[k]], axis=0)
-                                # Kabsch 刚体估计（无缩放） B->A
-                                muB, muA = B.mean(0), A.mean(0)
-                                X, Y = B - muB, A - muA
-                                U, S, Vt = np.linalg.svd(X.T @ Y)
-                                R = Vt.T @ U.T
-                                if np.linalg.det(R) < 0:
-                                    Vt[1, :] *= -1
-                                    R = Vt.T @ U.T
-                                t = muA - (R @ muB)
-                                # 将 P2 全部点变换后与 P1 做最近邻配对（阈值 thr）
-                                P2t = (P2 @ R.T) + t
-                                # 向量化最近邻距离
-                                d2 = np.sqrt(((P2t[:, None, :] - P1[None, :, :]) ** 2).sum(axis=2))
-                                mins = d2.min(axis=1)
-                                inlier_mask = mins <= thr
-                                inliers_cnt = int(inlier_mask.sum())
-                                if inliers_cnt >= 3:
-                                    err = float(mins[inlier_mask].mean()) if inliers_cnt > 0 else 0.0
-                                    if (best is None) or (inliers_cnt > best[0]) or (inliers_cnt == best[0] and err < best[4]):
-                                        best = (inliers_cnt, R, t, inlier_mask, err)
-                        return best
-                    P1 = _detect_stars(img1, max_points=_STAR_MAX)
-                    P2 = _detect_stars(img2, max_points=_STAR_MAX)
-                    if P1.shape[0] >= 10 and P2.shape[0] >= 10:
-                        res = _best_rigid_by_triangles(P1, P2, tri_points=_TRI_POINTS, thr=_TRI_THR, bin_scale=_TRI_BIN)
-                        if res is not None and res[0] >= 6:
-                            # 返回刚性误差（内点均值）
-                            return float(res[4])
-                except Exception:
-                    pass
-
-                orb = cv2.ORB_create(nfeatures=1500, scaleFactor=1.2, nlevels=8)
-                k1, d1 = orb.detectAndCompute(img1b, None)
-                k2, d2 = orb.detectAndCompute(img2b, None)
-                if d1 is None or d2 is None or len(k1) < 6 or len(k2) < 6:
-                    # 回退：相位相关仅估计平移
-                    try:
-                        shift, _ = cv2.phaseCorrelate(np.float32(img1), np.float32(img2))
-                        return float(np.hypot(shift[0], shift[1]))
-                    except Exception:
-                        return None
-                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-                _raw = bf.knnMatch(d1, d2, k=2)
-                ratio = 0.8
-                matches = [m for m, n in _raw if n is not None and m.distance < ratio * n.distance]
-                if not matches:
-                    try:
-                        shift, _ = cv2.phaseCorrelate(np.float32(img1), np.float32(img2))
-                        return float(np.hypot(shift[0], shift[1]))
-                    except Exception:
-                        return None
-                matches = sorted(matches, key=lambda m: m.distance)[:300]
-                if len(matches) < 6:
-                    try:
-                        shift, _ = cv2.phaseCorrelate(np.float32(img1), np.float32(img2))
-                        return float(np.hypot(shift[0], shift[1]))
-                    except Exception:
-                        return None
-                pts1 = np.float32([k1[m.queryIdx].pt for m in matches])
-                pts2 = np.float32([k2[m.trainIdx].pt for m in matches])
-                # 刚体RANSAC：禁用缩放/剪切，仅旋转+平移参与筛内点
-                try:
-                    N = len(pts1)
-                    best_mask = None
-                    best_inliers = 0
-                    thr = 3.0
-                    iters = 1000
-                    rng = np.random.default_rng()
-                    for _ in range(iters):
-                        if N < 3:
-                            break
-                        idxs = rng.choice(N, size=3, replace=False)
-                        P2s = pts2[idxs]
-                        P1s = pts1[idxs]
-                        mu2 = P2s.mean(axis=0); mu1 = P1s.mean(axis=0)
-                        X = P2s - mu2; Y = P1s - mu1
-                        Hm = X.T @ Y
-                        U, S, Vt = np.linalg.svd(Hm)
-                        R = Vt.T @ U.T
-                        if np.linalg.det(R) < 0:
-                            Vt[1, :] *= -1
-                            R = Vt.T @ U.T
-                        tvec = mu1 - (R @ mu2)
-                        pred = (pts2 @ R.T) + tvec
-                        res = np.sqrt(((pred - pts1) ** 2).sum(axis=1))
-                        mask = res <= thr
-                        inl = int(mask.sum())
-                        if inl > best_inliers:
-                            best_inliers = inl
-                            best_mask = mask
-                    if best_mask is None or best_inliers < 3:
-                        try:
-                            shift, _ = cv2.phaseCorrelate(np.float32(img1), np.float32(img2))
-                            return float(np.hypot(shift[0], shift[1]))
-                        except Exception:
-                            return None
-                    mask = best_mask
-                except Exception:
-                    try:
-                        shift, _ = cv2.phaseCorrelate(np.float32(img1), np.float32(img2))
-                        return float(np.hypot(shift[0], shift[1]))
-                    except Exception:
-                        return None
-                # 使用 Kabsch 算法估计纯刚体（无缩放）变换，并用其重投影误差作为刚性对齐误差
-                p2 = pts2[mask]
-                p1 = pts1[mask]
-                try:
-                    mu2 = p2.mean(axis=0)
-                    mu1 = p1.mean(axis=0)
-                    X = p2 - mu2
-                    Y = p1 - mu1
-                    Hm = X.T @ Y
-                    U, S, Vt = np.linalg.svd(Hm)
-                    R = Vt.T @ U.T
-                    if np.linalg.det(R) < 0:
-                        Vt[1, :] *= -1
-                        R = Vt.T @ U.T
-                    tvec = mu1 - (R @ mu2)
-                    p2t = (p2 @ R.T) + tvec
-                    errs = np.sqrt(((p2t - p1) ** 2).sum(axis=1))
-                    return float(np.mean(errs)) if errs.size > 0 else 0.0
-                except Exception:
-                    try:
-                        shift, _ = cv2.phaseCorrelate(np.float32(img1), np.float32(img2))
-                        return float(np.hypot(shift[0], shift[1]))
-                    except Exception:
-                        return None
-
-            # 收集要处理的文件
-            files_to_process = []
-            saving_root_output_dir = None
-            flagged_images_total = 0  # 统计已标记的图像数量（非快速模式可视化用）
-            if "fits_file" in tags:
-                fp = values[0]
-                files_to_process.append({'file_path': fp, 'region_dir': os.path.dirname(fp)})
-                saving_root_output_dir = None  # 每文件各自决策
-            else:
-                # 目录：递归收集
-                directory = values[0]
-                # 计算对应输出根目录用于汇总文件保存
-                saving_root_output_dir = self._get_output_directory_from_download_directory(directory)
-                for root, _, files in os.walk(directory):
-                    for fname in files:
-                        if fname.lower().endswith(('.fits', '.fit', '.fts')):
-                            fpath = os.path.join(root, fname)
-                            info = self._check_file_diff_result(fpath, root)
-                            if info and info.get('has_result') and info.get('high_score_count', 0) > 0:
-                                files_to_process.append({'file_path': fpath, 'region_dir': root})
-
-
-                # 统计已标记的图像数量（非快速模式可视化用）
-                flagged_images_total = 0
-
-            if not files_to_process:
-                messagebox.showinfo("提示", "未找到可评估的高分检测目标")
-                return
-
-            # 逐个 detection 目录，计算高分序号的误差并把新列写回现有 analysis 文件
-            updated_files = 0
-            updated_rows_total = 0
-            cleared_files = 0
-            pruned_rows_total = 0
-            deleted_cutouts_total = 0
-
-            for item in files_to_process:
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-                            #
-
-                file_path = item['file_path']
-                region_dir = item['region_dir']
-                filename = os.path.basename(file_path)
-
-                base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
-                download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
-                if not base_output_dir or not download_dir:
-                    self.logger.warning("输出目录或下载目录未配置，跳过: %s", filename)
-                    continue
-                try:
-                    rel = os.path.relpath(os.path.normpath(region_dir), os.path.normpath(download_dir))
-                except ValueError:
-                    continue
-                output_region_dir = os.path.join(base_output_dir, rel)
-                file_base = os.path.splitext(os.path.basename(file_path))[0]
-                potential_output_dir = os.path.join(output_region_dir, file_base)
-                if not os.path.isdir(potential_output_dir):
-                    continue
-
-                # detection目录（取首个 detection_*）
-                detection_dir_path = None
-                try:
-                    for nm in os.listdir(potential_output_dir):
-                        if nm.startswith('detection_'):
-                            detection_dir_path = os.path.join(potential_output_dir, nm)
-                            break
-                except Exception:
-                    detection_dir_path = None
-                if not detection_dir_path:
-                    continue
-
-                # analysis文件
-                analysis_files = [f for f in os.listdir(detection_dir_path) if '_analysis' in f and f.endswith('.txt')]
-                if not analysis_files:
-                    continue
-                analysis_path = os.path.join(detection_dir_path, analysis_files[0])
-
-                # 解析高分行
-                high_rows = parse_high_score_rows(analysis_path)
-                if not high_rows:
-                    continue
-
-                # 计算各序号的对齐误差
-                cutouts_dir = Path(detection_dir_path) / 'cutouts'
-                ref_imgs = sorted(cutouts_dir.glob('*_1_reference.png'))
-                ali_imgs = sorted(cutouts_dir.glob('*_2_aligned.png'))
-                if not ref_imgs or not ali_imgs:
-                    continue
-
-                #
-                def _save_alignment_flag(seq, reason, err_text=None):
-                    """在 aligned 切片上绘制可视化标记并保存到 cutouts 目录，文件名与原始对齐切片相关联"""
-                    try:
-                        idx_flag = int(seq) - 1
-                        if idx_flag < 0 or idx_flag >= min(len(ref_imgs), len(ali_imgs)):
-                            return False
-                        ali_path = Path(ali_imgs[idx_flag])
-                        img = cv2.imread(str(ali_path), cv2.IMREAD_COLOR)
-                        if img is None:
-                            return False
-                        h, w = img.shape[:2]
-                        # 红色边框 + 文本标签
-                        cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 255), 3)
-
-                        label = "MISALIGNED" if reason == "misaligned" else "CENTERLINE"
-                        if err_text:
-                            try:
-                                label = f"{label} err={float(err_text):.3f}px"
-                            except Exception:
-                                label = f"{label} err={err_text}"
-                        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-
-                        # 直接输出到 cutouts 目录，文件名与原始文件名关联
-                        cutouts_dir = ali_path.parent
-                        out_name = f"{ali_path.stem}__flag_{reason}.png"
-                        cv2.imwrite(str(cutouts_dir / out_name), img)
-                        return True
-                    except Exception:
-                        return False
-
-
-                def _save_line_viz(seq):
-                    try:
-                        # 兼容旧命名：直接调用新版 _save_line_viz2
-                        return _save_line_viz2(seq)
-                    except Exception:
-                        return False
-
-                # 修正后的可视化函数（避免递归/作用域问题）
-                def _save_alignment_viz2(seq, err_px=None):
-                    try:
-                        idx_v = int(seq) - 1
-                        if idx_v < 0 or idx_v >= min(len(ref_imgs), len(ali_imgs)):
-                            return False
-                        ref_path = Path(ref_imgs[idx_v])
-                        ali_path = Path(ali_imgs[idx_v])
-                        ref = cv2.imread(str(ref_path), cv2.IMREAD_COLOR)
-                        ali = cv2.imread(str(ali_path), cv2.IMREAD_COLOR)
-                        if ref is None or ali is None:
-                            return False
-                        h, w = ref.shape[:2]
-                        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY) if len(ref.shape) == 3 else ref.copy()
-                        ali_g = cv2.cvtColor(ali, cv2.COLOR_BGR2GRAY) if len(ali.shape) == 3 else ali.copy()
-                        used_phase = False
-                        M = None
-                        k1 = k2 = d1 = d2 = matches = inliers = None
-
-                        # 星点 + 三角形几何哈希（刚性，仅旋转+平移）优先用于可视化配对（失败也不回退）
-                        star_pairs = None
-                        try:
-                            from itertools import combinations
-                            # 读取对齐调优设置供可视化使用
-                            v_ats = {}
-                            try:
-                                v_ats = self.config_manager.get_alignment_tuning_settings() if self.config_manager else {}
-                            except Exception:
-                                v_ats = {}
-                            V_STAR_MAX = int(v_ats.get('star_max_points', 600))
-                            V_STAR_MIN_DIST = float(v_ats.get('star_min_distance_px', 2.0))
-                            V_TRI_POINTS = int(v_ats.get('tri_points', 35))
-                            V_TRI_THR = float(v_ats.get('tri_inlier_thr_px', 4.0))
-                            V_TRI_BIN = int(v_ats.get('tri_bin_scale', 60))
-                            V_TRI_TOPK = int(v_ats.get('tri_topk', 5))
-
-                            def _detect_stars2(gray, max_points=600):
-                                g = cv2.GaussianBlur(gray, (3, 3), 0)
-                                m, s = cv2.meanStdDev(g)
-                                thr = float(m + 2.5 * s)
-                                _, bw = cv2.threshold(g, max(1, min(255, int(thr))), 255, cv2.THRESH_BINARY)
-                                num, labels, stats, centroids = cv2.connectedComponentsWithStats(bw, 8)
-                                cand = []
-                                H, W = gray.shape[:2]
-                                for i in range(1, num):
-                                    area = int(stats[i, cv2.CC_STAT_AREA])
-                                    if 2 <= area <= 200:
-                                        cx, cy = float(centroids[i][0]), float(centroids[i][1])
-                                        if 0 <= cx < W and 0 <= cy < H:
-                                            val = float(g[int(round(cy)), int(round(cx))])
-                                            cand.append((val, cx, cy))
-                                cand.sort(key=lambda t: t[0], reverse=True)
-                                pts = []
-                                min_d2 = float(V_STAR_MIN_DIST * V_STAR_MIN_DIST)
-                                for _, x, y in cand:
-                                    if len(pts) >= max_points:
-                                        break
-                                    ok = True
-                                    for ox, oy in pts:
-                                        dx, dy = x - ox, y - oy
-                                        if dx * dx + dy * dy < min_d2:
-                                            ok = False
-                                            break
-                                    if ok:
-                                        pts.append((x, y))
-                                return np.float32(pts)
-                            def _best_rigid_tri2(P1, P2, tri_points=35, thr=4.0, bin_scale=60, topk=5):
-                                if P1.shape[0] < 3 or P2.shape[0] < 3:
-                                    return None
-                                n1 = min(tri_points, P1.shape[0])
-                                n2 = min(tri_points, P2.shape[0])
-                                idxs1 = list(range(n1))
-                                idxs2 = list(range(n2))
-                                def tri_key(pa, pb, pc):
-                                    a = np.linalg.norm(pa - pb)
-                                    b = np.linalg.norm(pb - pc)
-                                    c = np.linalg.norm(pa - pc)
-                                    l = sorted([a, b, c])
-                                    if l[2] <= 1e-6:
-                                        return None
-                                    r1 = l[0] / l[2]
-                                    r2 = l[1] / l[2]
-                                    return (int(round(r1 * bin_scale)), int(round(r2 * bin_scale)))
-                                dct = {}
-                                for i, j, k in combinations(idxs1, 3):
-                                    key = tri_key(P1[i], P1[j], P1[k])
-                                    if key is None:
-                                        continue
-                                    dct.setdefault(key, []).append((i, j, k))
-                                if not dct:
-                                    return None
-                                best = None
-                                top_tris = []  # 记录前若干个评分最高的三角形对
-                                def _push_top(entry):
-                                    top_tris.append(entry)
-                                    top_tris.sort(key=lambda e: (-e['inliers_cnt'], e['err_all']))
-                                    if len(top_tris) > topk:
-                                        top_tris.pop()
-                                for I, J, K in combinations(idxs2, 3):
-                                    key = tri_key(P2[I], P2[J], P2[K])
-                                    if key is None:
-                                        continue
-                                    bx, by = key
-                                    cands = []
-                                    for dx in (-1, 0, 1):
-                                        for dy in (-1, 0, 1):
-                                            cands.extend(dct.get((bx + dx, by + dy), []))
-                                    if not cands:
-                                        continue
-                                    B = np.stack([P2[I], P2[J], P2[K]], axis=0)
-                                    for (i, j, k) in cands[:200]:
-                                        A = np.stack([P1[i], P1[j], P1[k]], axis=0)
-                                        muB, muA = B.mean(0), A.mean(0)
-                                        X, Y = B - muB, A - muA
-                                        U, S, Vt = np.linalg.svd(X.T @ Y)
-                                        R = Vt.T @ U.T
-                                        if np.linalg.det(R) < 0:
-                                            Vt[1, :] *= -1
-                                            R = Vt.T @ U.T
-                                        tvec = muA - (R @ muB)
-                                        P2t = (P2 @ R.T) + tvec
-                                        d2 = np.sqrt(((P2t[:, None, :] - P1[None, :, :]) ** 2).sum(axis=2))
-                                        mins = d2.min(axis=1)
-                                        inlier_mask = mins <= thr
-                                        inliers_cnt = int(inlier_mask.sum())
-                                        err_all = float(mins.mean()) if mins.size > 0 else float('inf')
-                                        err_in = float(mins[inlier_mask].mean()) if inliers_cnt > 0 else None
-                                        entry = {
-                                            'inliers_cnt': inliers_cnt,
-                                            'R': R,
-                                            'tvec': tvec,
-                                            'mins': mins,
-                                            'd2': d2,
-                                            'err': err_in,
-                                            'err_all': err_all,
-                                            'tri1': (i, j, k),
-                                            'tri2': (I, J, K),
-                                        }
-                                        if (best is None or inliers_cnt > best['inliers_cnt'] or
-                                            (inliers_cnt == best['inliers_cnt'] and err_all < best['err_all'])):
-                                            best = entry
-                                        _push_top(entry)
-                                if best is None:
-                                    return None
-                                best['top_tris'] = top_tris
-                                return best
-                            P1 = _detect_stars2(ref_g, max_points=V_STAR_MAX)
-                            P2 = _detect_stars2(ali_g, max_points=V_STAR_MAX)
-                            if P1.shape[0] >= 3 and P2.shape[0] >= 3:
-                                res2 = _best_rigid_tri2(P1, P2, tri_points=V_TRI_POINTS, thr=V_TRI_THR, bin_scale=V_TRI_BIN, topk=V_TRI_TOPK)
-                                # 即便 res2 为空也保留星点集合用于可视化
-                                tri_coords1 = None
-                                tri_coords2 = None
-                                top_tris = []
-                                pairs = []
-                                err2 = None
-                                if res2 is not None:
-                                    inliers_cnt = int(res2['inliers_cnt'])
-                                    R = res2['R']; tvec = res2['tvec']; mins = res2['mins']; d2 = res2['d2']
-                                    err2 = res2['err']
-                                    # 构建唯一配对（按距离从小到大贪心），允许 <6 也绘制
-                                    P2t = (P2 @ R.T) + tvec
-                                    nearest_idx = d2.argmin(axis=1)
-                                    order = np.argsort(mins)
-                                    used1 = np.zeros((P1.shape[0],), dtype=bool)
-                                    THR = float(V_TRI_THR)
-                                    for idx_s in order:
-                                        j = int(nearest_idx[idx_s]); d = float(mins[idx_s])
-                                        if d <= THR and not used1[j]:
-                                            used1[j] = True
-                                            p1 = (int(round(P1[j, 0])), int(round(P1[j, 1])))
-                                            p2 = (int(round(P2[idx_s, 0])), int(round(P2[idx_s, 1])))
-                                            pairs.append((p1, p2))
-                                    if res2.get('tri1') is not None and res2.get('tri2') is not None:
-                                        i, j, k = res2['tri1']
-                                        I, J, K = res2['tri2']
-                                        tri_coords1 = [(int(round(P1[i,0])), int(round(P1[i,1]))),
-                                                       (int(round(P1[j,0])), int(round(P1[j,1]))),
-                                                       (int(round(P1[k,0])), int(round(P1[k,1])))]
-                                        tri_coords2 = [(int(round(P2[I,0])), int(round(P2[I,1]))),
-                                                       (int(round(P2[J,0])), int(round(P2[J,1]))),
-                                                       (int(round(P2[K,0])), int(round(P2[K,1])))]
-                                    top_tris = res2.get('top_tris', [])
-                                star_pairs = {
-                                    'pairs': pairs,
-                                    'error': err2,
-                                    'tri_coords1': tri_coords1,
-                                    'tri_coords2': tri_coords2,
-                                    'top_tris': top_tris,
-                                    'all_stars1': P1,
-                                    'all_stars2': P2,
-                                }
-                                if err2 is not None and err_px is None and isinstance(err2, (int, float)):
-                                    err_px = err2
-                        except Exception:
-                            star_pairs = None
-
-
-                        # 构建并排大图，左侧ref，右侧ali，绘制全部匹配点与连线
-                        h1, w1 = ref.shape[:2]
-                        h2, w2 = ali.shape[:2]
-                        H = max(h1, h2)
-                        W = w1 + w2
-                        canvas = np.zeros((H, W, 3), dtype=np.uint8)
-                        canvas[0:h1, 0:w1] = ref
-                        canvas[0:h2, w1:w1+w2] = ali
-                        try:
-                            if star_pairs is not None:
-                                # 先绘制所有检测到的星点（蓝/青），再叠加配对（绿/黄线）与多三角形
-                                P1_all = star_pairs.get('all_stars1')
-                                P2_all = star_pairs.get('all_stars2')
-                                if isinstance(P1_all, np.ndarray) and P1_all.size > 0:
-                                    for (x, y) in P1_all:
-                                        cv2.circle(canvas, (int(x), int(y)), 1, (255, 0, 0), -1)  # 左图蓝色
-                                if isinstance(P2_all, np.ndarray) and P2_all.size > 0:
-                                    for (x, y) in P2_all:
-                                        cv2.circle(canvas, (int(x + w1), int(y)), 1, (180, 255, 255), -1)  # 右图浅青
-                                # 星点-星点配对（刚性三角形匹配）
-                                total = len(star_pairs.get('pairs', []))
-                                for (p1, p2) in star_pairs.get('pairs', []):
-                                    p1_draw = (int(p1[0]), int(p1[1]))
-                                    p2_draw = (int(p2[0] + w1), int(p2[1]))
-                                    cv2.circle(canvas, p1_draw, 2, (0, 255, 0), -1)
-                                    cv2.circle(canvas, p2_draw, 2, (0, 255, 0), -1)
-                                    cv2.line(canvas, p1_draw, p2_draw, (0, 255, 255), 1)
-                                # 多个候选三角形（浅紫）
-                                for ent in star_pairs.get('top_tris', [])[:5]:
-                                    tri1 = ent.get('tri1'); tri2 = ent.get('tri2')
-                                    if tri1 and isinstance(P1_all, np.ndarray) and P1_all.shape[0] > max(tri1):
-                                        pts = [(int(P1_all[tri1[0],0]), int(P1_all[tri1[0],1])),
-                                               (int(P1_all[tri1[1],0]), int(P1_all[tri1[1],1])),
-                                               (int(P1_all[tri1[2],0]), int(P1_all[tri1[2],1]))]
-                                        for a,b in [(0,1),(1,2),(2,0)]:
-                                            cv2.line(canvas, pts[a], pts[b], (200, 100, 255), 1)
-                                    if tri2 and isinstance(P2_all, np.ndarray) and P2_all.shape[0] > max(tri2):
-                                        pts = [(int(P2_all[tri2[0],0]+w1), int(P2_all[tri2[0],1])),
-                                               (int(P2_all[tri2[1],0]+w1), int(P2_all[tri2[1],1])),
-                                               (int(P2_all[tri2[2],0]+w1), int(P2_all[tri2[2],1]))]
-                                        for a,b in [(0,1),(1,2),(2,0)]:
-                                            cv2.line(canvas, pts[a], pts[b], (200, 100, 255), 1)
-                                # 最佳三角形（亮品红，覆盖显示）
-                                tc1 = star_pairs.get('tri_coords1')
-                                tc2 = star_pairs.get('tri_coords2')
-                                if tc1 is not None and len(tc1) == 3:
-                                    for a, b in [(0,1), (1,2), (2,0)]:
-                                        cv2.line(canvas, tc1[a], tc1[b], (255, 0, 255), 2)
-                                if tc2 is not None and len(tc2) == 3:
-                                    for a, b in [(0,1), (1,2), (2,0)]:
-                                        pA = (int(tc2[a][0] + w1), int(tc2[a][1]))
-                                        pB = (int(tc2[b][0] + w1), int(tc2[b][1]))
-                                        cv2.line(canvas, pA, pB, (255, 0, 255), 2)
-                                # 文本信息（紧凑显示）
-                                text = [f"m={total}"]
-                                if isinstance(err_px, (int, float)):
-                                    text.append(f"e={float(err_px):.3f}")
-                                info = " | ".join(text)
-                                cv2.putText(canvas, info, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                            else:
-                                # 无匹配：仅绘制中心十字
-                                for off, img in [(0, ref), (w1, ali)]:
-                                    h_, w_ = img.shape[:2]
-                                    cx, cy = int(w_/2), int(h_/2)
-                                    cv2.drawMarker(canvas, (off+cx, cy), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=1)
-                                text = ["m=0"]
-                                if isinstance(err_px, (int, float)):
-                                    text.append(f"e={float(err_px):.3f}")
-                                info = " | ".join(text)
-                                cv2.putText(canvas, info, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                        except Exception:
-                            pass
-                        outp = ali_path.parent / f"{ali_path.stem}__align_overlay.png"
-                        cv2.imwrite(str(outp), canvas)
-                        return True
-                    except Exception:
-                        return False
-
-                def _save_line_viz2(seq):
-                    try:
-                        idx_v = int(seq) - 1
-                        if idx_v < 0 or idx_v >= len(ali_imgs):
-                            return False
-                        ali_path = Path(ali_imgs[idx_v])
-                        img = cv2.imread(str(ali_path), cv2.IMREAD_UNCHANGED)
-                        if img is None:
-                            return False
-                        # 使用 detect_center_lines.py 的默认参数：aggressive + ROI=-1 + 半径=3px
-                        near_lines, all_lines, center = detect_lines_near_center(
-                            img,
-                            radius_px=3,
-                            canny1=30, canny2=90,
-                            hough_thresh=20, min_len=8, max_gap=4,
-                            roi_margin=-1,
-                        )
-                        # 显著性阈值过滤：默认0.65（可在工具栏调整），并与CLI保持一致：先评分再过滤 all_lines 与 near_lines
-                        try:
-                            thr = float(self.saliency_thresh_var.get()) if hasattr(self, 'saliency_thresh_var') else 0.65
-                        except Exception:
-                            thr = 0.65
-                        scores = compute_line_saliency_map(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img,
-                                                           all_lines, center) if all_lines else {}
-                        if all_lines:
-                            all_lines = [ln for ln in all_lines if scores.get((int(ln[0]), int(ln[1]), int(ln[2]), int(ln[3])), 0.0) >= thr]
-                        if near_lines:
-                            near_lines = [ln for ln in near_lines if scores.get((int(ln[0]), int(ln[1]), int(ln[2]), int(ln[3])), 0.0) >= thr]
-                        # 最多保留距中心最近的2条
-                        if near_lines:
-                            cx, cy = center
-                            near_lines = sorted(
-                                near_lines,
-                                key=lambda ln: point_to_segment_distance(cx, cy, ln[0], ln[1], ln[2], ln[3])
-                            )[:2]
-                        # 生成标注图（与CLI一致：所有线段绿色+显著性标签，中心附近线段红色）
-                        vis = annotate_image(img, near_lines, center, radius_px=3, all_lines=all_lines, line_scores=scores)
-                        outp = ali_path.parent / f"{ali_path.stem}__lines.png"
-                        cv2.imwrite(str(outp), vis)
-                        return True
-                    except Exception:
-                        return False
-
-
-
-                # 直线检测：若启用过滤，预先标记高分序号中aligned切片存在过中心直线的项
-                line_bad_seq_set = set()
-                try:
-                    if getattr(self, 'enable_line_detection_filter_var', None) and self.enable_line_detection_filter_var.get():
-                        for row in high_rows:
-                            idx_chk = row['seq'] - 1
-                            if 0 <= idx_chk < min(len(ref_imgs), len(ali_imgs)):
-                                ali_img_path = ali_imgs[idx_chk]
-                                try:
-                                    if self._has_line_through_center(ali_img_path):
-                                        line_bad_seq_set.add(row['seq'])
-                                except Exception:
-                                    pass
-                except Exception:
-                    line_bad_seq_set = set()
-
-                seq_err_map = {}
-                for row in high_rows:
-                    idx = row['seq'] - 1
-                    if idx < 0 or idx >= min(len(ref_imgs), len(ali_imgs)):
-                        continue
-
-
-                    err = rigid_error_px(ref_imgs[idx], ali_imgs[idx])
-                    seq_err_map[row['seq']] = f"{err:.3f}" if isinstance(err, float) else "N/A"
-
-                    # 可视化输出（非快速模式才生成 overlay/lines 文件）
-                    if not fast_mode:
-                        try:
-                            _save_alignment_viz2(row['seq'], err if isinstance(err, float) else None)
-                        except Exception:
-                            pass
-                        try:
-                            _save_line_viz2(row['seq'])
-                        except Exception:
-                            pass
-
-                if not seq_err_map:
-                    continue
-
-                # 读取原文件，追加/更新新列
-                try:
-                    with open(analysis_path, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-
-                    # 找到表头与分隔线
-                    header_idx = None
-                    sep_idx = None
-                    for i, l in enumerate(lines):
-                        if ('综合得分' in l) and ('序号' in l):
-                            header_idx = i
-                            # 下一行是分隔线
-                            if i + 1 < len(lines):
-                                nxt = lines[i+1].strip()
-                                if nxt and set(nxt) <= {'-'}:
-                                    sep_idx = i + 1
-                            break
-
-
-                    # 计算对齐误差超阈值的序号集合（用于非快速模式下的可视化标记）
-                    bad_seq_set = set()
-                    try:
-                        for _seq, _v in seq_err_map.items():
-                            try:
-                                if float(_v) > err_px_threshold:
-                                    bad_seq_set.add(_seq)
-                            except Exception:
-                                pass
-                    except Exception:
-                        bad_seq_set = set()
-
-                    if header_idx is None:
-                        # 找不到表头则跳过
-                        continue
-                    if True:
-
-
-
-                        # 若高分目标中 对齐误差>阈值 的占比超过阈值，则清空本文件记录与cutouts
-                        valid_errs = []
-                        for v in seq_err_map.values():
-                            try:
-                                valid_errs.append(float(v))
-                            except Exception:
-                                pass
-                        bad_cnt = sum(1 for ev in valid_errs if ev > err_px_threshold)
-                        total_cnt = len(valid_errs)
-                        ratio_exceeded = (total_cnt > 0 and (bad_cnt / total_cnt) > ratio_threshold)
-
-                        """
-
-	                        # 统计日志：便于确认是否达到阈值
-	                        try:
-	                            self.logger.info(
-	                                "高分对齐误差占比统计: file=%s, 高分条目=%d, 可计算=%d, >阈值=%d (阈值=%.2fpx), 占比=%.1f%%, 触发清空=%s",
-	                                analysis_path,
-	                                len(high_rows),
-	                                total_cnt,
-	                                bad_cnt,
-	                                err_px_threshold,
-	                                (100.0 * bad_cnt / max(total_cnt, 1)),
-	                                "是" if (cleanup_on_ratio and ratio_exceeded) else "否"
-	                            )
-
-
-                        try:
-                            pass
-
-	                        except Exception:
-	                            pass
-                        """
-
-
-                        if cleanup_on_ratio and ratio_exceeded:
-                            # 删除 cutouts 下所有 png
-                            deleted_count = 0
-                            try:
-                                for p in (Path(detection_dir_path) / 'cutouts').glob('*.png'):
-                                    try:
-                                        p.unlink()
-                                        deleted_count += 1
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                            # 清空数据区（保留表头与分隔线）
-                            data_start_tmp = (sep_idx + 1) if sep_idx is not None else (header_idx + 1)
-                            new_lines_tmp = lines[:data_start_tmp]
-                            with open(analysis_path, 'w', encoding='utf-8') as f:
-                                f.writelines(new_lines_tmp)
-                            cleared_files += 1
-                            deleted_cutouts_total += deleted_count
-                            self.logger.info(
-                                "清空分析文件（高分误差>%.2f 占比%.1f%%>阈值%.1f%%）: %s，删除cutouts=%d",
-                                err_px_threshold, (100.0 * bad_cnt / max(total_cnt, 1)), (100.0 * ratio_threshold), analysis_path, deleted_count
-                            )
-                            continue
-
-                    header_has_alignment = '对齐误差(像素)' in lines[header_idx]
-
-                    # 若无该列，则在表头与分隔线上追加该列
-                    if not header_has_alignment:
-                        header_line = lines[header_idx].rstrip('\n')
-
-                            # 若未触发整文件清空，且占比低于阈值，则删除超标的高分条目与其 cutouts
-                        """
-
-                            if (not ratio_exceeded) and delete_bad_when_ratio_below and total_cnt > 0 and (bad_cnt / total_cnt) < ratio_threshold and len(bad_seq_set) > 0:
-                                removed_rows_bad = 0
-                                for j in range(data_start, len(lines)):
-                                    sj = lines[j].rstrip('\n')
-                                    if not sj.strip():
-                                        continue
-                                    parts_j = sj.split()
-                                    if not parts_j:
-                                        continue
-                                    try:
-                                        seqj = int(parts_j[0])
-                                    except Exception:
-                                        continue
-                                    if seqj in bad_seq_set:
-                                        # 删除该序号的 cutouts
-                                        del_cnt_j = 0
-                                        try:
-                                            for p in (Path(detection_dir_path) / 'cutouts').glob(f"*_{seqj}_*.png"):
-                                                try:
-                                                    p.unlink()
-                                                    del_cnt_j += 1
-                                                except Exception:
-                                                    pass
-                                        except Exception:
-                                            pass
-                                        if del_cnt_j:
-                                            deleted_cutouts_total += del_cnt_j
-                                        lines[j] = ''  # 标记删除该数据行
-                                        removed_rows_bad += 1
-                                # 合并到后续写回统计所用的 removed_rows
-                                try:
-                                    removed_rows += removed_rows_bad
-                                except Exception:
-                                    # 若 removed_rows 尚未定义，则临时记录并在写回前使用
-
-                                    removed_rows = removed_rows_bad
-                                self.logger.info("删除对齐误差超标行: %d (阈值=%.2fpx，占比=%.1f%%，阈值=%.1f%%)", removed_rows_bad, err_px_threshold, (100.0 * bad_cnt / max(total_cnt, 1)), (100.0 * ratio_threshold))
-                        """
-
-                        lines[header_idx] = header_line + f" {'对齐误差(像素)'.ljust(14)}\n"
-
-                        if sep_idx is None:
-                            # 尝试定位分隔线
-                            if header_idx + 1 < len(lines) and set(lines[header_idx+1].strip()) <= {'-'}:
-                                sep_idx = header_idx + 1
-                        if sep_idx is not None:
-                            sep_line = lines[sep_idx].rstrip('\n')
-                            lines[sep_idx] = sep_line + f" {'-'*14}\n"
-
-                    # 数据区起始行
-                    data_start = (sep_idx + 1) if sep_idx is not None else (header_idx + 1)
-
-                    if True:
-
-
-                        #
-                        removed_rows = 0
-                        high_seq_set = {r['seq'] for r in high_rows}
-                        if prune_non_high:
-                            #
-                            for j in range(data_start, len(lines)):
-                                sj = lines[j].rstrip('\n')
-                                if not sj.strip():
-                                    continue
-                                parts_j = sj.split()
-                                if not parts_j:
-                                    continue
-                                try:
-                                    seqj = int(parts_j[0])
-                                except Exception:
-                                    continue
-                                if seqj not in high_seq_set:
-                                    #  cutouts
-                                    del_cnt_j = 0
-                                    try:
-                                        for p in (Path(detection_dir_path) / 'cutouts').glob(f"{seqj:03d}_*.png"):
-                                            try:
-                                                p.unlink()
-                                                del_cnt_j += 1
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
-                                    if del_cnt_j:
-                                        deleted_cutouts_total += del_cnt_j
-                                    lines[j] = ''  #
-                                    removed_rows += 1
-
-
-                        # 若未触发整文件清空，且占比低于阈值，则删除超标的高分条目与其 cutouts（按配置）
-                        try:
-                            if (not ratio_exceeded) and delete_bad_when_ratio_below and total_cnt > 0 and (bad_cnt / total_cnt) < ratio_threshold:
-                                # 计算对齐误差超标的序号集合（仅限高分）
-                                bad_seq_set = set()
-                                for _seq, _v in seq_err_map.items():
-                                    try:
-                                        if float(_v) > err_px_threshold:
-                                            bad_seq_set.add(_seq)
-                                    except Exception:
-                                        pass
-                                if bad_seq_set:
-                                    removed_rows_bad = 0
-                                    for j in range(data_start, len(lines)):
-                                        sj = lines[j].rstrip('\n')
-                                        if not sj.strip():
-                                            continue
-                                        parts_j = sj.split()
-                                        if not parts_j:
-                                            continue
-                                        try:
-                                            seqj = int(parts_j[0])
-                                        except Exception:
-                                            continue
-                                        if seqj in bad_seq_set:
-                                            # 删除该序号的 cutouts
-                                            del_cnt_j = 0
-                                            try:
-                                                for p in (Path(detection_dir_path) / 'cutouts').glob(f"{seqj:03d}_*.png"):
-                                                    try:
-                                                        p.unlink()
-
-
-                                                        del_cnt_j += 1
-                                                    except Exception:
-                                                        pass
-                                            except Exception:
-                                                pass
-                                            if del_cnt_j:
-                                                deleted_cutouts_total += del_cnt_j
-                                            lines[j] = ''  # 标记删除该数据行
-                                            removed_rows_bad += 1
-                                    removed_rows += removed_rows_bad
-                                    self.logger.info(
-                                        "删除对齐误差超标行: %d (阈值=%.2fpx，占比=%.1f%%，占比阈值=%.1f%%)",
-                                        removed_rows_bad, err_px_threshold,
-                                        (100.0 * bad_cnt / max(total_cnt, 1)),
-                                        (100.0 * ratio_threshold)
-                                    )
-                        except Exception:
-                            pass
-
-
-                        # 非快速模式：不删除，标记对齐误差超阈值的高分序号
-                        if not fast_mode:
-                            try:
-                                if 'bad_seq_set' in locals() and bad_seq_set:
-                                    for seqk in sorted(bad_seq_set):
-                                        _save_alignment_flag(seqk, 'misaligned', err_text=seq_err_map.get(seqk))
-                                        flagged_images_total += 1
-                            except Exception:
-                                pass
-
-
-                    # 若启用了直线过滤：快速模式删除；非快速模式仅输出可视化标记
-                    try:
-                        if 'line_bad_seq_set' in locals() and line_bad_seq_set:
-                            if fast_mode:
-                                removed_rows_line = 0
-                                for j in range(data_start, len(lines)):
-                                    sj = lines[j].rstrip('\n')
-                                    if not sj.strip():
-                                        continue
-                                    parts_j = sj.split()
-                                    if not parts_j:
-                                        continue
-                                    try:
-                                        seqj = int(parts_j[0])
-                                    except Exception:
-                                        continue
-                                    if seqj in line_bad_seq_set:
-                                        # 删除该序号的 cutouts
-                                        del_cnt_j = 0
-                                        try:
-                                            for p in (Path(detection_dir_path) / 'cutouts').glob(f"{seqj:03d}_*.png"):
-                                                try:
-                                                    p.unlink()
-                                                    del_cnt_j += 1
-                                                except Exception:
-                                                    pass
-                                        except Exception:
-                                            pass
-                                        if del_cnt_j:
-                                            deleted_cutouts_total += del_cnt_j
-                                        lines[j] = ''
-                                        removed_rows_line += 1
-                                if removed_rows_line:
-                                    removed_rows += removed_rows_line
-                                    self.logger.info('删除过中心直线行: %d', removed_rows_line)
-                            else:
-                                # 非快速模式：不删除，仅输出标记
-                                for seqj in sorted(line_bad_seq_set):
-                                    _save_alignment_flag(seqj, 'centerline')
-                                    flagged_images_total += 1
-                    except Exception:
-                        pass
-
-                    # 宽度定义（原14列+新增列）
-                    widths = [6, 12, 12, 12, 12, 10, 10, 12, 12, 12, 12, 14, 14, 18, 14]
-
-                    def pack_line(tokens, err_val):
-                        # 用已有token重排为固定宽度，并在末尾放对齐误差
-                        fields = []
-                        for idx_w in range(14):
-                            fields.append(tokens[idx_w] if idx_w < len(tokens) else '')
-                        fields.append(err_val)
-                        return (
-                            f"{fields[0]:<6} {fields[1]:<12} {fields[2]:<12} {fields[3]:<12} "
-                            f"{fields[4]:<12} {fields[5]:<10} {fields[6]:<10} {fields[7]:<12} {fields[8]:<12} "
-                            f"{fields[9]:<12} {fields[10]:<12} {fields[11]:<14} {fields[12]:<14} {fields[13]:<18} {fields[14]:<14}\n"
-                        )
-
-                    # 遍历数据行，填充/更新误差
-                    updated_rows = 0
-                    for i in range(data_start, len(lines)):
-                        s = lines[i].rstrip('\n')
-                        if not s.strip():
-                            continue
-                        parts = s.split()
-                        if not parts:
-                            continue
-                        # 首列应为序号
-                        try:
-                            seq = int(parts[0])
-                        except Exception:
-                            # 非数据行
-                            continue
-                        err_val = seq_err_map.get(seq, 'N/A')
-                        if header_has_alignment:
-                            # 已有该列：重排整行，覆盖末列
-                            lines[i] = pack_line(parts, err_val)
-                        else:
-
-
-                            # 尚无该列：在原行尾部直接追加固定宽度的字段
-                            lines[i] = s + f" {err_val:<14}\n"
-                        if seq in seq_err_map:
-                            updated_rows += 1
-
-                    if (updated_rows > 0) or (prune_non_high and removed_rows > 0):
-                        # 过滤已标记删除的行（空字符串）
-                        lines_to_write = [ln for ln in lines if ln != ""]
-                        with open(analysis_path, 'w', encoding='utf-8') as f:
-                            f.writelines(lines_to_write)
-                        updated_files += 1
-                        updated_rows_total += updated_rows
-                        pruned_rows_total += removed_rows
-                        self.logger.info("已更新对齐误差列: %s (+%d行), 移除非高分行:%d", analysis_path, updated_rows, removed_rows)
-                except Exception as e:
-                    self.logger.error("更新分析文件失败 %s: %s", analysis_path, str(e))
-                    continue
-
-            if updated_files == 0:
-                self.logger.info("批量对齐评估: 没有找到可更新的 analysis 文件或高分目标")
-                return
-            if fast_mode:
-                _msg = (f"已更新 {updated_files} 个 analysis 文件，共填充 {updated_rows_total} 行；"
-                        f"清空 {cleared_files} 个文件；移除非高分行 {pruned_rows_total} 行；删除cutouts {deleted_cutouts_total} 个")
-            else:
-                _msg = (f"已更新 {updated_files} 个 analysis 文件，共填充 {updated_rows_total} 行；"
-                        f"标记 {flagged_images_total} 张图像（misaligned/centerline），未进行删除操作")
-            self.logger.info("批量对齐评估完成: %s", _msg)
-        except Exception as e:
-            self.logger.error("批量对齐评估失败: %s", str(e), exc_info=True)
-            self.logger.error("批量对齐评估失败: %s", str(e))

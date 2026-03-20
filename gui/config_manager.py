@@ -56,8 +56,6 @@ class ConfigManager:
                 "template_directory": "",
                 "diff_output_directory": "",
                 "detected_directory": "",
-                "unqueried_export_directory": "",
-                "ai_training_export_root": ""
             },
             "download_settings": {
                 "max_workers": 1,
@@ -68,32 +66,9 @@ class ConfigManager:
             },
             "batch_process_settings": {
                 "thread_count": 4,  # 批量处理线程数（GUI默认值：4）
-                "noise_method": "median",  # 降噪方式: median, gaussian, none（GUI默认值：median，对应Adaptive Median选中）
-                "alignment_method": "ecc",  # 对齐方式: orb, ecc, none（GUI默认值：ecc，对应WCS选中）
-                "remove_bright_lines": True,  # 是否去除亮线（GUI默认值：True）
-                "fast_mode": True,  # 是否启用快速模式（GUI默认值：True）
+                "fast_mode": True,  # 快速模式（GUI默认值：True）
                 "stretch_method": "percentile",  # 拉伸方法: percentile, minmax, asinh（GUI默认值：percentile）
                 "percentile_low": 99.95,  # 百分位参数（GUI默认值：99.95）
-                "max_jaggedness_ratio": 1.2,  # 最大锯齿比率（GUI默认值：1.2）
-                "detection_method": "contour",  # 检测方法: contour, simple_blob（GUI默认值：contour）
-                "overlap_edge_exclusion_px": 40,  # 重叠边界剔除宽度（像素，默认值：40）
-                "score_threshold": 3.0,  # 综合得分阈值（GUI默认值：3.0）
-                "aligned_snr_threshold": 1.1,  # Aligned SNR阈值（GUI默认值：1.1）
-                "sort_by": "aligned_snr",  # 排序方式: quality_score, aligned_snr, snr（GUI默认值：aligned_snr）
-                "wcs_use_sparse": False,  # WCS对齐是否使用稀疏采样优化（GUI默认值：False，不启用）
-                "wcs_sparse_step": 16,  # WCS稀疏采样步长（GUI默认值：16）
-                "generate_gif": False,  # 是否生成GIF动画（GUI默认值：False，不生成）
-                "science_bg_mode": "off",  # 科学图背景处理模式: off, scheme_a, scheme_b
-                "subpixel_refine_mode": "off",  # 亚像素精修模式: off, scheme_a, scheme_b, scheme_c
-                "diff_calc_mode": "abs",  # 差异计算方式: abs(绝对值) 或 signed(带符号)
-                "apply_diff_postprocess": False,  # 是否对difference.fits执行后处理（负值置零+中值滤波）
-                "enable_line_detection_filter": True,  # 批量导出时是否启用直线检测过滤（GUI默认值：True，启用）
-                # Alignment quality batch cleanup settings
-                "alignment_prune_non_high": True,  # 批量检测对齐时，清除“不是高分目标”的记录与检测结果文件（默认清除）
-                "alignment_error_px_threshold": 2.0,  # 判定“高分目标对齐误差过大”的像素阈值（默认2像素）
-                "alignment_error_ratio_threshold": 0.5,  # 若高分目标中误差>阈值的占比超过此比例则清空本文件（默认50%）
-                "alignment_cleanup_on_ratio_exceed": True,  # 占比超过阈值时是否执行清空（默认清除）
-                "alignment_delete_exceeding_when_ratio_below_threshold": True  # 占比未超过阈值时，删除超标的高分条目（默认清除）
             },
             "dss_flip_settings": {
                 "flip_vertical": True,  # 上下翻转DSS（默认值：True）
@@ -113,28 +88,8 @@ class ConfigManager:
                 "batch_pympc_server_threads": 3,        # pympc server批量查询线程数（默认值：3）
                 "batch_vsx_server_threads": 3           # 变星server批量查询线程数（默认值：3）
             },
-            "detection_filter_settings": {
-                "enable_center_distance_filter": False,  # 是否启用中心距离过滤（默认值：False）
-                "max_center_distance": 2400,  # 检测结果距离中心像素的最大距离（默认值：2400）
-                "auto_enable_threshold": 50  # 检测目标超过此数量时自动启用过滤（默认值：50）
-            },
             "ai_classification_settings": {
                 "confidence_threshold": 0.5  # AI GOOD/BAD 自动标记置信度阈值（默认：0.7）
-            },
-            "line_detection_settings": {
-                "sensitivity": 50,                # 直线检测灵敏度(1-100)，越大越敏感
-                "center_distance_px": 3,         # 判定“过中心”的距离阈值（像素）
-                "min_line_length_ratio": 0.1,    # 最小线长=ratio*min(width,height)
-                "max_line_gap": 0,               # HoughLinesP 的最大断裂间隙
-                "percentile_high": 50             # 阈值化用的高百分位
-            },
-            "alignment_tuning_settings": {
-                "star_max_points": 600,           # 星点上限（越大越慢越稳）
-                "star_min_distance_px": 2.0,      # 星点最小间距（像素）
-                "tri_points": 35,                 # 构三角形的亮星点池大小
-                "tri_inlier_thr_px": 4.0,         # 内点距离阈值（像素）
-                "tri_bin_scale": 60,              # 三角形形状量化尺度
-                "tri_topk": 5                     # 可视化记录的Top-K三角形
             },
             "display_settings": {
                 "default_display_mode": "linear",
@@ -431,43 +386,6 @@ class ConfigManager:
             self.config["query_settings"][key] = value
         self.save_config()
 
-    def get_detection_filter_settings(self) -> Dict[str, Any]:
-        """获取检测结果过滤设置"""
-        if "detection_filter_settings" not in self.config:
-            self.config["detection_filter_settings"] = self.default_config["detection_filter_settings"].copy()
-            self.save_config()
-        return self.config["detection_filter_settings"]
-
-    def get_line_detection_settings(self) -> Dict[str, Any]:
-        """获取直线检测参数设置"""
-        if "line_detection_settings" not in self.config:
-            self.config["line_detection_settings"] = self.default_config.get("line_detection_settings", {}).copy()
-            self.save_config()
-        return self.config["line_detection_settings"]
-
-    def update_line_detection_settings(self, **kwargs):
-        """更新直线检测参数设置"""
-        if "line_detection_settings" not in self.config:
-            self.config["line_detection_settings"] = self.default_config.get("line_detection_settings", {}).copy()
-        for key, value in kwargs.items():
-            self.config["line_detection_settings"][key] = value
-        self.save_config()
-
-    def get_alignment_tuning_settings(self) -> Dict[str, Any]:
-        """获取对齐调优（速度/稳健性）设置"""
-        if "alignment_tuning_settings" not in self.config:
-            self.config["alignment_tuning_settings"] = self.default_config.get("alignment_tuning_settings", {}).copy()
-            self.save_config()
-        return self.config["alignment_tuning_settings"]
-
-    def update_alignment_tuning_settings(self, **kwargs):
-        """更新对齐调优设置"""
-        if "alignment_tuning_settings" not in self.config:
-            self.config["alignment_tuning_settings"] = self.default_config.get("alignment_tuning_settings", {}).copy()
-        for key, value in kwargs.items():
-            self.config["alignment_tuning_settings"][key] = value
-        self.save_config()
-
     def get_ai_classification_settings(self) -> Dict[str, Any]:
         """获取AI GOOD/BAD 自动标记相关设置"""
         if "ai_classification_settings" not in self.config:
@@ -481,17 +399,6 @@ class ConfigManager:
             self.config["ai_classification_settings"] = self.default_config.get("ai_classification_settings", {}).copy()
         for key, value in kwargs.items():
             self.config["ai_classification_settings"][key] = value
-        self.save_config()
-
-
-    def update_detection_filter_settings(self, **kwargs):
-        """更新检测结果过滤设置"""
-        if "detection_filter_settings" not in self.config:
-            self.config["detection_filter_settings"] = self.default_config["detection_filter_settings"].copy()
-
-        for key, value in kwargs.items():
-            if key in ["enable_center_distance_filter", "max_center_distance", "auto_enable_threshold"]:
-                self.config["detection_filter_settings"][key] = value
         self.save_config()
 
     def get_url_template_type(self) -> str:
