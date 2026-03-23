@@ -74,6 +74,9 @@ class ConfigManager:
                 "flip_vertical": True,  # 上下翻转DSS（默认值：True）
                 "flip_horizontal": False  # 左右翻转DSS（默认值：False）
             },
+            "rank_flip_settings": {
+                "flip_vertical": False  # 上下翻转 Rank 图（默认值：False）
+            },
             "gps_settings": {
                 "latitude": 43.4,  # 纬度（默认值：43.4°N）
                 "longitude": 87.1  # 经度（默认值：87.1°E）
@@ -307,6 +310,23 @@ class ConfigManager:
         for key, value in kwargs.items():
             if key in ["flip_vertical", "flip_horizontal"]:
                 self.config["dss_flip_settings"][key] = value
+        self.save_config()
+
+    def get_rank_flip_settings(self) -> Dict[str, Any]:
+        """获取Rank图翻转设置"""
+        if "rank_flip_settings" not in self.config:
+            self.config["rank_flip_settings"] = self.default_config["rank_flip_settings"].copy()
+            self.save_config()
+        return self.config["rank_flip_settings"]
+
+    def update_rank_flip_settings(self, **kwargs):
+        """更新Rank图翻转设置"""
+        if "rank_flip_settings" not in self.config:
+            self.config["rank_flip_settings"] = self.default_config["rank_flip_settings"].copy()
+
+        for key, value in kwargs.items():
+            if key in ["flip_vertical"]:
+                self.config["rank_flip_settings"][key] = bool(value)
         self.save_config()
 
     def get_gps_settings(self) -> Dict[str, Any]:

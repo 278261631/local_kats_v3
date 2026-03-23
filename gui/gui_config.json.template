@@ -41,6 +41,9 @@
     "stretch_method": "percentile",
     "percentile_low": 99.95
   },
+  "rank_flip_settings": {
+    "flip_vertical": false
+  },
   "display_settings": {
     "default_display_mode": "linear",
     "default_colormap": "gray",

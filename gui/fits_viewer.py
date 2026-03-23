@@ -154,6 +154,9 @@ class FitsImageViewer:
         # 绑定DSS翻转设置变化事件
         self._bind_dss_flip_settings_events()
 
+        # 从配置文件加载Rank图翻转设置
+        self._load_rank_flip_settings()
+
         # 从配置文件加载GPS设置
         self._load_gps_settings()
 
@@ -1231,12 +1234,27 @@ class FitsImageViewer:
         """切换Rank图上下翻转后，刷新当前CSV候选显示。"""
         try:
             enabled = bool(self.flip_rank_aligned_vertical_var.get())
+            if self.config_manager:
+                self.config_manager.update_rank_flip_settings(flip_vertical=enabled)
             self.logger.info(f"Rank图上下翻转已{'启用' if enabled else '关闭'}")
             if getattr(self, "_csv_candidate_mode", False):
                 idx = getattr(self, "_current_csv_candidate_index", 0)
                 self._display_csv_candidate_by_index(idx)
         except Exception as e:
             self.logger.warning(f"刷新Rank图翻转显示失败: {e}")
+
+    def _load_rank_flip_settings(self):
+        """从配置文件加载Rank图翻转设置"""
+        if not self.config_manager:
+            return
+        try:
+            rank_settings = self.config_manager.get_rank_flip_settings()
+            flip_vertical = bool(rank_settings.get("flip_vertical", False))
+            self.flip_rank_aligned_vertical_var.set(flip_vertical)
+            self.logger.info(f"Rank图翻转设置已加载: 上下翻转={flip_vertical}")
+        except Exception as e:
+            self.logger.error(f"加载Rank图翻转设置失败: {str(e)}")
+            self.flip_rank_aligned_vertical_var.set(False)
 
     def _load_gps_settings(self):
         """从配置文件加载GPS设置"""
