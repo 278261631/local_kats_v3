@@ -703,6 +703,16 @@ class FitsImageViewer:
         csv_hist_combo.pack(side=tk.LEFT, padx=(0, 10))
         csv_hist_combo.bind('<<ComboboxSelected>>', self._on_csv_candidate_view_option_changed)
 
+        # CSV显示过滤：默认跳过 has_ref_nearby=1 的候选
+        self.skip_has_ref_nearby_var = tk.BooleanVar(value=True)
+        skip_ref_check = ttk.Checkbutton(
+            control_frame1,
+            text="跳过近邻参考",
+            variable=self.skip_has_ref_nearby_var,
+            command=self._on_csv_candidate_filter_option_changed,
+        )
+        skip_ref_check.pack(side=tk.LEFT, padx=(0, 10))
+
         # 当前检测目标的中心距离显示（仅展示，不再提供筛选配置）
         ttk.Label(control_frame1, text="当前距离:").pack(side=tk.LEFT, padx=(10, 5))
         self.current_center_distance_label = ttk.Label(control_frame1, text="--", foreground="blue", font=("Arial", 9, "bold"))
@@ -1979,6 +1989,18 @@ class FitsImageViewer:
             self._display_csv_candidate_by_index(idx)
         except Exception as e:
             self.logger.warning(f"刷新CSV候选显示失败: {e}")
+
+    def _on_csv_candidate_filter_option_changed(self):
+        """CSV候选过滤选项变化时重载候选并刷新显示。"""
+        try:
+            if not getattr(self, "_csv_candidate_mode", False):
+                return
+            output_dir = getattr(self, "_current_csv_output_dir", None)
+            if not output_dir:
+                return
+            self._reload_csv_candidates_for_display(output_dir, keep_current_index=True)
+        except Exception as e:
+            self.logger.warning(f"刷新CSV候选过滤失败: {e}")
 
     def _refresh_display(self):
         """刷新显示"""
@@ -4590,6 +4612,71 @@ class FitsImageViewer:
             self.logger.warning(f"读取 nonref 候选CSV失败: {e}")
             return []
 
+    def _is_truthy_csv_value(self, v) -> bool:
+        """将CSV中的布尔/数值文本统一判断为真值。"""
+        s = str(v).strip().lower()
+        return s in {"1", "true", "yes", "y", "t"}
+
+    def _is_has_ref_nearby_row(self, row: dict) -> bool:
+        """判断候选是否标记为 has_ref_nearby。"""
+        if not isinstance(row, dict):
+            return False
+        if "has_ref_nearby" not in row:
+            return False
+        return self._is_truthy_csv_value(row.get("has_ref_nearby", "0"))
+
+    def _filter_csv_candidates_for_display(self, candidates):
+        """按GUI选项过滤CSV候选（默认跳过 has_ref_nearby=1）。"""
+        rows = list(candidates or [])
+        skip_has_ref = bool(self.skip_has_ref_nearby_var.get()) if hasattr(
+            self, "skip_has_ref_nearby_var"
+        ) else True
+        if not skip_has_ref:
+            return rows
+        return [row for row in rows if not self._is_has_ref_nearby_row(row)]
+
+    def _reload_csv_candidates_for_display(self, output_dir: str, keep_current_index: bool = False) -> bool:
+        """从输出目录重载CSV候选并应用显示过滤。"""
+        all_candidates = self._load_variable_candidates_nonref_only(output_dir)
+        self._csv_candidates_all = all_candidates
+        filtered = self._filter_csv_candidates_for_display(all_candidates)
+        self._csv_candidates = filtered
+        self._current_csv_output_dir = output_dir
+
+        if not filtered:
+            self._csv_candidate_mode = False
+            self._current_csv_candidate_index = 0
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "过滤后无可显示候选", ha="center", va="center", fontsize=11)
+            ax.axis("off")
+            self.canvas.draw()
+            if hasattr(self, "cutout_count_label"):
+                self.cutout_count_label.config(text="0/0")
+            self.logger.info(
+                "CSV候选过滤后为空（原始=%d，显示=%d）",
+                len(all_candidates),
+                len(filtered),
+            )
+            return False
+
+        self._csv_candidate_mode = True
+        if keep_current_index:
+            old_idx = int(getattr(self, "_current_csv_candidate_index", 0))
+            new_idx = max(0, min(old_idx, len(filtered) - 1))
+        else:
+            new_idx = 0
+        self._current_csv_candidate_index = new_idx
+
+        self.logger.info(
+            "CSV候选已加载（原始=%d，显示=%d，跳过近邻参考=%s）",
+            len(all_candidates),
+            len(filtered),
+            "是" if (hasattr(self, "skip_has_ref_nearby_var") and self.skip_has_ref_nearby_var.get()) else "否",
+        )
+        self._display_csv_candidate_by_index(new_idx)
+        return True
+
     def _try_get_float_from_row(self, row: dict, key_candidates):
         """从CSV行中按候选列名提取浮点数。"""
         for key in key_candidates:
@@ -5030,6 +5117,7 @@ class FitsImageViewer:
         if hasattr(self, '_total_cutouts'):
             self._total_cutouts = 0
         self._csv_candidate_mode = False
+        self._csv_candidates_all = []
         self._csv_candidates = []
         self._current_csv_candidate_index = 0
         self._current_csv_output_dir = None
@@ -5278,19 +5366,15 @@ class FitsImageViewer:
             self._total_cutouts = 0
             self._current_cutout_index = 0
             self._csv_candidate_mode = False
+            self._csv_candidates_all = []
             self._csv_candidates = []
             self._current_csv_candidate_index = 0
             self._current_csv_output_dir = None
 
-            candidates = self._load_variable_candidates_nonref_only(output_dir)
-            if not candidates:
+            if not self._reload_csv_candidates_for_display(output_dir, keep_current_index=False):
                 self.logger.info("未找到可显示的 nonref 候选CSV")
                 return False
 
-            self.logger.info("使用 CSV 检测结果，共 %d 条候选", len(candidates))
-            self._csv_candidates = candidates
-            self._current_csv_output_dir = output_dir
-            self._display_csv_candidate_by_index(0)
             return True
 
         except Exception as e:
@@ -12540,20 +12624,15 @@ class FitsImageViewer:
             if not os.path.exists(potential_output_dir) or not os.path.isdir(potential_output_dir):
                 return False
 
-            candidates = self._load_variable_candidates_nonref_only(potential_output_dir)
-            if not candidates:
+            if not self._reload_csv_candidates_for_display(potential_output_dir, keep_current_index=False):
                 return False
 
             # 统一清空cutout状态，避免残留旧逻辑数据
             self._all_cutout_sets = []
             self._current_cutout_index = 0
             self._total_cutouts = 0
-            self._csv_candidate_mode = True
-            self._csv_candidates = candidates
-            self._current_csv_candidate_index = 0
-            self._current_csv_output_dir = potential_output_dir
 
-            self.logger.info("成功加载 CSV 检测目标: %d 个", len(candidates))
+            self.logger.info("成功加载 CSV 检测目标: %d 个", len(self._csv_candidates))
             return True
 
         except Exception as e:
