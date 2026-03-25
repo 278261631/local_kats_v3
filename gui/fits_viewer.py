@@ -677,6 +677,32 @@ class FitsImageViewer:
         cmap_combo.pack(side=tk.LEFT, padx=(0, 10))
         cmap_combo.bind('<<ComboboxSelected>>', self._on_colormap_change)
 
+        # CSV候选浏览显示尺寸（单位：像素，默认512）
+        ttk.Label(control_frame1, text="CSV尺寸:").pack(side=tk.LEFT, padx=(0, 5))
+        self.csv_candidate_patch_size_var = tk.StringVar(value="512")
+        csv_size_combo = ttk.Combobox(
+            control_frame1,
+            textvariable=self.csv_candidate_patch_size_var,
+            values=["128", "256", "384", "512", "640", "768", "1024"],
+            state="readonly",
+            width=6,
+        )
+        csv_size_combo.pack(side=tk.LEFT, padx=(0, 10))
+        csv_size_combo.bind('<<ComboboxSelected>>', self._on_csv_candidate_view_option_changed)
+
+        # CSV局部拉伸档位（类似ASTAP low/medium/high）
+        ttk.Label(control_frame1, text="CSV拉伸:").pack(side=tk.LEFT, padx=(0, 5))
+        self.csv_local_hist_level_var = tk.StringVar(value="high")
+        csv_hist_combo = ttk.Combobox(
+            control_frame1,
+            textvariable=self.csv_local_hist_level_var,
+            values=["low", "medium", "high"],
+            state="readonly",
+            width=8,
+        )
+        csv_hist_combo.pack(side=tk.LEFT, padx=(0, 10))
+        csv_hist_combo.bind('<<ComboboxSelected>>', self._on_csv_candidate_view_option_changed)
+
         # 当前检测目标的中心距离显示（仅展示，不再提供筛选配置）
         ttk.Label(control_frame1, text="当前距离:").pack(side=tk.LEFT, padx=(10, 5))
         self.current_center_distance_label = ttk.Label(control_frame1, text="--", foreground="blue", font=("Arial", 9, "bold"))
@@ -1942,8 +1968,24 @@ class FitsImageViewer:
         """颜色映射改变事件"""
         self._update_image_display()
 
+    def _on_csv_candidate_view_option_changed(self, event=None):
+        """CSV候选浏览显示参数改变时，重绘当前候选。"""
+        try:
+            if not getattr(self, "_csv_candidate_mode", False):
+                return
+            if not getattr(self, "_csv_candidates", None):
+                return
+            idx = int(getattr(self, "_current_csv_candidate_index", 0))
+            self._display_csv_candidate_by_index(idx)
+        except Exception as e:
+            self.logger.warning(f"刷新CSV候选显示失败: {e}")
+
     def _refresh_display(self):
         """刷新显示"""
+        if getattr(self, "_csv_candidate_mode", False) and getattr(self, "_csv_candidates", None):
+            idx = int(getattr(self, "_current_csv_candidate_index", 0))
+            self._display_csv_candidate_by_index(idx)
+            return
         self._update_image_display()
 
     def _save_image(self):
@@ -4611,6 +4653,64 @@ class FitsImageViewer:
         local_y = float(y - y0)
         return patch, local_x, local_y
 
+    def _get_csv_patch_size_px(self) -> int:
+        """获取CSV候选局部显示尺寸（单位像素）。"""
+        default_size = 512
+        try:
+            raw = str(self.csv_candidate_patch_size_var.get()).strip() if hasattr(
+                self, "csv_candidate_patch_size_var"
+            ) else str(default_size)
+            size = int(raw)
+        except Exception:
+            size = default_size
+        # 防止过小/过大导致显示异常
+        return max(64, min(2048, size))
+
+    def _stretch_patch_to_uint8(self, patch: np.ndarray, level: str = "high") -> np.ndarray:
+        """对局部patch做low/medium/high拉伸并输出8位图。"""
+        if patch is None:
+            return np.zeros((1, 1), dtype=np.uint8)
+
+        arr = np.asarray(patch, dtype=np.float64)
+        if arr.size == 0:
+            return np.zeros((1, 1), dtype=np.uint8)
+
+        finite = np.isfinite(arr)
+        if not finite.any():
+            return np.zeros(arr.shape, dtype=np.uint8)
+
+        valid = arr[finite]
+        level_key = str(level).strip().lower()
+        params = {
+            "low": (5.0, 99.5, 1.0, 3.0),
+            "medium": (2.0, 99.8, 0.9, 5.0),
+            "high": (0.5, 99.95, 0.75, 8.0),
+        }
+        p_low, p_high, gamma, asinh_scale = params.get(level_key, params["high"])
+
+        lo = float(np.percentile(valid, p_low))
+        hi = float(np.percentile(valid, p_high))
+        if not np.isfinite(lo):
+            lo = float(np.min(valid))
+        if not np.isfinite(hi):
+            hi = float(np.max(valid))
+        if hi <= lo:
+            hi = lo + 1e-8
+
+        clipped = np.clip(arr, lo, hi)
+        norm = (clipped - lo) / (hi - lo)
+        norm = np.clip(norm, 0.0, 1.0)
+        if gamma != 1.0:
+            norm = np.power(norm, gamma)
+        if asinh_scale > 0:
+            norm = np.arcsinh(norm * asinh_scale) / np.arcsinh(asinh_scale)
+        norm = np.clip(norm, 0.0, 1.0)
+
+        out = np.zeros_like(arr, dtype=np.float64)
+        out[finite] = norm[finite]
+        out_u8 = np.round(out * 255.0).astype(np.uint8)
+        return out_u8
+
     def _get_csv_mode_reference_fits(self):
         """CSV模式下获取参考FITS路径（模板图）。"""
         try:
@@ -4701,11 +4801,25 @@ class FitsImageViewer:
             header=ref_header if ref_header is not None else aligned_header,
         )
 
-        aligned_patch, aligned_lx, aligned_ly = self._extract_local_patch(aligned_data, x, y, half_size=64)
+        patch_size_px = self._get_csv_patch_size_px()
+        patch_half_size = max(1, int(round(patch_size_px / 2.0)))
+        hist_level = str(self.csv_local_hist_level_var.get()).strip().lower() if hasattr(
+            self, "csv_local_hist_level_var"
+        ) else "high"
+
+        aligned_patch, aligned_lx, aligned_ly = self._extract_local_patch(
+            aligned_data, x, y, half_size=patch_half_size
+        )
         if ref_data is None:
             ref_data = aligned_data
             ref_x, ref_y = x, y
-        ref_patch, ref_lx, ref_ly = self._extract_local_patch(ref_data, ref_x, ref_y, half_size=64)
+        ref_patch, ref_lx, ref_ly = self._extract_local_patch(
+            ref_data, ref_x, ref_y, half_size=patch_half_size
+        )
+
+        # Reference/Aligned 在局部裁剪后先做 low/medium/high 拉伸，再进入显示变换
+        aligned_patch_u8 = self._stretch_patch_to_uint8(aligned_patch, level=hist_level)
+        ref_patch_u8 = self._stretch_patch_to_uint8(ref_patch, level=hist_level)
 
         rank_patch = None
         rank_lx, rank_ly = None, None
@@ -4721,36 +4835,44 @@ class FitsImageViewer:
                 sy = float(rh) / float(ah) if ah > 0 else 1.0
                 rank_x = x * sx if x is not None else None
                 rank_y = y * sy if y is not None else None
-                rank_patch, rank_lx, rank_ly = self._extract_local_patch(rank_img, rank_x, rank_y, half_size=64)
+                rank_patch, rank_lx, rank_ly = self._extract_local_patch(
+                    rank_img, rank_x, rank_y, half_size=patch_half_size
+                )
             except Exception as e:
                 self.logger.warning(f"读取候选排序图失败: {e}")
 
         self.figure.clear()
         axes = self.figure.subplots(1, 3)
 
-        ref_show = self._apply_display_transform(ref_patch)
+        ref_show = self._apply_display_transform(ref_patch_u8.astype(np.float64))
         axes[0].imshow(ref_show, cmap=self.colormap.get(), origin="lower")
         axes[0].set_title("Reference 局部", fontsize=10, fontweight="bold")
         axes[0].axis("off")
-        self._draw_crosshair_on_axis(axes[0], ref_patch.shape)
+        # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
         if ref_lx is not None and ref_ly is not None:
-            self._draw_four_pointed_star(axes[0], ref_lx, ref_ly, color="orange", linewidth=1.2, size=8, gap=2)
+            self._draw_four_pointed_star(
+                axes[0], ref_lx, ref_ly, color="orange", linewidth=1.2, size=12, gap=5
+            )
 
-        aligned_show = self._apply_display_transform(aligned_patch)
+        aligned_show = self._apply_display_transform(aligned_patch_u8.astype(np.float64))
         axes[1].imshow(aligned_show, cmap=self.colormap.get(), origin="lower")
         axes[1].set_title("Aligned 局部", fontsize=10, fontweight="bold")
         axes[1].axis("off")
-        self._draw_crosshair_on_axis(axes[1], aligned_patch.shape)
+        # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
         if aligned_lx is not None and aligned_ly is not None:
-            self._draw_four_pointed_star(axes[1], aligned_lx, aligned_ly, color="orange", linewidth=1.2, size=8, gap=2)
+            self._draw_four_pointed_star(
+                axes[1], aligned_lx, aligned_ly, color="orange", linewidth=1.2, size=12, gap=5
+            )
 
         if rank_patch is not None:
             axes[2].imshow(rank_patch, cmap="gray" if len(rank_patch.shape) == 2 else None, origin="lower")
             axes[2].set_title("Rank Aligned 局部", fontsize=10, fontweight="bold")
             axes[2].axis("off")
-            self._draw_crosshair_on_axis(axes[2], rank_patch.shape)
+            # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
             if rank_lx is not None and rank_ly is not None:
-                self._draw_four_pointed_star(axes[2], rank_lx, rank_ly, color="orange", linewidth=1.2, size=8, gap=2)
+                self._draw_four_pointed_star(
+                    axes[2], rank_lx, rank_ly, color="orange", linewidth=1.2, size=12, gap=5
+                )
         else:
             # 无排序图时保持三栏布局，避免界面抖动
             axes[2].text(0.5, 0.5, "未找到\nvariable_candidates_rank_aligned_to_a.png",
