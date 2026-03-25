@@ -2288,7 +2288,7 @@ class FitsImageViewer:
                     self.logger.info(f"  检查输出目录: {potential_output_dir}")
                     self.logger.info(f"  目录是否存在: {os.path.exists(potential_output_dir)}")
 
-                    # 检查是否存在候选CSV结果（优先 inner_border，兼容旧文件）
+                    # 检查是否存在候选CSV结果（仅 inner_border）
                     has_diff_result = False
                     if os.path.exists(potential_output_dir) and os.path.isdir(potential_output_dir):
                         csv_path = self._get_nonref_candidates_csv_path(potential_output_dir)
@@ -4346,7 +4346,7 @@ class FitsImageViewer:
                             f"{out_csv_nonref_inner_border} / {out_overlap_expr}"
                         )
 
-            # 用非参考候选CSV作为检测结果来源（优先 inner_border）
+            # 用非参考候选CSV作为检测结果来源（仅 inner_border）
             detected_count = self._count_variable_candidates_nonref_only(output_dir)
             result = {
                 "success": True,
@@ -4547,18 +4547,12 @@ class FitsImageViewer:
             return source_path
 
     def _get_nonref_candidates_csv_path(self, output_dir: str) -> Optional[str]:
-        """返回非参考候选CSV路径：优先 inner_border，兼容旧文件名。"""
-        candidates = [
-            os.path.join(output_dir, "variable_candidates_nonref_only_inner_border.csv"),
-            os.path.join(output_dir, "variable_candidates_nonref_only.csv"),
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                return path
-        return None
+        """返回非参考候选CSV路径：仅 inner_border 文件。"""
+        path = os.path.join(output_dir, "variable_candidates_nonref_only_inner_border.csv")
+        return path if os.path.exists(path) else None
 
     def _count_variable_candidates_nonref_only(self, output_dir: str) -> int:
-        """统计 nonref 候选CSV数量（优先 inner_border，兼容旧文件名）。"""
+        """统计 nonref 候选CSV数量（仅 inner_border）。"""
         csv_path = self._get_nonref_candidates_csv_path(output_dir)
         if not csv_path:
             return 0
@@ -4580,7 +4574,7 @@ class FitsImageViewer:
                 return 0
 
     def _load_variable_candidates_nonref_only(self, output_dir: str):
-        """读取 nonref 候选CSV并返回候选列表（优先 inner_border，兼容旧文件名）。"""
+        """读取 nonref 候选CSV并返回候选列表（仅 inner_border）。"""
         csv_path = self._get_nonref_candidates_csv_path(output_dir)
         if not csv_path:
             return []
@@ -4966,7 +4960,7 @@ class FitsImageViewer:
                 self._clear_diff_display()
                 return
 
-            # 检查输出目录中是否存在候选CSV（优先 inner_border，兼容旧文件）
+            # 检查输出目录中是否存在候选CSV（仅 inner_border）
             csv_path = self._get_nonref_candidates_csv_path(output_dir)
             if not csv_path:
                 self.logger.info("未找到 nonref 候选CSV，清除显示")
