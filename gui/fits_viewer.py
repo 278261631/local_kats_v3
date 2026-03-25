@@ -4213,6 +4213,9 @@ class FitsImageViewer:
             out_csv_ref_missing = os.path.join(output_dir, "variable_candidates_ref_only_missing_in_targets.csv")
             out_png_rank = os.path.join(output_dir, "variable_candidates_rank.png")
             out_overlap_expr = os.path.join(output_dir, "ref_target_overlap_polygon_expr.json")
+            out_overlap_expr_png = os.path.join(output_dir, "ref_target_overlap_polygon_expr.png")
+            ref_valid_region_json = os.path.join(output_dir, f"{template_base}.effective.json")
+            ref_valid_region_png = os.path.join(output_dir, f"{template_base}.effective.png")
 
             commands = [
                 (
@@ -4222,6 +4225,8 @@ class FitsImageViewer:
                         "--fits", template_file,
                         "--out", template_stars,
                         "--out-all", template_stars_all,
+                        "--out-valid-region", ref_valid_region_json,
+                        "--out-valid-region-png", ref_valid_region_png,
                         "--uniform-grid-x", "7", "--uniform-grid-y", "7", "--uniform-per-cell", "100",
                     ],
                 ),
@@ -4278,7 +4283,9 @@ class FitsImageViewer:
                         "--out-csv", out_csv_rank,
                         "--out-csv-nonref", out_csv_nonref,
                         "--out-overlap-expr", out_overlap_expr,
+                        "--out-overlap-expr-png", out_overlap_expr_png,
                         "--out-csv-nonref-inner-border", out_csv_nonref_inner_border,
+                        "--ref-valid-region", ref_valid_region_json,
                         "--out-csv-ref-missing", out_csv_ref_missing,
                         "--out-png", out_png_rank,
                         "--min-observations", "2",
@@ -4305,9 +4312,14 @@ class FitsImageViewer:
 
                 # 关键产物存在性检查，避免到后续步骤才报“文件不存在”
                 if step_name == "导出模板星点":
-                    if not (os.path.exists(template_stars) and os.path.exists(template_stars_all)):
+                    if not (
+                        os.path.exists(template_stars)
+                        and os.path.exists(template_stars_all)
+                        and os.path.exists(ref_valid_region_json)
+                    ):
                         raise RuntimeError(
-                            f"{step_name}完成但未生成输出文件: {template_stars} / {template_stars_all}"
+                            f"{step_name}完成但未生成输出文件: "
+                            f"{template_stars} / {template_stars_all} / {ref_valid_region_json}"
                         )
                 elif step_name == "预处理目标图":
                     if not os.path.exists(proc_fit):
@@ -4324,6 +4336,15 @@ class FitsImageViewer:
                 elif step_name == "求解对齐":
                     if not os.path.exists(align_npz):
                         raise RuntimeError(f"{step_name}完成但未生成输出文件: {align_npz}")
+                elif step_name == "生成候选目标CSV":
+                    if not (
+                        os.path.exists(out_csv_nonref_inner_border)
+                        and os.path.exists(out_overlap_expr)
+                    ):
+                        raise RuntimeError(
+                            f"{step_name}完成但关键输出缺失: "
+                            f"{out_csv_nonref_inner_border} / {out_overlap_expr}"
+                        )
 
             # 用非参考候选CSV作为检测结果来源（优先 inner_border）
             detected_count = self._count_variable_candidates_nonref_only(output_dir)
