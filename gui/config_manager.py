@@ -78,6 +78,7 @@ class ConfigManager:
                     "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
                     "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
                     "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
+                    "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
                 },
                 "export_uniform_grid_x": 7,
                 "export_uniform_grid_y": 7,
@@ -92,7 +93,8 @@ class ConfigManager:
                 "reproject_uniform_grid_y": 7,
                 "reproject_uniform_per_cell": 100,
                 "solve_radii": [24, 32, 40],
-                "rank_min_observations": 2
+                "rank_min_observations": 2,
+                "enable_crossmatch_nonref_candidates": True
             },
             "dss_flip_settings": {
                 "flip_vertical": True,  # 上下翻转DSS（默认值：True）

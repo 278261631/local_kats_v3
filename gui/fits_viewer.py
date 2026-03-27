@@ -4264,6 +4264,9 @@ class FitsImageViewer:
             out_overlap_expr_png = os.path.join(output_dir, "ref_target_overlap_polygon_expr.png")
             ref_valid_region_json = os.path.join(output_dir, f"{template_base}.effective.json")
             ref_valid_region_png = os.path.join(output_dir, f"{template_base}.effective.png")
+            out_find_hip_csv = os.path.join(output_dir, "find_hip.csv")
+            out_find_variable_csv = os.path.join(output_dir, "find_variable.csv")
+            out_find_mpc_csv = os.path.join(output_dir, "find_mpc.csv")
 
             # 从配置文件读取替代流程命令参数（未配置则回退默认值）
             default_pipeline = {
@@ -4274,6 +4277,7 @@ class FitsImageViewer:
                     "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
                     "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
                     "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
+                    "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
                 },
                 "export_uniform_grid_x": 7,
                 "export_uniform_grid_y": 7,
@@ -4289,6 +4293,7 @@ class FitsImageViewer:
                 "reproject_uniform_per_cell": 100,
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
+                "enable_crossmatch_nonref_candidates": True,
             }
             pipeline_settings = default_pipeline
             if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
@@ -4322,6 +4327,10 @@ class FitsImageViewer:
             rank_script = script_paths.get(
                 "rank_variable_candidates",
                 default_pipeline["script_paths"]["rank_variable_candidates"],
+            )
+            crossmatch_script = script_paths.get(
+                "crossmatch_nonref_candidates",
+                default_pipeline["script_paths"]["crossmatch_nonref_candidates"],
             )
 
             export_grid_x = str(pipeline_settings.get("export_uniform_grid_x", default_pipeline["export_uniform_grid_x"]))
@@ -4358,6 +4367,12 @@ class FitsImageViewer:
             solve_radii = [str(v) for v in solve_radii_raw]
             rank_min_observations = str(
                 pipeline_settings.get("rank_min_observations", default_pipeline["rank_min_observations"])
+            )
+            enable_crossmatch_nonref_candidates = bool(
+                pipeline_settings.get(
+                    "enable_crossmatch_nonref_candidates",
+                    default_pipeline["enable_crossmatch_nonref_candidates"],
+                )
             )
 
             commands = [
@@ -4435,6 +4450,19 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            if enable_crossmatch_nonref_candidates:
+                commands.append(
+                    (
+                        "交叉匹配非参考候选",
+                        [
+                            py, crossmatch_script,
+                            "--input-csv", out_csv_nonref_inner_border,
+                            "--find-hip-csv", out_find_hip_csv,
+                            "--find-variable-csv", out_find_variable_csv,
+                            "--find-mpc-csv", out_find_mpc_csv,
+                        ],
+                    )
+                )
 
             for step_name, cmd in commands:
                 cmd_text = " ".join(cmd)
@@ -4503,6 +4531,19 @@ class FitsImageViewer:
                             f"{step_name}完成但关键输出缺失: "
                             f"{os.path.abspath(out_csv_nonref_inner_border)} / "
                             f"{os.path.abspath(out_overlap_expr)}。"
+                            f"命令: {cmd_text}"
+                        )
+                elif step_name == "交叉匹配非参考候选":
+                    if not (
+                        os.path.exists(out_find_hip_csv)
+                        and os.path.exists(out_find_variable_csv)
+                        and os.path.exists(out_find_mpc_csv)
+                    ):
+                        raise RuntimeError(
+                            f"{step_name}完成但关键输出缺失: "
+                            f"{os.path.abspath(out_find_hip_csv)} / "
+                            f"{os.path.abspath(out_find_variable_csv)} / "
+                            f"{os.path.abspath(out_find_mpc_csv)}。"
                             f"命令: {cmd_text}"
                         )
 
