@@ -70,6 +70,30 @@ class ConfigManager:
                 "stretch_method": "percentile",  # 拉伸方法: percentile, minmax, asinh（GUI默认值：percentile）
                 "percentile_low": 99.95,  # 百分位参数（GUI默认值：99.95）
             },
+            "diff_pipeline_settings": {
+                "script_paths": {
+                    "export_fits_stars": "D:/github/misaligned_fits/export_fits_stars.py",
+                    "recommended_pipeline_console": "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+                    "reproject_wcs_and_export_stars": "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+                    "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+                    "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
+                    "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
+                },
+                "export_uniform_grid_x": 7,
+                "export_uniform_grid_y": 7,
+                "export_uniform_per_cell": 100,
+                "preprocess_box": 48,
+                "preprocess_clip_sigma": 3.0,
+                "preprocess_median_ksize": 3,
+                "preprocess_denoise_sigma": 2.0,
+                "preprocess_mix_alpha": 0.7,
+                "reproject_max_stars": 5000,
+                "reproject_uniform_grid_x": 7,
+                "reproject_uniform_grid_y": 7,
+                "reproject_uniform_per_cell": 100,
+                "solve_radii": [24, 32, 40],
+                "rank_min_observations": 2
+            },
             "dss_flip_settings": {
                 "flip_vertical": True,  # 上下翻转DSS（默认值：True）
                 "flip_horizontal": False  # 左右翻转DSS（默认值：False）
@@ -292,6 +316,37 @@ class ConfigManager:
         for key, value in kwargs.items():
             if key in self.config["batch_process_settings"]:
                 self.config["batch_process_settings"][key] = value
+        self.save_config()
+
+    def get_diff_pipeline_settings(self) -> Dict[str, Any]:
+        """获取Diff替代流程命令配置（脚本路径与关键参数）。"""
+        if "diff_pipeline_settings" not in self.config:
+            self.config["diff_pipeline_settings"] = self.default_config["diff_pipeline_settings"].copy()
+            self.save_config()
+            return self.config["diff_pipeline_settings"]
+
+        changed = False
+        defaults = self.default_config.get("diff_pipeline_settings", {})
+        current = self.config["diff_pipeline_settings"]
+        for key, default_value in defaults.items():
+            if key not in current:
+                current[key] = default_value
+                changed = True
+            elif isinstance(default_value, dict) and isinstance(current.get(key), dict):
+                for sub_key, sub_default in default_value.items():
+                    if sub_key not in current[key]:
+                        current[key][sub_key] = sub_default
+                        changed = True
+        if changed:
+            self.save_config()
+        return current
+
+    def update_diff_pipeline_settings(self, **kwargs):
+        """更新Diff替代流程命令配置。"""
+        if "diff_pipeline_settings" not in self.config:
+            self.config["diff_pipeline_settings"] = self.default_config["diff_pipeline_settings"].copy()
+        for key, value in kwargs.items():
+            self.config["diff_pipeline_settings"][key] = value
         self.save_config()
 
     def get_dss_flip_settings(self) -> Dict[str, Any]:

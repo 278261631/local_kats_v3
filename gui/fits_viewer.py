@@ -4239,56 +4239,151 @@ class FitsImageViewer:
             ref_valid_region_json = os.path.join(output_dir, f"{template_base}.effective.json")
             ref_valid_region_png = os.path.join(output_dir, f"{template_base}.effective.png")
 
+            # 从配置文件读取替代流程命令参数（未配置则回退默认值）
+            default_pipeline = {
+                "script_paths": {
+                    "export_fits_stars": "D:/github/misaligned_fits/export_fits_stars.py",
+                    "recommended_pipeline_console": "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+                    "reproject_wcs_and_export_stars": "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+                    "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+                    "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
+                    "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
+                },
+                "export_uniform_grid_x": 7,
+                "export_uniform_grid_y": 7,
+                "export_uniform_per_cell": 100,
+                "preprocess_box": 48,
+                "preprocess_clip_sigma": 3.0,
+                "preprocess_median_ksize": 3,
+                "preprocess_denoise_sigma": 2.0,
+                "preprocess_mix_alpha": 0.7,
+                "reproject_max_stars": 5000,
+                "reproject_uniform_grid_x": 7,
+                "reproject_uniform_grid_y": 7,
+                "reproject_uniform_per_cell": 100,
+                "solve_radii": [24, 32, 40],
+                "rank_min_observations": 2,
+            }
+            pipeline_settings = default_pipeline
+            if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
+                try:
+                    loaded = self.config_manager.get_diff_pipeline_settings()
+                    if isinstance(loaded, dict):
+                        pipeline_settings = loaded
+                except Exception as e:
+                    self.logger.warning("读取diff_pipeline_settings失败，使用默认命令配置: %s", e)
+
+            script_paths = pipeline_settings.get("script_paths", {})
+            export_fits_stars_script = script_paths.get(
+                "export_fits_stars", default_pipeline["script_paths"]["export_fits_stars"]
+            )
+            preprocess_script = script_paths.get(
+                "recommended_pipeline_console",
+                default_pipeline["script_paths"]["recommended_pipeline_console"],
+            )
+            reproject_script = script_paths.get(
+                "reproject_wcs_and_export_stars",
+                default_pipeline["script_paths"]["reproject_wcs_and_export_stars"],
+            )
+            solve_script = script_paths.get(
+                "solve_alignment_from_stars",
+                default_pipeline["script_paths"]["solve_alignment_from_stars"],
+            )
+            render_script = script_paths.get(
+                "render_alignment_outputs",
+                default_pipeline["script_paths"]["render_alignment_outputs"],
+            )
+            rank_script = script_paths.get(
+                "rank_variable_candidates",
+                default_pipeline["script_paths"]["rank_variable_candidates"],
+            )
+
+            export_grid_x = str(pipeline_settings.get("export_uniform_grid_x", default_pipeline["export_uniform_grid_x"]))
+            export_grid_y = str(pipeline_settings.get("export_uniform_grid_y", default_pipeline["export_uniform_grid_y"]))
+            export_per_cell = str(pipeline_settings.get("export_uniform_per_cell", default_pipeline["export_uniform_per_cell"]))
+            preprocess_box = str(pipeline_settings.get("preprocess_box", default_pipeline["preprocess_box"]))
+            preprocess_clip_sigma = str(
+                pipeline_settings.get("preprocess_clip_sigma", default_pipeline["preprocess_clip_sigma"])
+            )
+            preprocess_median_ksize = str(
+                pipeline_settings.get("preprocess_median_ksize", default_pipeline["preprocess_median_ksize"])
+            )
+            preprocess_denoise_sigma = str(
+                pipeline_settings.get("preprocess_denoise_sigma", default_pipeline["preprocess_denoise_sigma"])
+            )
+            preprocess_mix_alpha = str(
+                pipeline_settings.get("preprocess_mix_alpha", default_pipeline["preprocess_mix_alpha"])
+            )
+            reproject_max_stars = str(
+                pipeline_settings.get("reproject_max_stars", default_pipeline["reproject_max_stars"])
+            )
+            reproject_grid_x = str(
+                pipeline_settings.get("reproject_uniform_grid_x", default_pipeline["reproject_uniform_grid_x"])
+            )
+            reproject_grid_y = str(
+                pipeline_settings.get("reproject_uniform_grid_y", default_pipeline["reproject_uniform_grid_y"])
+            )
+            reproject_per_cell = str(
+                pipeline_settings.get("reproject_uniform_per_cell", default_pipeline["reproject_uniform_per_cell"])
+            )
+            solve_radii_raw = pipeline_settings.get("solve_radii", default_pipeline["solve_radii"])
+            if not isinstance(solve_radii_raw, list) or not solve_radii_raw:
+                solve_radii_raw = default_pipeline["solve_radii"]
+            solve_radii = [str(v) for v in solve_radii_raw]
+            rank_min_observations = str(
+                pipeline_settings.get("rank_min_observations", default_pipeline["rank_min_observations"])
+            )
+
             commands = [
                 (
                     "导出模板星点",
                     [
-                        py, "D:/github/misaligned_fits/export_fits_stars.py",
+                        py, export_fits_stars_script,
                         "--fits", template_file,
                         "--out", template_stars,
                         "--out-all", template_stars_all,
                         "--out-valid-region", ref_valid_region_json,
                         "--out-valid-region-png", ref_valid_region_png,
-                        "--uniform-grid-x", "7", "--uniform-grid-y", "7", "--uniform-per-cell", "100",
+                        "--uniform-grid-x", export_grid_x, "--uniform-grid-y", export_grid_y, "--uniform-per-cell", export_per_cell,
                     ],
                 ),
                 (
                     "预处理目标图",
                     [
-                        py, "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+                        py, preprocess_script,
                         "-i", source_file_for_pipeline,
                         "-o", proc_fit,
-                        "--box", "48", "--clip-sigma", "3.0", "--median-ksize", "3",
-                        "--denoise-sigma", "2.0", "--mix-alpha", "0.7", "--overwrite",
+                        "--box", preprocess_box, "--clip-sigma", preprocess_clip_sigma, "--median-ksize", preprocess_median_ksize,
+                        "--denoise-sigma", preprocess_denoise_sigma, "--mix-alpha", preprocess_mix_alpha, "--overwrite",
                     ],
                 ),
                 (
                     "WCS重投影并导出目标星点",
                     [
-                        py, "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+                        py, reproject_script,
                         "--a", template_file,
                         "--b", proc_fit,
                         "--out-fits", rp_fit,
                         "--out-stars", rp_stars,
                         "--out-stars-all", rp_stars_all,
-                        "--skip-median-filter", "--max-stars", "5000",
-                        "--uniform-grid-x", "7", "--uniform-grid-y", "7", "--uniform-per-cell", "100",
+                        "--skip-median-filter", "--max-stars", reproject_max_stars,
+                        "--uniform-grid-x", reproject_grid_x, "--uniform-grid-y", reproject_grid_y, "--uniform-per-cell", reproject_per_cell,
                     ],
                 ),
                 (
                     "求解对齐",
                     [
-                        py, "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+                        py, solve_script,
                         "--a-stars", template_stars,
                         "--b-stars", rp_stars,
                         "--out", align_npz,
-                        "--radii", "24", "32", "40",
+                        "--radii", *solve_radii,
                     ],
                 ),
                 (
                     "渲染对齐结果",
                     [
-                        py, "D:/github/misaligned_fits/render_alignment_outputs.py",
+                        py, render_script,
                         "--a", template_file,
                         "--b", rp_fit,
                         "--align", align_npz,
@@ -4298,7 +4393,7 @@ class FitsImageViewer:
                 (
                     "生成候选目标CSV",
                     [
-                        py, "D:/github/misaligned_fits/rank_variable_candidates.py",
+                        py, rank_script,
                         "--ref-stars-all", template_stars_all,
                         "--target-stars-all", rp_stars_all,
                         "--target-align", align_npz,
@@ -4310,7 +4405,7 @@ class FitsImageViewer:
                         "--ref-valid-region", ref_valid_region_json,
                         "--out-csv-ref-missing", out_csv_ref_missing,
                         "--out-png", out_png_rank,
-                        "--min-observations", "2",
+                        "--min-observations", rank_min_observations,
                     ],
                 ),
             ]

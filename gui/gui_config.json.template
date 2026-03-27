@@ -41,6 +41,30 @@
     "stretch_method": "percentile",
     "percentile_low": 99.95
   },
+  "diff_pipeline_settings": {
+    "script_paths": {
+      "export_fits_stars": "D:/github/misaligned_fits/export_fits_stars.py",
+      "recommended_pipeline_console": "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+      "reproject_wcs_and_export_stars": "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+      "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+      "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
+      "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py"
+    },
+    "export_uniform_grid_x": 7,
+    "export_uniform_grid_y": 7,
+    "export_uniform_per_cell": 100,
+    "preprocess_box": 48,
+    "preprocess_clip_sigma": 3.0,
+    "preprocess_median_ksize": 3,
+    "preprocess_denoise_sigma": 2.0,
+    "preprocess_mix_alpha": 0.7,
+    "reproject_max_stars": 5000,
+    "reproject_uniform_grid_x": 7,
+    "reproject_uniform_grid_y": 7,
+    "reproject_uniform_per_cell": 100,
+    "solve_radii": [24, 32, 40],
+    "rank_min_observations": 2
+  },
   "rank_flip_settings": {
     "flip_vertical": false
   },
@@ -51,5 +75,6 @@
   },
   "url_template_type": "standard",
   "_note": "URL模板现在从独立的config/url_config.json文件中读取，请修改该文件来配置URL",
-  "_batch_process_note": "batch_process_settings: thread_count, fast_mode, stretch_method, percentile_low。检测结果筛选/导出/对齐评判相关项已从 GUI 移除。"
+  "_batch_process_note": "batch_process_settings: thread_count, fast_mode, stretch_method, percentile_low。检测结果筛选/导出/对齐评判相关项已从 GUI 移除。",
+  "_diff_pipeline_note": "diff_pipeline_settings 用于替代流程命令（脚本路径与关键参数），无需新增GUI控件，直接编辑配置文件生效。"
 }
