@@ -4411,13 +4411,14 @@ class FitsImageViewer:
             ]
 
             for step_name, cmd in commands:
+                cmd_text = " ".join(cmd)
                 self.parent_frame.after(
                     0,
                     lambda n=step_name: self.diff_progress_label.config(
                         text=f"正在执行: {n}", foreground="blue"
                     ),
                 )
-                self.logger.info("执行步骤[%s]: %s", step_name, " ".join(cmd))
+                self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
                 proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
                 if proc.returncode != 0:
                     self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
@@ -4425,7 +4426,10 @@ class FitsImageViewer:
                         self.logger.error("stdout:\n%s", proc.stdout)
                     if proc.stderr:
                         self.logger.error("stderr:\n%s", proc.stderr)
-                    raise RuntimeError(f"{step_name}失败: {proc.stderr.strip() or proc.stdout.strip() or 'unknown'}")
+                    raise RuntimeError(
+                        f"{step_name}失败: {proc.stderr.strip() or proc.stdout.strip() or 'unknown'}。"
+                        f"命令: {cmd_text}"
+                    )
 
                 # 关键产物存在性检查，避免到后续步骤才报“文件不存在”
                 if step_name == "导出模板星点":
@@ -4436,23 +4440,34 @@ class FitsImageViewer:
                     ):
                         raise RuntimeError(
                             f"{step_name}完成但未生成输出文件: "
-                            f"{template_stars} / {template_stars_all} / {ref_valid_region_json}"
+                            f"{os.path.abspath(template_stars)} / "
+                            f"{os.path.abspath(template_stars_all)} / "
+                            f"{os.path.abspath(ref_valid_region_json)}。"
+                            f"命令: {cmd_text}"
                         )
                 elif step_name == "预处理目标图":
                     if not os.path.exists(proc_fit):
                         raise RuntimeError(
-                            f"{step_name}完成但未生成输出文件: {proc_fit}。"
-                            f"当前输入源文件: {source_file_for_pipeline}。"
+                            f"{step_name}完成但未生成输出文件: {os.path.abspath(proc_fit)}。"
+                            f"当前输入源文件: {os.path.abspath(source_file_for_pipeline)}。"
+                            f"命令: {cmd_text}。"
                             "若原始文件名含特殊字符，系统已自动替换为下划线后继续处理。"
                         )
                 elif step_name == "WCS重投影并导出目标星点":
                     if not (os.path.exists(rp_fit) and os.path.exists(rp_stars) and os.path.exists(rp_stars_all)):
                         raise RuntimeError(
-                            f"{step_name}完成但输出不完整: {rp_fit} / {rp_stars} / {rp_stars_all}"
+                            f"{step_name}完成但输出不完整: "
+                            f"{os.path.abspath(rp_fit)} / "
+                            f"{os.path.abspath(rp_stars)} / "
+                            f"{os.path.abspath(rp_stars_all)}。"
+                            f"命令: {cmd_text}"
                         )
                 elif step_name == "求解对齐":
                     if not os.path.exists(align_npz):
-                        raise RuntimeError(f"{step_name}完成但未生成输出文件: {align_npz}")
+                        raise RuntimeError(
+                            f"{step_name}完成但未生成输出文件: {os.path.abspath(align_npz)}。"
+                            f"命令: {cmd_text}"
+                        )
                 elif step_name == "生成候选目标CSV":
                     if not (
                         os.path.exists(out_csv_nonref_inner_border)
@@ -4460,7 +4475,9 @@ class FitsImageViewer:
                     ):
                         raise RuntimeError(
                             f"{step_name}完成但关键输出缺失: "
-                            f"{out_csv_nonref_inner_border} / {out_overlap_expr}"
+                            f"{os.path.abspath(out_csv_nonref_inner_border)} / "
+                            f"{os.path.abspath(out_overlap_expr)}。"
+                            f"命令: {cmd_text}"
                         )
 
             # 用非参考候选CSV作为检测结果来源（仅 inner_border）
