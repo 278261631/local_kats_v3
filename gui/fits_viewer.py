@@ -2085,6 +2085,33 @@ class FitsImageViewer:
             is_download_file = self._is_from_download_directory(file_path)
             can_diff = False
 
+            # 同步“打开输出目录”按钮状态：
+            # 选中下载目录中的FITS文件且其输出目录已存在时，允许直接打开。
+            if hasattr(self, "open_output_dir_btn"):
+                output_dir = None
+                if is_download_file:
+                    try:
+                        output_dir = self._get_diff_output_directory(create_dir=False)
+                    except Exception as e:
+                        self.logger.debug(f"计算输出目录失败: {e}")
+                        output_dir = None
+                output_dir_exists = bool(output_dir and os.path.isdir(output_dir))
+                self.logger.info(
+                    "输出目录按钮检查: file=%s, is_download_file=%s, output_dir=%s, exists=%s",
+                    file_path,
+                    is_download_file,
+                    output_dir if output_dir else "<none>",
+                    output_dir_exists
+                )
+                if output_dir and os.path.isdir(output_dir):
+                    self.last_output_dir = output_dir
+                    self.open_output_dir_btn.config(state="normal")
+                    self.logger.info("输出目录按钮状态: normal")
+                else:
+                    self.last_output_dir = None
+                    self.open_output_dir_btn.config(state="disabled")
+                    self.logger.info("输出目录按钮状态: disabled")
+
             if is_download_file and self.get_template_dir_callback:
                 template_dir = self.get_template_dir_callback()
                 if template_dir:
@@ -4116,13 +4143,12 @@ class FitsImageViewer:
         if not download_dir or not os.path.exists(download_dir):
             return False
 
-        # 检查文件路径是否以下载目录开头
+        # 使用 commonpath 判断子路径关系，避免 Windows 下大小写/分隔符差异导致误判
         try:
-            file_path = os.path.abspath(file_path)
-            download_dir = os.path.abspath(download_dir)
-
-            return file_path.startswith(download_dir)
-        except:
+            file_abs = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+            download_abs = os.path.normcase(os.path.normpath(os.path.abspath(download_dir)))
+            return os.path.commonpath([file_abs, download_abs]) == download_abs
+        except Exception:
             return False
 
     def _execute_diff(self):
@@ -4537,8 +4563,12 @@ class FitsImageViewer:
             # 恢复按钮状态
             self.parent_frame.after(0, lambda: self.diff_button.config(state="normal", text="执行Diff"))
 
-    def _get_diff_output_directory(self) -> str:
-        """获取diff操作的输出目录"""
+    def _get_diff_output_directory(self, create_dir: bool = True) -> str:
+        """获取diff操作的输出目录。
+
+        Args:
+            create_dir (bool): 是否在不存在时自动创建目录。默认True。
+        """
         from datetime import datetime
         import re
 
@@ -4639,8 +4669,9 @@ class FitsImageViewer:
         # 构建完整输出目录：根目录/系统名/日期/天区/文件名/
         output_dir = os.path.join(base_output_dir, system_name, date_str, sky_region, subdir_name)
 
-        # 创建目录
-        os.makedirs(output_dir, exist_ok=True)
+        # 仅在需要时创建目录，避免“仅选择文件”就产生空目录
+        if create_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         self.logger.info(f"diff输出目录: {output_dir}")
         self.logger.info(f"目录结构: {system_name}/{date_str}/{sky_region}/{subdir_name}")
@@ -5162,8 +5193,14 @@ class FitsImageViewer:
             # 检查输出目录中是否存在候选CSV（仅 inner_border）
             csv_path = self._get_nonref_candidates_csv_path(output_dir)
             if not csv_path:
-                self.logger.info("未找到 nonref 候选CSV，清除显示")
+                self.logger.info("未找到 nonref 候选CSV，清除显示（保留输出目录按钮可用）")
                 self._clear_diff_display()
+                # 清屏会禁用“打开输出目录”，这里恢复以便用户可直接查看目录内容
+                self.last_output_dir = output_dir
+                if hasattr(self, "open_output_dir_btn"):
+                    self.open_output_dir_btn.config(state="normal")
+                if hasattr(self, "diff_progress_label"):
+                    self.diff_progress_label.config(text="已找到输出目录（无CSV候选）", foreground="blue")
                 return
 
             # 找到了diff结果
