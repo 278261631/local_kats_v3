@@ -4460,6 +4460,7 @@ class FitsImageViewer:
                             "--find-hip-csv", out_find_hip_csv,
                             "--find-variable-csv", out_find_variable_csv,
                             "--find-mpc-csv", out_find_mpc_csv,
+                            "--ref-fits", template_file,
                         ],
                     )
                 )
