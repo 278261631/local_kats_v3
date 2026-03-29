@@ -3265,10 +3265,22 @@ Diff统计:
             except Exception as e:
                 self._log(f"从文件路径解析信息失败: {e}")
 
+        # 与单文件“执行Diff”保持一致：目录段名统一做安全化
+        sanitizer = getattr(self.fits_viewer, "_sanitize_output_name", None)
+        if not callable(sanitizer):
+            def sanitizer(name: str) -> str:
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or ""))
+                safe = re.sub(r"_+", "_", safe).strip("._")
+                return safe or "unnamed"
+
         # 从选中文件名生成子目录名（不带时间戳，避免重复执行）
         filename = os.path.basename(file_path)
         name_without_ext = os.path.splitext(filename)[0]
-        subdir_name = name_without_ext
+        subdir_name = sanitizer(name_without_ext)
+
+        # 系统名/天区名也保持一致做安全化
+        system_name = sanitizer(system_name)
+        sky_region = sanitizer(sky_region)
 
         # 构建完整输出目录：根目录/系统名/日期/天区/文件名/
         output_dir = os.path.join(base_output_dir, system_name, date_str, sky_region, subdir_name)
@@ -3304,28 +3316,23 @@ Diff统计:
             # 线程安全：直接生成输出目录，不依赖共享的selected_file_path
             output_dir = self._get_thread_safe_diff_output_directory(download_file)
 
-            # 检查是否已存在结果
-            if os.path.exists(output_dir):
-                detection_dirs = [d for d in os.listdir(output_dir)
-                                if d.startswith('detection_') and os.path.isdir(os.path.join(output_dir, d))]
-                if detection_dirs:
-                    result_dict['success'] = True
-                    result_dict['message'] = "已有结果"
-                    result_dict['skipped'] = True
-                    return result_dict
-
-            diff_result = self.fits_viewer.diff_orb.process_diff(
-                download_file,
-                template_file,
-                output_dir,
+            # 切到与单文件“执行Diff”一致的新替代流程
+            diff_result = self.fits_viewer.run_diff_pipeline_for_file(
+                source_file_path=download_file,
+                template_file=template_file,
+                output_dir=output_dir,
             )
 
             if diff_result and diff_result.get('success'):
                 result_dict['success'] = True
                 result_dict['new_spots'] = diff_result.get('new_bright_spots', 0)
-                result_dict['message'] = f"{result_dict['new_spots']}个亮点"
+                if diff_result.get('skipped'):
+                    result_dict['message'] = "已有结果"
+                    result_dict['skipped'] = True
+                else:
+                    result_dict['message'] = f"{result_dict['new_spots']}个亮点"
             else:
-                result_dict['message'] = "Diff 未实现"
+                result_dict['message'] = (diff_result or {}).get('error') or "Diff 失败"
 
         except Exception as e:
             result_dict['message'] = str(e)

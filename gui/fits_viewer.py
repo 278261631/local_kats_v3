@@ -4753,6 +4753,350 @@ class FitsImageViewer:
             self.logger.warning("创建安全源文件名失败，回退原文件继续处理: %s", e)
             return source_path
 
+    def run_diff_pipeline_for_file(
+        self,
+        source_file_path: str,
+        template_file: str,
+        output_dir: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        """对单个文件执行新Diff替代流程（可供批量与单文件共用）。"""
+        if progress_callback is None:
+            progress_callback = lambda _msg: None
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+
+            # 若已存在结果，直接复用，避免重复跑外部流水线
+            nonref_csv = self._get_nonref_candidates_csv_path(output_dir)
+            if nonref_csv:
+                detected_count = self._count_variable_candidates_nonref_only(output_dir)
+                return {
+                    "success": True,
+                    "skipped": True,
+                    "alignment_success": True,
+                    "new_bright_spots": detected_count,
+                    "output_directory": output_dir,
+                }
+
+            py = sys.executable or "python"
+            source_file_for_pipeline = self._prepare_safe_source_file_for_diff(source_file_path, output_dir)
+            template_base_raw = os.path.splitext(os.path.basename(template_file))[0]
+            target_base_raw = os.path.splitext(os.path.basename(source_file_for_pipeline))[0]
+            template_base = self._sanitize_output_name(template_base_raw)
+            target_base = self._sanitize_output_name(target_base_raw)
+
+            template_stars = os.path.join(output_dir, f"{template_base}.stars.npz")
+            template_stars_all = os.path.join(output_dir, f"{template_base}.stars.all.npz")
+            proc_fit = os.path.join(output_dir, f"{target_base}.01proc.fit")
+            rp_fit = os.path.join(output_dir, f"{target_base}.02rp.fit")
+            rp_stars = os.path.join(output_dir, f"{target_base}.rp.stars.npz")
+            rp_stars_all = os.path.join(output_dir, f"{target_base}.rp.stars.all.npz")
+            align_npz = os.path.join(output_dir, f"{target_base}.rp.align.npz")
+            out_csv_rank = os.path.join(output_dir, "variable_candidates_rank.csv")
+            out_csv_nonref = os.path.join(output_dir, "variable_candidates_nonref_only.csv")
+            out_csv_nonref_inner_border = os.path.join(
+                output_dir, "variable_candidates_nonref_only_inner_border.csv"
+            )
+            out_csv_ref_missing = os.path.join(output_dir, "variable_candidates_ref_only_missing_in_targets.csv")
+            out_png_rank = os.path.join(output_dir, "variable_candidates_rank.png")
+            out_overlap_expr = os.path.join(output_dir, "ref_target_overlap_polygon_expr.json")
+            out_overlap_expr_png = os.path.join(output_dir, "ref_target_overlap_polygon_expr.png")
+            ref_valid_region_json = os.path.join(output_dir, f"{template_base}.effective.json")
+            ref_valid_region_png = os.path.join(output_dir, f"{template_base}.effective.png")
+            out_find_hip_csv = os.path.join(output_dir, "find_hip.csv")
+            out_find_variable_csv = os.path.join(output_dir, "find_variable.csv")
+            out_find_mpc_csv = os.path.join(output_dir, "find_mpc.csv")
+
+            default_pipeline = {
+                "script_paths": {
+                    "export_fits_stars": "D:/github/misaligned_fits/export_fits_stars.py",
+                    "recommended_pipeline_console": "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+                    "reproject_wcs_and_export_stars": "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+                    "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+                    "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
+                    "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
+                    "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
+                },
+                "export_uniform_grid_x": 7,
+                "export_uniform_grid_y": 7,
+                "export_uniform_per_cell": 100,
+                "preprocess_box": 48,
+                "preprocess_clip_sigma": 3.0,
+                "preprocess_median_ksize": 3,
+                "preprocess_denoise_sigma": 2.0,
+                "preprocess_mix_alpha": 0.7,
+                "reproject_max_stars": 5000,
+                "reproject_uniform_grid_x": 7,
+                "reproject_uniform_grid_y": 7,
+                "reproject_uniform_per_cell": 100,
+                "solve_radii": [24, 32, 40],
+                "rank_min_observations": 2,
+                "enable_crossmatch_nonref_candidates": True,
+            }
+            pipeline_settings = default_pipeline
+            if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
+                try:
+                    loaded = self.config_manager.get_diff_pipeline_settings()
+                    if isinstance(loaded, dict):
+                        pipeline_settings = loaded
+                except Exception as e:
+                    self.logger.warning("读取diff_pipeline_settings失败，使用默认命令配置: %s", e)
+
+            script_paths = pipeline_settings.get("script_paths", {})
+            export_fits_stars_script = script_paths.get(
+                "export_fits_stars", default_pipeline["script_paths"]["export_fits_stars"]
+            )
+            preprocess_script = script_paths.get(
+                "recommended_pipeline_console",
+                default_pipeline["script_paths"]["recommended_pipeline_console"],
+            )
+            reproject_script = script_paths.get(
+                "reproject_wcs_and_export_stars",
+                default_pipeline["script_paths"]["reproject_wcs_and_export_stars"],
+            )
+            solve_script = script_paths.get(
+                "solve_alignment_from_stars",
+                default_pipeline["script_paths"]["solve_alignment_from_stars"],
+            )
+            render_script = script_paths.get(
+                "render_alignment_outputs",
+                default_pipeline["script_paths"]["render_alignment_outputs"],
+            )
+            rank_script = script_paths.get(
+                "rank_variable_candidates",
+                default_pipeline["script_paths"]["rank_variable_candidates"],
+            )
+            crossmatch_script = script_paths.get(
+                "crossmatch_nonref_candidates",
+                default_pipeline["script_paths"]["crossmatch_nonref_candidates"],
+            )
+
+            export_grid_x = str(pipeline_settings.get("export_uniform_grid_x", default_pipeline["export_uniform_grid_x"]))
+            export_grid_y = str(pipeline_settings.get("export_uniform_grid_y", default_pipeline["export_uniform_grid_y"]))
+            export_per_cell = str(pipeline_settings.get("export_uniform_per_cell", default_pipeline["export_uniform_per_cell"]))
+            preprocess_box = str(pipeline_settings.get("preprocess_box", default_pipeline["preprocess_box"]))
+            preprocess_clip_sigma = str(
+                pipeline_settings.get("preprocess_clip_sigma", default_pipeline["preprocess_clip_sigma"])
+            )
+            preprocess_median_ksize = str(
+                pipeline_settings.get("preprocess_median_ksize", default_pipeline["preprocess_median_ksize"])
+            )
+            preprocess_denoise_sigma = str(
+                pipeline_settings.get("preprocess_denoise_sigma", default_pipeline["preprocess_denoise_sigma"])
+            )
+            preprocess_mix_alpha = str(
+                pipeline_settings.get("preprocess_mix_alpha", default_pipeline["preprocess_mix_alpha"])
+            )
+            reproject_max_stars = str(
+                pipeline_settings.get("reproject_max_stars", default_pipeline["reproject_max_stars"])
+            )
+            reproject_grid_x = str(
+                pipeline_settings.get("reproject_uniform_grid_x", default_pipeline["reproject_uniform_grid_x"])
+            )
+            reproject_grid_y = str(
+                pipeline_settings.get("reproject_uniform_grid_y", default_pipeline["reproject_uniform_grid_y"])
+            )
+            reproject_per_cell = str(
+                pipeline_settings.get("reproject_uniform_per_cell", default_pipeline["reproject_uniform_per_cell"])
+            )
+            solve_radii_raw = pipeline_settings.get("solve_radii", default_pipeline["solve_radii"])
+            if not isinstance(solve_radii_raw, list) or not solve_radii_raw:
+                solve_radii_raw = default_pipeline["solve_radii"]
+            solve_radii = [str(v) for v in solve_radii_raw]
+            rank_min_observations = str(
+                pipeline_settings.get("rank_min_observations", default_pipeline["rank_min_observations"])
+            )
+            enable_crossmatch_nonref_candidates = bool(
+                pipeline_settings.get(
+                    "enable_crossmatch_nonref_candidates",
+                    default_pipeline["enable_crossmatch_nonref_candidates"],
+                )
+            )
+
+            commands = [
+                (
+                    "导出模板星点",
+                    [
+                        py, export_fits_stars_script,
+                        "--fits", template_file,
+                        "--out", template_stars,
+                        "--out-all", template_stars_all,
+                        "--out-valid-region", ref_valid_region_json,
+                        "--out-valid-region-png", ref_valid_region_png,
+                        "--uniform-grid-x", export_grid_x, "--uniform-grid-y", export_grid_y, "--uniform-per-cell", export_per_cell,
+                    ],
+                ),
+                (
+                    "预处理目标图",
+                    [
+                        py, preprocess_script,
+                        "-i", source_file_for_pipeline,
+                        "-o", proc_fit,
+                        "--box", preprocess_box, "--clip-sigma", preprocess_clip_sigma, "--median-ksize", preprocess_median_ksize,
+                        "--denoise-sigma", preprocess_denoise_sigma, "--mix-alpha", preprocess_mix_alpha, "--overwrite",
+                    ],
+                ),
+                (
+                    "WCS重投影并导出目标星点",
+                    [
+                        py, reproject_script,
+                        "--a", template_file,
+                        "--b", proc_fit,
+                        "--out-fits", rp_fit,
+                        "--out-stars", rp_stars,
+                        "--out-stars-all", rp_stars_all,
+                        "--skip-median-filter", "--max-stars", reproject_max_stars,
+                        "--uniform-grid-x", reproject_grid_x, "--uniform-grid-y", reproject_grid_y, "--uniform-per-cell", reproject_per_cell,
+                    ],
+                ),
+                (
+                    "求解对齐",
+                    [
+                        py, solve_script,
+                        "--a-stars", template_stars,
+                        "--b-stars", rp_stars,
+                        "--out", align_npz,
+                        "--radii", *solve_radii,
+                    ],
+                ),
+                (
+                    "渲染对齐结果",
+                    [
+                        py, render_script,
+                        "--a", template_file,
+                        "--b", rp_fit,
+                        "--align", align_npz,
+                        "--outdir", output_dir,
+                    ],
+                ),
+                (
+                    "生成候选目标CSV",
+                    [
+                        py, rank_script,
+                        "--ref-stars-all", template_stars_all,
+                        "--target-stars-all", rp_stars_all,
+                        "--target-align", align_npz,
+                        "--out-csv", out_csv_rank,
+                        "--out-csv-nonref", out_csv_nonref,
+                        "--out-overlap-expr", out_overlap_expr,
+                        "--out-overlap-expr-png", out_overlap_expr_png,
+                        "--out-csv-nonref-inner-border", out_csv_nonref_inner_border,
+                        "--ref-valid-region", ref_valid_region_json,
+                        "--out-csv-ref-missing", out_csv_ref_missing,
+                        "--out-png", out_png_rank,
+                        "--min-observations", rank_min_observations,
+                    ],
+                ),
+            ]
+            if enable_crossmatch_nonref_candidates:
+                commands.append(
+                    (
+                        "交叉匹配非参考候选",
+                        [
+                            py, crossmatch_script,
+                            "--input-csv", out_csv_nonref_inner_border,
+                            "--find-hip-csv", out_find_hip_csv,
+                            "--find-variable-csv", out_find_variable_csv,
+                            "--find-mpc-csv", out_find_mpc_csv,
+                            "--ref-fits", template_file,
+                        ],
+                    )
+                )
+
+            for step_name, cmd in commands:
+                progress_callback(f"正在执行: {step_name}")
+                cmd_text = " ".join(cmd)
+                self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                if proc.returncode != 0:
+                    self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
+                    if proc.stdout:
+                        self.logger.error("stdout:\n%s", proc.stdout)
+                    if proc.stderr:
+                        self.logger.error("stderr:\n%s", proc.stderr)
+                    raise RuntimeError(
+                        f"{step_name}失败: {proc.stderr.strip() or proc.stdout.strip() or 'unknown'}。"
+                        f"命令: {cmd_text}"
+                    )
+
+                # 关键产物存在性检查
+                if step_name == "导出模板星点":
+                    if not (
+                        os.path.exists(template_stars)
+                        and os.path.exists(template_stars_all)
+                        and os.path.exists(ref_valid_region_json)
+                    ):
+                        raise RuntimeError(
+                            f"{step_name}完成但未生成输出文件: "
+                            f"{os.path.abspath(template_stars)} / "
+                            f"{os.path.abspath(template_stars_all)} / "
+                            f"{os.path.abspath(ref_valid_region_json)}。"
+                            f"命令: {cmd_text}"
+                        )
+                elif step_name == "预处理目标图":
+                    if not os.path.exists(proc_fit):
+                        raise RuntimeError(
+                            f"{step_name}完成但未生成输出文件: {os.path.abspath(proc_fit)}。"
+                            f"当前输入源文件: {os.path.abspath(source_file_for_pipeline)}。"
+                            f"命令: {cmd_text}。"
+                            "若原始文件名含特殊字符，系统已自动替换为下划线后继续处理。"
+                        )
+                elif step_name == "WCS重投影并导出目标星点":
+                    if not (os.path.exists(rp_fit) and os.path.exists(rp_stars) and os.path.exists(rp_stars_all)):
+                        raise RuntimeError(
+                            f"{step_name}完成但输出不完整: "
+                            f"{os.path.abspath(rp_fit)} / "
+                            f"{os.path.abspath(rp_stars)} / "
+                            f"{os.path.abspath(rp_stars_all)}。"
+                            f"命令: {cmd_text}"
+                        )
+                elif step_name == "求解对齐":
+                    if not os.path.exists(align_npz):
+                        raise RuntimeError(
+                            f"{step_name}完成但未生成输出文件: {os.path.abspath(align_npz)}。"
+                            f"命令: {cmd_text}"
+                        )
+                elif step_name == "生成候选目标CSV":
+                    if not (
+                        os.path.exists(out_csv_nonref_inner_border)
+                        and os.path.exists(out_overlap_expr)
+                    ):
+                        raise RuntimeError(
+                            f"{step_name}完成但关键输出缺失: "
+                            f"{os.path.abspath(out_csv_nonref_inner_border)} / "
+                            f"{os.path.abspath(out_overlap_expr)}。"
+                            f"命令: {cmd_text}"
+                        )
+                elif step_name == "交叉匹配非参考候选":
+                    if not (
+                        os.path.exists(out_find_hip_csv)
+                        and os.path.exists(out_find_variable_csv)
+                        and os.path.exists(out_find_mpc_csv)
+                    ):
+                        raise RuntimeError(
+                            f"{step_name}完成但关键输出缺失: "
+                            f"{os.path.abspath(out_find_hip_csv)} / "
+                            f"{os.path.abspath(out_find_variable_csv)} / "
+                            f"{os.path.abspath(out_find_mpc_csv)}。"
+                            f"命令: {cmd_text}"
+                        )
+
+            detected_count = self._count_variable_candidates_nonref_only(output_dir)
+            return {
+                "success": True,
+                "alignment_success": True,
+                "new_bright_spots": detected_count,
+                "output_directory": output_dir,
+            }
+        except Exception as e:
+            self.logger.error("执行新Diff替代流程失败: %s", e)
+            return {
+                "success": False,
+                "error": str(e),
+                "output_directory": output_dir,
+            }
+
     def _get_nonref_candidates_csv_path(self, output_dir: str) -> Optional[str]:
         """返回非参考候选CSV路径：仅 inner_border 文件。"""
         path = os.path.join(output_dir, "variable_candidates_nonref_only_inner_border.csv")
