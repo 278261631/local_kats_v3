@@ -31,12 +31,8 @@ from config_manager import ConfigManager
 from url_builder import URLBuilderFrame
 from batch_status_widget import BatchStatusWidget
 
-# 尝试导入ASTAP处理器
-try:
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from astap_processor import ASTAPProcessor
-except ImportError:
-    ASTAPProcessor = None
+# ASTAP 已停用（保留占位变量，兼容旧流程中的条件判断）
+ASTAPProcessor = None
 
 
 class FitsWebDownloaderGUI:
@@ -298,16 +294,6 @@ class FitsWebDownloaderGUI:
         self.timeout_var = tk.IntVar(value=30)
         ttk.Spinbox(params_frame, from_=10, to=120, textvariable=self.timeout_var, width=5).pack(side=tk.LEFT, padx=(5, 15))
 
-        # ASTAP处理选项
-        self.enable_astap_var = tk.BooleanVar(value=False)
-        astap_checkbox = ttk.Checkbutton(params_frame, text="启用ASTAP处理", variable=self.enable_astap_var)
-        astap_checkbox.pack(side=tk.LEFT, padx=(5, 0))
-
-        # 如果ASTAP处理器不可用，禁用选项
-        if not ASTAPProcessor:
-            astap_checkbox.config(state="disabled")
-            ttk.Label(params_frame, text="(ASTAP处理器不可用)", foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
-
         # 下载按钮和进度条
         control_frame = ttk.Frame(download_frame)
         control_frame.pack(fill=tk.X)
@@ -428,7 +414,7 @@ class FitsWebDownloaderGUI:
         row3_frame.pack(fill=tk.X, pady=(0, 10))
 
         if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            ttk.Label(row3_frame, text="Diff 流水线已移除；批量流程仍执行下载与 ASTAP，Diff 步骤将跳过直至新实现接入。").grid(
+            ttk.Label(row3_frame, text="批量流程执行：下载 + Diff（已移除ASTAP阶段）。").grid(
                 row=0, column=0, sticky=tk.W, padx=(0, 5)
             )
 
@@ -2681,7 +2667,7 @@ class FitsWebDownloaderGUI:
                 max_workers=self.max_workers_var.get(),
                 retry_times=self.retry_times_var.get(),
                 timeout=self.timeout_var.get(),
-                enable_astap=self.enable_astap_var.get(),
+                enable_astap=False,
                 astap_config_path="config/url_config.json"
             )
 
@@ -3059,10 +3045,6 @@ WCS统计:
   - 有WCS: {stats['wcs_found']}
   - 缺WCS: {stats['wcs_missing']}
 
-ASTAP统计:
-  - ASTAP成功: {stats['astap_success']}
-  - ASTAP失败: {stats['astap_failed']}
-
 Diff统计:
   - Diff成功: {stats['diff_success']}
   - Diff失败: {stats['diff_failed']}
@@ -3103,10 +3085,6 @@ Diff统计:
                     f.write("WCS统计:\n")
                     f.write(f"  - 有WCS: {stats['wcs_found']}\n")
                     f.write(f"  - 缺WCS: {stats['wcs_missing']}\n\n")
-
-                    f.write("ASTAP统计:\n")
-                    f.write(f"  - ASTAP成功: {stats['astap_success']}\n")
-                    f.write(f"  - ASTAP失败: {stats['astap_failed']}\n\n")
 
                     f.write("Diff统计:\n")
                     f.write(f"  - Diff成功: {stats['diff_success']}\n")
@@ -3339,45 +3317,6 @@ Diff统计:
 
         return result_dict
 
-    def _process_single_astap(self, file_path):
-        """
-        处理单个文件的ASTAP操作（线程安全）
-
-        Returns:
-            dict: 包含处理结果的字典 {'success': bool, 'filename': str, 'message': str}
-        """
-        filename = os.path.basename(file_path)
-        result_dict = {
-            'success': False,
-            'filename': filename,
-            'message': ''
-        }
-
-        try:
-            # 检查ASTAP处理器是否可用
-            if not self.fits_viewer or not self.fits_viewer.astap_processor:
-                result_dict['message'] = "ASTAP处理器不可用"
-                return result_dict
-
-            # 检查文件是否存在
-            if not os.path.exists(file_path):
-                result_dict['message'] = "文件不存在"
-                return result_dict
-
-            # 执行ASTAP处理
-            astap_success = self.fits_viewer.astap_processor.process_fits_file(file_path)
-
-            if astap_success:
-                result_dict['success'] = True
-                result_dict['message'] = "ASTAP处理成功"
-            else:
-                result_dict['message'] = "ASTAP处理失败"
-
-        except Exception as e:
-            result_dict['message'] = str(e)
-
-        return result_dict
-
     def _pause_batch_process(self):
         """暂停/继续批量处理"""
         if self.batch_paused:
@@ -3497,7 +3436,7 @@ Diff统计:
             self._log(f"目录结构: {tel_name}/{date}/{k_number}")
 
             # 使用流水线模式处理
-            self._log("\n使用流水线模式: 下载 → ASTAP → Diff")
+            self._log("\n使用流水线模式: 下载 → Diff")
             self._log("-" * 60)
             self._pipeline_process_files(selected_files, actual_download_dir, thread_count)
 
@@ -3752,7 +3691,7 @@ Diff统计:
                 self.root.after(0, lambda f=filename: self.batch_status_widget.add_file(f))
 
             # 直接跨天区流水线处理：不按天区分批
-            self._log("\n使用跨天区流水线：下载 → ASTAP → Diff（不按天区分批）")
+            self._log("\n使用跨天区流水线：下载 → Diff（不按天区分批）")
             self.root.after(0, lambda: self.status_label.config(text=f"正在流水线处理所有天区的文件..."))
 
             # 准备带目录的文件列表（为每个文件指定独立下载目录）
@@ -3804,7 +3743,7 @@ Diff统计:
     def _batch_process_region(self, selected_files, tel_name, date, k_number):
         """
         处理单个天区的批量下载和diff操作（流水线模式）
-        下载完一个文件 → 立即ASTAP → 立即Diff
+        下载完一个文件 → 立即Diff
 
         Args:
             selected_files: [(filename, url), ...] 文件列表
@@ -3828,7 +3767,7 @@ Diff统计:
             self.last_batch_output_root = os.path.join(base_output_dir, tel_name, date, k_number)
 
             # 使用流水线模式处理
-            self._log("\n使用流水线模式: 下载 → ASTAP → Diff")
+            self._log("\n使用流水线模式: 下载 → Diff")
             self._log("-" * 60)
             self.root.after(0, lambda: self.status_label.config(text=f"正在流水线处理 {k_number} 的文件..."))
 
@@ -3842,30 +3781,24 @@ Diff统计:
 
     def _pipeline_process_files(self, selected_files, download_dir, thread_count):
         """
-        流水线处理文件：下载 → ASTAP → Diff
-        每下载完一个文件，立即进行ASTAP处理，ASTAP完成后立即进行Diff处理
+        流水线处理文件：下载 → Diff
 
         Args:
             selected_files: [(filename, url), ...] 文件列表
             download_dir: 下载目录
             thread_count: 线程数
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         import queue
 
-        # 创建队列用于流水线处理
-        astap_queue = queue.Queue()  # 下载完成的文件队列
-        diff_queue = queue.Queue()   # ASTAP完成的文件队列
+        # 下载完成的文件队列
+        diff_queue = queue.Queue()
 
         # 统计信息
         stats_lock = threading.Lock()
         stats = {
             'download_completed': 0,
             'download_failed': 0,
-            'astap_completed': 0,
-            'astap_success': 0,
-            'astap_failed': 0,
             'diff_completed': 0,
             'diff_success': 0,
             'diff_failed': 0,
@@ -3877,86 +3810,6 @@ Diff统计:
         stop_event = threading.Event()
 
         template_dir = self.template_dir_var.get().strip()
-        # 启动ASTAP工作线程池
-        def astap_worker():
-            """ASTAP处理工作线程"""
-            while not stop_event.is_set() and not self.batch_stopped:
-                try:
-                    file_path = astap_queue.get(timeout=1)
-                    if file_path is None:  # 结束信号
-                        astap_queue.task_done()
-                        break
-
-                    # 检查停止标志
-                    if self.batch_stopped:
-                        astap_queue.task_done()
-                        break
-
-                    # 等待暂停解除
-                    self.batch_pause_event.wait()
-
-                    # 暂停解除后再次检查停止标志
-                    if self.batch_stopped:
-                        astap_queue.task_done()
-                        break
-
-                    try:
-                        filename = os.path.basename(file_path)
-                        self._log(f"[ASTAP] 开始处理: {filename}")
-                        self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
-                            f, BatchStatusWidget.STATUS_ASTAP_PROCESSING))
-
-                        # 执行ASTAP处理
-                        result = self._process_single_astap(file_path)
-
-                        with stats_lock:
-                            stats['astap_completed'] += 1
-
-                        if result and result.get('success'):
-                            # 检查WCS
-                            from astropy.io import fits as astropy_fits
-                            with astropy_fits.open(file_path) as hdul:
-                                header = hdul[0].header
-                                has_wcs = 'CRVAL1' in header and 'CRVAL2' in header
-
-                            if has_wcs:
-                                with stats_lock:
-                                    stats['astap_success'] += 1
-                                self._log(f"[ASTAP] ✓ 成功: {filename}")
-                                self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
-                                    f, BatchStatusWidget.STATUS_ASTAP_SUCCESS))
-                                # 放入diff队列
-                                diff_queue.put(file_path)
-                            else:
-                                with stats_lock:
-                                    stats['astap_failed'] += 1
-                                self._log(f"[ASTAP] ✗ 失败(无WCS): {filename}")
-                                self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
-                                    f, BatchStatusWidget.STATUS_ASTAP_FAILED, "未添加WCS"))
-                        else:
-                            with stats_lock:
-                                stats['astap_failed'] += 1
-                            error_msg = result.get('message', '未知错误') if result else '处理失败'
-                            self._log(f"[ASTAP] ✗ 失败: {filename} - {error_msg}")
-                            self.root.after(0, lambda f=filename, msg=error_msg: self.batch_status_widget.update_status(
-                                f, BatchStatusWidget.STATUS_ASTAP_FAILED, msg))
-
-                        # 更新统计
-                        self._update_pipeline_stats(stats)
-
-                    finally:
-                        # 标记任务完成
-                        astap_queue.task_done()
-
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    self._log(f"[ASTAP] 异常: {str(e)}")
-                    try:
-                        astap_queue.task_done()
-                    except:
-                        pass
-
         # 启动Diff工作线程池
         def diff_worker():
             """Diff处理工作线程"""
@@ -4023,23 +3876,17 @@ Diff统计:
                     except:
                         pass
 
-        # 启动ASTAP和Diff工作线程
-        astap_threads = []
+        # 启动Diff工作线程
         diff_threads = []
-
-        for i in range(thread_count):
-            t = threading.Thread(target=astap_worker, daemon=True)
-            t.start()
-            astap_threads.append(t)
 
         for i in range(thread_count):
             t = threading.Thread(target=diff_worker, daemon=True)
             t.start()
             diff_threads.append(t)
 
-        self._log(f"启动了 {thread_count} 个ASTAP工作线程和 {thread_count} 个Diff工作线程")
+        self._log(f"启动了 {thread_count} 个Diff工作线程")
 
-        # 下载文件并放入ASTAP队列（单线程下载）
+        # 下载文件并放入Diff队列（单线程下载）
         self._log("\n开始下载文件...")
         for idx, item in enumerate(selected_files, 1):
             # 兼容两种输入格式：
@@ -4114,21 +3961,7 @@ Diff统计:
                 self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
                     f, BatchStatusWidget.STATUS_DOWNLOAD_SUCCESS))
 
-                # 检查是否已有WCS
-                try:
-                    from astropy.io import fits as astropy_fits
-                    with astropy_fits.open(file_path) as hdul:
-                        header = hdul[0].header
-                        has_wcs = 'CRVAL1' in header and 'CRVAL2' in header
-
-                    if has_wcs:
-                        self._log(f"[下载] ✓ 文件已有WCS，直接进入Diff队列: {filename}")
-                        diff_queue.put(file_path)
-                    else:
-                        self._log(f"[下载] → 文件无WCS，进入ASTAP队列: {filename}")
-                        astap_queue.put(file_path)
-                except:
-                    astap_queue.put(file_path)
+                diff_queue.put(file_path)
                 # 已存在则更新处理进度提示（无速度）
                 self.root.after(0, lambda i=idx, t=len(selected_files), f=filename:
                                 self.batch_progress_label.config(text=f"跳过下载(已存在) ({i}/{t}): {f}"))
@@ -4174,21 +4007,7 @@ Diff统计:
                     with stats_lock:
                         stats['current_speed_mb_s'] = speed_mb_s
 
-                    # 检查是否已有WCS
-                    try:
-                        from astropy.io import fits as astropy_fits
-                        with astropy_fits.open(file_path) as hdul:
-                            header = hdul[0].header
-                            has_wcs = 'CRVAL1' in header and 'CRVAL2' in header
-
-                        if has_wcs:
-                            self._log(f"[下载] ✓ 文件已有WCS，直接进入Diff队列: {filename}")
-                            diff_queue.put(file_path)
-                        else:
-                            self._log(f"[下载] → 文件无WCS，进入ASTAP队列: {filename}")
-                            astap_queue.put(file_path)
-                    except:
-                        astap_queue.put(file_path)
+                    diff_queue.put(file_path)
                 else:
                     with stats_lock:
                         stats['download_failed'] += 1
@@ -4218,13 +4037,7 @@ Diff统计:
             # 更新统计
             self._update_pipeline_stats(stats)
 
-        self._log("\n所有文件下载完成，等待ASTAP和Diff处理完成...")
-
-        # 等待ASTAP队列处理完成
-        astap_queue.join()
-        # 发送结束信号给ASTAP线程
-        for _ in range(thread_count):
-            astap_queue.put(None)
+        self._log("\n所有文件下载完成，等待Diff处理完成...")
 
         # 等待Diff队列处理完成
         diff_queue.join()
@@ -4234,8 +4047,6 @@ Diff统计:
 
         # 等待所有线程结束
         stop_event.set()
-        for t in astap_threads:
-            t.join(timeout=5)
         for t in diff_threads:
             t.join(timeout=5)
 
@@ -4243,7 +4054,6 @@ Diff统计:
         self._log("\n" + "=" * 60)
         self._log("流水线处理完成！")
         self._log(f"下载: 成功 {stats['download_completed']}, 失败 {stats['download_failed']}")
-        self._log(f"ASTAP: 成功 {stats['astap_success']}, 失败 {stats['astap_failed']}")
         self._log(f"Diff: 成功 {stats['diff_success']}, 失败 {stats['diff_failed']}")
         self._log("=" * 60)
 
@@ -4252,7 +4062,6 @@ Diff统计:
         speed = stats.get('current_speed_mb_s', 0.0)
         stats_text = (f"下载: {stats['download_completed']}/{stats['total_files']} | "
                       f"速度: {speed:.2f} MB/s | "
-                      f"ASTAP: {stats['astap_success']}/{stats['astap_completed']} | "
                       f"Diff: {stats['diff_success']}/{stats['diff_completed']}")
         self.root.after(0, lambda t=stats_text: self.batch_stats_label.config(text=t))
 

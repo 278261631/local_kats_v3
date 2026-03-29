@@ -21,9 +21,6 @@ class BatchStatusWidget:
     STATUS_WCS_CHECKING = "wcs_checking"          # 检查WCS
     STATUS_WCS_FOUND = "wcs_found"                # 有WCS信息
     STATUS_WCS_MISSING = "wcs_missing"            # 缺少WCS信息
-    STATUS_ASTAP_PROCESSING = "astap_processing"  # ASTAP处理中
-    STATUS_ASTAP_SUCCESS = "astap_success"        # ASTAP成功
-    STATUS_ASTAP_FAILED = "astap_failed"          # ASTAP失败
     STATUS_DIFF_PROCESSING = "diff_processing"    # Diff处理中
     STATUS_DIFF_SUCCESS = "diff_success"          # Diff成功
     STATUS_DIFF_FAILED = "diff_failed"            # Diff失败
@@ -39,9 +36,6 @@ class BatchStatusWidget:
         STATUS_WCS_CHECKING: {"icon": "🔍", "color": "blue", "text": "检查WCS"},
         STATUS_WCS_FOUND: {"icon": "✓", "color": "green", "text": "有WCS"},
         STATUS_WCS_MISSING: {"icon": "⚠", "color": "orange", "text": "缺WCS"},
-        STATUS_ASTAP_PROCESSING: {"icon": "⚙", "color": "blue", "text": "ASTAP处理"},
-        STATUS_ASTAP_SUCCESS: {"icon": "✓", "color": "green", "text": "ASTAP成功"},
-        STATUS_ASTAP_FAILED: {"icon": "✗", "color": "red", "text": "ASTAP失败"},
         STATUS_DIFF_PROCESSING: {"icon": "⚙", "color": "blue", "text": "Diff处理"},
         STATUS_DIFF_SUCCESS: {"icon": "✓", "color": "green", "text": "Diff成功"},
         STATUS_DIFF_FAILED: {"icon": "✗", "color": "red", "text": "Diff失败"},
@@ -283,7 +277,6 @@ class BatchStatusWidget:
                 self.STATUS_DOWNLOAD_FAILED,
                 self.STATUS_DOWNLOAD_SKIPPED,
                 self.STATUS_DOWNLOAD_SUCCESS,
-                self.STATUS_ASTAP_FAILED,
                 self.STATUS_DIFF_SUCCESS,
                 self.STATUS_DIFF_FAILED,
                 self.STATUS_DIFF_SKIPPED,

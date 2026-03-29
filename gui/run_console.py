@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-无GUI版本的FITS网页下载 + ASTAP + diff 批处理脚本
+无GUI版本的FITS网页下载 + diff 批处理脚本
 
 目标：在无图形界面环境下，实现与 gui/run_gui.py 中 --date/--telescope/--region
 自动模式等价的核心功能（全天 / 全天单系统 / 单天区），但不依赖 Tkinter。
@@ -9,7 +9,7 @@
     - 基于 ConfigManager 与 url_config_manager 构建 URL
     - 使用自带的网页解析逻辑 + DirectoryScanner/WebFitsScanner 扫描可用天区和 FITS 列表（不依赖 Tk）
     - 使用 FitsDownloader 下载 FITS 文件，并按 GUI 中的目录结构组织
-    - Diff 流水线已从 DiffOrbIntegration.process_diff 移除；当前仅下载（可选 ASTAP），不执行对齐+差分。
+    - Diff 流水线已从 DiffOrbIntegration.process_diff 移除；当前仅下载，不执行对齐+差分。
 
 注意：
 - 本脚本不导入任何 Tk / GUI 组件，可在无 DISPLAY 的服务器上运行（虽然脚本放在 gui 目录下）。
@@ -64,8 +64,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=4, help="下载线程数（传给 FitsDownloader，默认4)")
     parser.add_argument("--retry-times", type=int, default=3, help="下载重试次数（默认3）")
     parser.add_argument("--timeout", type=int, default=30, help="单文件下载超时时间（秒，默认30）")
-
-    parser.add_argument("--no-astap", action="store_true", help="跳过 ASTAP 处理，仅下载 + diff")
 
     return parser.parse_args()
 
@@ -217,7 +215,7 @@ def run_pipeline_for_files(
         max_workers=args.max_workers,
         retry_times=args.retry_times,
         timeout=args.timeout,
-        enable_astap=not args.no_astap,
+        enable_astap=False,
     )
 
     urls = [url for _name, url in files]
