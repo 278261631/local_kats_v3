@@ -4278,6 +4278,7 @@ class FitsImageViewer:
                     "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
                     "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
                     "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
+                    "export_nonref_candidate_ab_cutouts": "D:/github/misaligned_fits/export_nonref_candidate_ab_cutouts.py",
                 },
                 "export_uniform_grid_x": 7,
                 "export_uniform_grid_y": 7,
@@ -4294,6 +4295,8 @@ class FitsImageViewer:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
+                "enable_export_nonref_candidate_ab_cutouts": True,
+                "nonref_candidate_cutout_size": 128,
             }
             pipeline_settings = default_pipeline
             if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
@@ -4331,6 +4334,10 @@ class FitsImageViewer:
             crossmatch_script = script_paths.get(
                 "crossmatch_nonref_candidates",
                 default_pipeline["script_paths"]["crossmatch_nonref_candidates"],
+            )
+            export_nonref_cutouts_script = script_paths.get(
+                "export_nonref_candidate_ab_cutouts",
+                default_pipeline["script_paths"]["export_nonref_candidate_ab_cutouts"],
             )
 
             export_grid_x = str(pipeline_settings.get("export_uniform_grid_x", default_pipeline["export_uniform_grid_x"]))
@@ -4372,6 +4379,18 @@ class FitsImageViewer:
                 pipeline_settings.get(
                     "enable_crossmatch_nonref_candidates",
                     default_pipeline["enable_crossmatch_nonref_candidates"],
+                )
+            )
+            enable_export_nonref_candidate_ab_cutouts = bool(
+                pipeline_settings.get(
+                    "enable_export_nonref_candidate_ab_cutouts",
+                    default_pipeline["enable_export_nonref_candidate_ab_cutouts"],
+                )
+            )
+            nonref_candidate_cutout_size = str(
+                pipeline_settings.get(
+                    "nonref_candidate_cutout_size",
+                    default_pipeline["nonref_candidate_cutout_size"],
                 )
             )
 
@@ -4461,6 +4480,22 @@ class FitsImageViewer:
                             "--find-variable-csv", out_find_variable_csv,
                             "--find-mpc-csv", out_find_mpc_csv,
                             "--ref-fits", template_file,
+                        ],
+                    )
+                )
+            if enable_export_nonref_candidate_ab_cutouts:
+                commands.append(
+                    (
+                        "导出非参考候选AB切图",
+                        [
+                            py, export_nonref_cutouts_script,
+                            "--input-csv", out_csv_nonref_inner_border,
+                            "--a-fits", template_file,
+                            "--b-fits", rp_fit,
+                            "--a-stars-all", template_stars_all,
+                            "--b-stars-all", rp_stars_all,
+                            "--align-npz", align_npz,
+                            "--cutout-size", nonref_candidate_cutout_size,
                         ],
                     )
                 )
@@ -4817,6 +4852,7 @@ class FitsImageViewer:
                     "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
                     "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
                     "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
+                    "export_nonref_candidate_ab_cutouts": "D:/github/misaligned_fits/export_nonref_candidate_ab_cutouts.py",
                 },
                 "export_uniform_grid_x": 7,
                 "export_uniform_grid_y": 7,
@@ -4833,6 +4869,8 @@ class FitsImageViewer:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
+                "enable_export_nonref_candidate_ab_cutouts": True,
+                "nonref_candidate_cutout_size": 128,
             }
             pipeline_settings = default_pipeline
             if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
@@ -4870,6 +4908,10 @@ class FitsImageViewer:
             crossmatch_script = script_paths.get(
                 "crossmatch_nonref_candidates",
                 default_pipeline["script_paths"]["crossmatch_nonref_candidates"],
+            )
+            export_nonref_cutouts_script = script_paths.get(
+                "export_nonref_candidate_ab_cutouts",
+                default_pipeline["script_paths"]["export_nonref_candidate_ab_cutouts"],
             )
 
             export_grid_x = str(pipeline_settings.get("export_uniform_grid_x", default_pipeline["export_uniform_grid_x"]))
@@ -4911,6 +4953,18 @@ class FitsImageViewer:
                 pipeline_settings.get(
                     "enable_crossmatch_nonref_candidates",
                     default_pipeline["enable_crossmatch_nonref_candidates"],
+                )
+            )
+            enable_export_nonref_candidate_ab_cutouts = bool(
+                pipeline_settings.get(
+                    "enable_export_nonref_candidate_ab_cutouts",
+                    default_pipeline["enable_export_nonref_candidate_ab_cutouts"],
+                )
+            )
+            nonref_candidate_cutout_size = str(
+                pipeline_settings.get(
+                    "nonref_candidate_cutout_size",
+                    default_pipeline["nonref_candidate_cutout_size"],
                 )
             )
 
@@ -5000,6 +5054,22 @@ class FitsImageViewer:
                             "--find-variable-csv", out_find_variable_csv,
                             "--find-mpc-csv", out_find_mpc_csv,
                             "--ref-fits", template_file,
+                        ],
+                    )
+                )
+            if enable_export_nonref_candidate_ab_cutouts:
+                commands.append(
+                    (
+                        "导出非参考候选AB切图",
+                        [
+                            py, export_nonref_cutouts_script,
+                            "--input-csv", out_csv_nonref_inner_border,
+                            "--a-fits", template_file,
+                            "--b-fits", rp_fit,
+                            "--a-stars-all", template_stars_all,
+                            "--b-stars-all", rp_stars_all,
+                            "--align-npz", align_npz,
+                            "--cutout-size", nonref_candidate_cutout_size,
                         ],
                     )
                 )
