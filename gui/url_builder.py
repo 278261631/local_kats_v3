@@ -259,7 +259,8 @@ class URLBuilderFrame:
                                         command=self._show_calendar)
         self.calendar_button.pack(side=tk.LEFT, padx=(2, 0))
 
-        # 今天按钮
+        # 日期快捷按钮
+        ttk.Button(row1, text="昨天", command=self._set_yesterday, width=6).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(row1, text="今天", command=self._set_today, width=6).pack(side=tk.LEFT, padx=(0, 15))
 
         # K序号选择
@@ -487,6 +488,11 @@ class URLBuilderFrame:
         """设置为今天的日期"""
         today = datetime.now().strftime('%Y%m%d')
         self.date_var.set(today)
+
+    def _set_yesterday(self):
+        """设置为昨天的日期"""
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+        self.date_var.set(yesterday)
 
     def _show_calendar(self):
         """显示日历选择对话框"""
