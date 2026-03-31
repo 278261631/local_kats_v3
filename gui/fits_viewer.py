@@ -4350,6 +4350,8 @@ class FitsImageViewer:
                 )
             )
 
+            fast_mode_enabled = bool(self.fast_mode_var.get()) if hasattr(self, "fast_mode_var") else False
+
             commands = [
                 (
                     "导出模板星点",
@@ -4397,16 +4399,6 @@ class FitsImageViewer:
                     ],
                 ),
                 (
-                    "渲染对齐结果",
-                    [
-                        py, render_script,
-                        "--a", template_file,
-                        "--b", rp_fit,
-                        "--align", align_npz,
-                        "--outdir", output_dir,
-                    ],
-                ),
-                (
                     "生成候选目标CSV",
                     [
                         py, rank_script,
@@ -4425,6 +4417,22 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            if not fast_mode_enabled:
+                commands.insert(
+                    4,
+                    (
+                        "渲染对齐结果",
+                        [
+                            py, render_script,
+                            "--a", template_file,
+                            "--b", rp_fit,
+                            "--align", align_npz,
+                            "--outdir", output_dir,
+                        ],
+                    ),
+                )
+            else:
+                self.logger.info("快速模式已启用：跳过步骤[渲染对齐结果]")
             if enable_crossmatch_nonref_candidates:
                 commands.append(
                     (
@@ -4924,6 +4932,8 @@ class FitsImageViewer:
                 )
             )
 
+            fast_mode_enabled = bool(self.fast_mode_var.get()) if hasattr(self, "fast_mode_var") else False
+
             commands = [
                 (
                     "导出模板星点",
@@ -4971,16 +4981,6 @@ class FitsImageViewer:
                     ],
                 ),
                 (
-                    "渲染对齐结果",
-                    [
-                        py, render_script,
-                        "--a", template_file,
-                        "--b", rp_fit,
-                        "--align", align_npz,
-                        "--outdir", output_dir,
-                    ],
-                ),
-                (
                     "生成候选目标CSV",
                     [
                         py, rank_script,
@@ -4999,6 +4999,22 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            if not fast_mode_enabled:
+                commands.insert(
+                    4,
+                    (
+                        "渲染对齐结果",
+                        [
+                            py, render_script,
+                            "--a", template_file,
+                            "--b", rp_fit,
+                            "--align", align_npz,
+                            "--outdir", output_dir,
+                        ],
+                    ),
+                )
+            else:
+                self.logger.info("快速模式已启用：跳过步骤[渲染对齐结果]")
             if enable_crossmatch_nonref_candidates:
                 commands.append(
                     (
