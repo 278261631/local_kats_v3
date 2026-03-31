@@ -583,6 +583,11 @@ class FitsImageViewer:
 
         ttk.Button(refresh_frame, text="刷新目录", command=self._refresh_directory_tree).pack(side=tk.LEFT)
         ttk.Button(refresh_frame, text="跳转未查询", command=self._jump_to_next_unqueried).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(
+            refresh_frame,
+            text="删除输出目录(以下)",
+            command=self._delete_output_dirs_from_selected_node
+        ).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
 
@@ -2865,6 +2870,151 @@ class FitsImageViewer:
     def _jump_to_next_unqueried(self):
         """已移除：原按未查询条件筛选跳转逻辑。"""
         messagebox.showinfo("提示", "跳转未查询功能已移除。")
+
+    def _delete_output_dirs_from_selected_node(self):
+        """删除当前选中目录节点以及其后续同级目录节点映射的输出目录。"""
+        selection = self.directory_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择一个目录节点")
+            return
+
+        selected_item = selection[0]
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir")):
+            messagebox.showwarning("警告", "请先选择下载目录树中的目录节点（望远镜/日期/天区）")
+            return
+
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            messagebox.showwarning("警告", "输出根目录未设置或不存在")
+            return
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            messagebox.showwarning("警告", "下载目录未设置或不存在")
+            return
+
+        sibling_items = self._get_same_level_items_from_selected(selected_item)
+        all_download_dirs = []
+        for node in sibling_items:
+            all_download_dirs.extend(self._collect_download_directory_nodes(node, download_dir))
+
+        output_targets = []
+        for source_dir in all_download_dirs:
+            mapped = self._map_download_dir_to_output_dir(source_dir, download_dir, base_output_dir)
+            if mapped:
+                output_targets.append(mapped)
+
+        output_targets = self._compress_parent_paths(output_targets)
+        existing_targets = [p for p in output_targets if os.path.isdir(p)]
+
+        if not existing_targets:
+            messagebox.showinfo("提示", "未找到可删除的对应输出目录")
+            return
+
+        preview_rel = []
+        for path in existing_targets[:8]:
+            try:
+                preview_rel.append(os.path.relpath(path, base_output_dir))
+            except Exception:
+                preview_rel.append(path)
+        preview_text = "\n".join(f"- {p}" for p in preview_rel)
+        suffix = "\n..." if len(existing_targets) > 8 else ""
+        confirm_msg = (
+            f"将删除 {len(existing_targets)} 个输出目录（当前目录节点及其后续同级节点）。\n\n"
+            f"{preview_text}{suffix}\n\n是否继续？"
+        )
+        if not messagebox.askyesno("确认删除", confirm_msg):
+            return
+
+        deleted_count = 0
+        failed = []
+        for target_dir in existing_targets:
+            try:
+                shutil.rmtree(target_dir)
+                deleted_count += 1
+                self.logger.info("已删除输出目录: %s", target_dir)
+            except Exception as e:
+                failed.append((target_dir, str(e)))
+                self.logger.error("删除输出目录失败: %s, error=%s", target_dir, e)
+
+        self._refresh_directory_tree()
+
+        if failed:
+            msg_lines = [f"成功删除 {deleted_count} 个目录，失败 {len(failed)} 个。", ""]
+            for path, err in failed[:5]:
+                msg_lines.append(f"- {path}: {err}")
+            if len(failed) > 5:
+                msg_lines.append("...")
+            messagebox.showwarning("部分删除失败", "\n".join(msg_lines))
+        else:
+            messagebox.showinfo("完成", f"已删除 {deleted_count} 个输出目录")
+
+    def _get_same_level_items_from_selected(self, selected_item):
+        """获取从当前选中节点开始到末尾的同级节点列表。"""
+        parent_item = self.directory_tree.parent(selected_item)
+        siblings = list(self.directory_tree.get_children(parent_item))
+        if selected_item not in siblings:
+            return [selected_item]
+        index = siblings.index(selected_item)
+        return siblings[index:]
+
+    def _collect_download_directory_nodes(self, tree_item, download_dir):
+        """递归收集树节点中属于下载目录的目录路径。"""
+        collected = []
+        values = self.directory_tree.item(tree_item, "values")
+        tags = self.directory_tree.item(tree_item, "tags")
+
+        if values and any(tag in tags for tag in ("root_dir", "telescope", "date", "region")):
+            node_path = values[0]
+            if self._is_subpath(node_path, download_dir):
+                collected.append(os.path.normpath(node_path))
+
+        for child in self.directory_tree.get_children(tree_item):
+            collected.extend(self._collect_download_directory_nodes(child, download_dir))
+        return collected
+
+    def _map_download_dir_to_output_dir(self, source_dir, download_dir, base_output_dir):
+        """将下载目录内路径映射为输出目录路径。"""
+        try:
+            src_abs = os.path.normcase(os.path.normpath(os.path.abspath(source_dir)))
+            dl_abs = os.path.normcase(os.path.normpath(os.path.abspath(download_dir)))
+            if os.path.commonpath([src_abs, dl_abs]) != dl_abs:
+                return None
+            relative_path = os.path.relpath(src_abs, dl_abs)
+            if relative_path in (".", ""):
+                return os.path.normpath(base_output_dir)
+            return os.path.normpath(os.path.join(base_output_dir, relative_path))
+        except Exception:
+            return None
+
+    def _compress_parent_paths(self, paths):
+        """去重并压缩路径列表：若父目录已在列表中，则去掉其子目录。"""
+        normalized = []
+        seen = set()
+        for path in paths:
+            np = os.path.normcase(os.path.normpath(path))
+            if np not in seen:
+                seen.add(np)
+                normalized.append(np)
+
+        normalized.sort(key=lambda p: (len(Path(p).parts), p))
+        compressed = []
+        for path in normalized:
+            if any(os.path.commonpath([path, parent]) == parent for parent in compressed):
+                continue
+            compressed.append(path)
+        return compressed
+
+    def _is_subpath(self, path, parent_path):
+        """判断path是否在parent_path下（含自身）。"""
+        try:
+            path_abs = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+            parent_abs = os.path.normcase(os.path.normpath(os.path.abspath(parent_path)))
+            return os.path.commonpath([path_abs, parent_abs]) == parent_abs
+        except Exception:
+            return False
 
     def _get_qualified_detection_indices(self, file_path, high_score_count):
         """已移除：原未查询/导出候选筛选逻辑。"""

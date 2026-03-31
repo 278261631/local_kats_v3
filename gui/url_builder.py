@@ -213,6 +213,9 @@ class URLBuilderFrame:
         # 加载上次的选择
         self._load_last_selections()
 
+        # 初始化扫描按钮状态（避免启动后按钮仍保持默认禁用）
+        self._update_scan_button_state()
+
         # 绑定变化事件
         self._bind_events()
 
