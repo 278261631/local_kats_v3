@@ -2872,17 +2872,17 @@ class FitsImageViewer:
         messagebox.showinfo("提示", "跳转未查询功能已移除。")
 
     def _delete_output_dirs_from_selected_node(self):
-        """删除当前选中目录节点以及其后续同级目录节点映射的输出目录。"""
+        """删除当前选中节点以及其后续同级节点映射的输出目录。"""
         selection = self.directory_tree.selection()
         if not selection:
-            messagebox.showwarning("警告", "请先选择一个目录节点")
+            messagebox.showwarning("警告", "请先选择一个目录或文件节点")
             return
 
         selected_item = selection[0]
         values = self.directory_tree.item(selected_item, "values")
         tags = self.directory_tree.item(selected_item, "tags")
-        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir")):
-            messagebox.showwarning("警告", "请先选择下载目录树中的目录节点（望远镜/日期/天区）")
+        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
+            messagebox.showwarning("警告", "请先选择下载目录树中的目录/文件节点（望远镜/日期/天区/FITS文件）")
             return
 
         base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
@@ -2895,16 +2895,33 @@ class FitsImageViewer:
             messagebox.showwarning("警告", "下载目录未设置或不存在")
             return
 
-        sibling_items = self._get_same_level_items_from_selected(selected_item)
-        all_download_dirs = []
-        for node in sibling_items:
-            all_download_dirs.extend(self._collect_download_directory_nodes(node, download_dir))
-
         output_targets = []
-        for source_dir in all_download_dirs:
-            mapped = self._map_download_dir_to_output_dir(source_dir, download_dir, base_output_dir)
-            if mapped:
-                output_targets.append(mapped)
+        selected_is_file = bool(values and "fits_file" in tags)
+        if selected_is_file:
+            # 文件节点：仅删除当前文件对应输出目录
+            mapped_file_dir = self._map_download_file_to_output_dir(values[0], download_dir, base_output_dir)
+            if mapped_file_dir:
+                output_targets.append(mapped_file_dir)
+        else:
+            # 目录节点：删除当前及以下同级目录节点映射的输出目录
+            sibling_items = self._get_same_level_items_from_selected(selected_item)
+            for node in sibling_items:
+                node_values = self.directory_tree.item(node, "values")
+                node_tags = self.directory_tree.item(node, "tags")
+
+                # 若目录下存在文件节点，也可单独映射
+                if node_values and "fits_file" in node_tags:
+                    mapped_file_dir = self._map_download_file_to_output_dir(
+                        node_values[0], download_dir, base_output_dir
+                    )
+                    if mapped_file_dir:
+                        output_targets.append(mapped_file_dir)
+                    continue
+
+                for source_dir in self._collect_download_directory_nodes(node, download_dir):
+                    mapped = self._map_download_dir_to_output_dir(source_dir, download_dir, base_output_dir)
+                    if mapped:
+                        output_targets.append(mapped)
 
         output_targets = self._compress_parent_paths(output_targets)
         existing_targets = [p for p in output_targets if os.path.isdir(p)]
@@ -2921,8 +2938,12 @@ class FitsImageViewer:
                 preview_rel.append(path)
         preview_text = "\n".join(f"- {p}" for p in preview_rel)
         suffix = "\n..." if len(existing_targets) > 8 else ""
+        if selected_is_file:
+            scope_text = "当前文件节点"
+        else:
+            scope_text = "当前目录节点及其后续同级节点"
         confirm_msg = (
-            f"将删除 {len(existing_targets)} 个输出目录（当前目录节点及其后续同级节点）。\n\n"
+            f"将删除 {len(existing_targets)} 个输出目录（{scope_text}）。\n\n"
             f"{preview_text}{suffix}\n\n是否继续？"
         )
         if not messagebox.askyesno("确认删除", confirm_msg):
@@ -2986,6 +3007,20 @@ class FitsImageViewer:
             if relative_path in (".", ""):
                 return os.path.normpath(base_output_dir)
             return os.path.normpath(os.path.join(base_output_dir, relative_path))
+        except Exception:
+            return None
+
+    def _map_download_file_to_output_dir(self, file_path, download_dir, base_output_dir):
+        """将下载目录中的 FITS 文件路径映射为该文件对应输出目录。"""
+        try:
+            if not file_path or not self._is_subpath(file_path, download_dir):
+                return None
+            region_dir = os.path.dirname(file_path)
+            mapped_region_dir = self._map_download_dir_to_output_dir(region_dir, download_dir, base_output_dir)
+            if not mapped_region_dir:
+                return None
+            file_basename = self._sanitize_output_name(os.path.splitext(os.path.basename(file_path))[0])
+            return os.path.normpath(os.path.join(mapped_region_dir, file_basename))
         except Exception:
             return None
 
