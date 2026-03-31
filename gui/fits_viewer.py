@@ -4222,7 +4222,6 @@ class FitsImageViewer:
             ref_valid_region_json = os.path.join(template_dir, f"{template_base}.effective.json")
             ref_valid_region_png = os.path.join(template_dir, f"{template_base}.effective.png")
             out_find_hip_csv = os.path.join(output_dir, "find_hip.csv")
-            out_find_variable_csv = os.path.join(output_dir, "find_variable.csv")
             out_find_mpc_csv = os.path.join(output_dir, "find_mpc.csv")
 
             # 从配置文件读取替代流程命令参数（未配置则回退默认值）
@@ -4442,7 +4441,6 @@ class FitsImageViewer:
                             py, crossmatch_script,
                             "--input-csv", out_csv_nonref_inner_border,
                             "--find-hip-csv", out_find_hip_csv,
-                            "--find-variable-csv", out_find_variable_csv,
                             "--find-mpc-csv", out_find_mpc_csv,
                             "--ref-fits", template_file,
                         ],
@@ -4537,13 +4535,11 @@ class FitsImageViewer:
                 elif step_name == "交叉匹配非参考候选":
                     if not (
                         os.path.exists(out_find_hip_csv)
-                        and os.path.exists(out_find_variable_csv)
                         and os.path.exists(out_find_mpc_csv)
                     ):
                         raise RuntimeError(
                             f"{step_name}完成但关键输出缺失: "
                             f"{os.path.abspath(out_find_hip_csv)} / "
-                            f"{os.path.abspath(out_find_variable_csv)} / "
                             f"{os.path.abspath(out_find_mpc_csv)}。"
                             f"命令: {cmd_text}"
                         )
@@ -4806,7 +4802,6 @@ class FitsImageViewer:
             ref_valid_region_json = os.path.join(template_dir, f"{template_base}.effective.json")
             ref_valid_region_png = os.path.join(template_dir, f"{template_base}.effective.png")
             out_find_hip_csv = os.path.join(output_dir, "find_hip.csv")
-            out_find_variable_csv = os.path.join(output_dir, "find_variable.csv")
             out_find_mpc_csv = os.path.join(output_dir, "find_mpc.csv")
 
             default_pipeline = {
@@ -5025,7 +5020,6 @@ class FitsImageViewer:
                             py, crossmatch_script,
                             "--input-csv", out_csv_nonref_inner_border,
                             "--find-hip-csv", out_find_hip_csv,
-                            "--find-variable-csv", out_find_variable_csv,
                             "--find-mpc-csv", out_find_mpc_csv,
                             "--ref-fits", template_file,
                         ],
@@ -5115,13 +5109,11 @@ class FitsImageViewer:
                 elif step_name == "交叉匹配非参考候选":
                     if not (
                         os.path.exists(out_find_hip_csv)
-                        and os.path.exists(out_find_variable_csv)
                         and os.path.exists(out_find_mpc_csv)
                     ):
                         raise RuntimeError(
                             f"{step_name}完成但关键输出缺失: "
                             f"{os.path.abspath(out_find_hip_csv)} / "
-                            f"{os.path.abspath(out_find_variable_csv)} / "
                             f"{os.path.abspath(out_find_mpc_csv)}。"
                             f"命令: {cmd_text}"
                         )
