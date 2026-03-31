@@ -9,6 +9,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 import threading
+import socket
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from data_collect.data_02_download import FitsDownloader
 from config_manager import ConfigManager
 from url_builder import URLBuilderFrame
 from batch_status_widget import BatchStatusWidget
+from single_instance_ipc import get_endpoint, recv_json_line, send_command
 
 # ASTAP 已停用（保留占位变量，兼容旧流程中的条件判断）
 ASTAPProcessor = None
@@ -73,6 +75,14 @@ class FitsWebDownloaderGUI:
         self.batch_stopped = False  # 停止标志
         self.batch_pause_event = threading.Event()  # 暂停事件
         self.batch_pause_event.set()  # 初始为非暂停状态
+        self._job_state_lock = threading.Lock()
+        self._batch_job_running = False
+
+        # 单实例 IPC 监听状态
+        self._is_primary_instance = True
+        self._ipc_server_socket = None
+        self._ipc_listener_thread = None
+        self._ipc_stop_event = threading.Event()
 
         # 自动链：批量→AI标记→查询 控制开关
         self._auto_chain_followups = False
@@ -98,6 +108,11 @@ class FitsWebDownloaderGUI:
 
         # 加载配置
         self._load_config()
+
+        # 启动单实例监听（失败说明已有实例）
+        self._is_primary_instance = self._start_single_instance_listener()
+        if not self._is_primary_instance:
+            return
 
         # 如果有自动执行参数，设置UI并执行相应操作
         if self.auto_date:
@@ -3135,9 +3150,114 @@ Diff统计:
 
     def run(self):
         """运行GUI应用程序"""
+        if not getattr(self, "_is_primary_instance", True):
+            return
         # 绑定关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.root.mainloop()
+
+    def _set_batch_job_running(self, running: bool):
+        """线程安全地设置批量任务运行标志。"""
+        with self._job_state_lock:
+            self._batch_job_running = bool(running)
+
+    def _is_batch_job_running(self) -> bool:
+        """线程安全地读取批量任务运行标志。"""
+        with self._job_state_lock:
+            return bool(self._batch_job_running)
+
+    def _bring_window_to_front(self):
+        """尝试将窗口置前并激活。"""
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+
+    def _start_single_instance_listener(self) -> bool:
+        """启动单实例 IPC 监听；若失败则尝试将命令转发给已运行实例。"""
+        host, port = get_endpoint()
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind((host, port))
+            sock.listen(5)
+            sock.settimeout(1.0)
+            self._ipc_server_socket = sock
+            self._ipc_listener_thread = threading.Thread(target=self._ipc_accept_loop, daemon=True)
+            self._ipc_listener_thread.start()
+            self._log(f"[IPC] 单实例监听已启动: {host}:{port}")
+            return True
+        except Exception as e:
+            self._log(f"[IPC] 检测到已有实例或端口不可用，当前实例将退出: {e}")
+            payload = {"action": "activate"}
+            if self.auto_date:
+                payload = {
+                    "action": "run_auto",
+                    "date": self.auto_date,
+                    "telescope": self.auto_telescope,
+                    "region": self.auto_region,
+                }
+            send_command(payload, timeout=1.0)
+            self.root.after(0, self.root.destroy)
+            return False
+
+    def _ipc_accept_loop(self):
+        """后台线程：接收外部命令并调度到主线程处理。"""
+        while not self._ipc_stop_event.is_set():
+            try:
+                conn, _addr = self._ipc_server_socket.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+            try:
+                with conn:
+                    payload = recv_json_line(conn)
+                if payload:
+                    self.root.after(0, lambda p=payload: self._handle_ipc_command(p))
+            except Exception as e:
+                self._log(f"[IPC] 处理外部命令失败: {e}")
+
+    def _handle_ipc_command(self, payload: dict):
+        """处理来自外部进程的命令。"""
+        action = (payload or {}).get("action", "").strip().lower()
+        if action == "activate":
+            self._log("[IPC] 收到激活窗口命令。")
+            self._bring_window_to_front()
+            return
+
+        if action != "run_auto":
+            self._log(f"[IPC] 未知命令，已忽略: {payload}")
+            return
+
+        if self._is_batch_job_running():
+            tip = "收到外部自动命令，但当前已有任务在运行，已忽略。"
+            self._log(f"[IPC] {tip}")
+            try:
+                self.status_label.config(text=tip)
+                self.root.after(6000, lambda: self.status_label.config(text="就绪"))
+            except Exception:
+                pass
+            self._bring_window_to_front()
+            return
+
+        date = (payload.get("date") or "").strip()
+        telescope = payload.get("telescope")
+        region = payload.get("region")
+        if not date:
+            self._log("[IPC] 自动命令缺少 date，已忽略。")
+            return
+
+        self._log(f"[IPC] 收到自动命令: date={date}, telescope={telescope}, region={region}")
+        self.auto_date = date
+        self.auto_telescope = (telescope or "").strip() or None
+        self.auto_region = (region or "").strip() or None
+        self._bring_window_to_front()
+        self.root.after(200, self._apply_auto_settings)
 
     def _get_download_dir(self):
         """获取下载根目录的回调函数"""
@@ -3345,6 +3465,10 @@ Diff统计:
 
     def _batch_process(self):
         """批量下载并执行diff操作"""
+        if self._is_batch_job_running():
+            messagebox.showwarning("警告", "已有批量任务在运行，请等待当前任务完成")
+            return
+
         selected_files = self._get_selected_files()
         if not selected_files:
             messagebox.showwarning("警告", "请选择要处理的文件")
@@ -3382,10 +3506,17 @@ Diff统计:
         self.url_builder.set_pause_batch_button_text("⏸ 暂停")
         self.url_builder.set_stop_batch_button_state("normal")
 
+        # 设置运行标志，避免重复启动
+        self._set_batch_job_running(True)
+
         # 在新线程中执行批量处理
         thread = threading.Thread(target=self._batch_process_thread, args=(selected_files,))
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._set_batch_job_running(False)
+            raise
 
     def _batch_process_thread(self, selected_files):
         """批量处理线程（使用流水线模式）"""
@@ -3490,6 +3621,7 @@ Diff统计:
             self.root.after(0, lambda: self.url_builder.set_pause_batch_button_state("disabled"))
             self.root.after(0, lambda: self.url_builder.set_stop_batch_button_state("disabled"))
             self.root.after(0, lambda: self.status_label.config(text="就绪"))
+            self._set_batch_job_running(False)
 
     def _get_url_selections(self):
         """获取URL选择参数的回调函数"""
@@ -3497,6 +3629,10 @@ Diff统计:
 
     def _full_day_batch_process(self):
         """全天下载diff - 对所选日期的所有天区的所有文件执行批量下载diff操作"""
+        if self._is_batch_job_running():
+            messagebox.showwarning("警告", "已有批量任务在运行，请等待当前任务完成")
+            return
+
         # 获取当前选择
         selections = self.url_builder.get_current_selections()
         tel_name = selections.get('telescope_name', '').strip()
@@ -3561,13 +3697,24 @@ Diff统计:
         self.url_builder.set_pause_batch_button_text("⏸ 暂停")
         self.url_builder.set_stop_batch_button_state("normal")
 
+        # 设置运行标志，避免重复启动
+        self._set_batch_job_running(True)
+
         # 在新线程中执行
         thread = threading.Thread(target=self._full_day_batch_process_thread, args=(tel_name, date, available_regions))
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._set_batch_job_running(False)
+            raise
 
     def _continue_full_day_batch_process(self, tel_name, date):
         """继续执行全天下载diff（在扫描天区后）"""
+        if self._is_batch_job_running():
+            messagebox.showwarning("警告", "已有批量任务在运行，请等待当前任务完成")
+            return
+
         available_regions = self.url_builder.get_available_regions()
         if not available_regions:
             messagebox.showwarning("警告", "未找到可用的天区")
@@ -3585,10 +3732,16 @@ Diff统计:
         if not messagebox.askyesno("确认", msg):
             return
 
+        self._set_batch_job_running(True)
+
         # 在新线程中执行
         thread = threading.Thread(target=self._full_day_batch_process_thread, args=(tel_name, date, available_regions))
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._set_batch_job_running(False)
+            raise
 
     def _full_day_batch_process_thread(self, tel_name, date, available_regions):
         """全天批量处理线程"""
@@ -3738,6 +3891,7 @@ Diff统计:
                 self._auto_silent_mode = False
             except Exception:
                 pass
+            self._set_batch_job_running(False)
 
 
     def _batch_process_region(self, selected_files, tel_name, date, k_number):
@@ -4166,6 +4320,10 @@ Diff统计:
 
     def _full_day_all_systems_batch_process(self):
         """全天全系统下载diff - 对所选日期的所有系统的所有天区的所有文件执行批量下载diff操作"""
+        if self._is_batch_job_running():
+            messagebox.showwarning("警告", "已有批量任务在运行，请等待当前任务完成")
+            return
+
         # 获取当前选择的日期
         selections = self.url_builder.get_current_selections()
         date = selections.get('date', '').strip()
@@ -4220,6 +4378,9 @@ Diff统计:
         self.url_builder.set_pause_batch_button_text("⏸ 暂停")
         self.url_builder.set_stop_batch_button_state("normal")
 
+        # 设置运行标志，避免重复启动
+        self._set_batch_job_running(True)
+
         # 在新线程中执行
         thread = threading.Thread(target=self._full_day_all_systems_batch_process_thread, args=(date, all_telescopes))
         thread.daemon = True
@@ -4232,7 +4393,11 @@ Diff统计:
         except Exception:
             pass
 
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._set_batch_job_running(False)
+            raise
 
     def _full_day_all_systems_batch_process_thread(self, date, all_telescopes):
         """全天全系统批量处理线程"""
@@ -4430,6 +4595,7 @@ Diff统计:
             except Exception:
                 # 出现异常时，仍然保证状态栏恢复
                 self.root.after(0, lambda: self.status_label.config(text="就绪"))
+            self._set_batch_job_running(False)
 
     # =========================
     # 仅 --date 模式：全天全系统 diff 结束后的自动后处理链
@@ -4588,6 +4754,14 @@ Diff统计:
     def _on_closing(self):
         """应用程序关闭事件"""
         try:
+            # 停止单实例 IPC 监听
+            self._ipc_stop_event.set()
+            if self._ipc_server_socket:
+                try:
+                    self._ipc_server_socket.close()
+                except Exception:
+                    pass
+
             # 保存当前配置
             self.config_manager.update_download_settings(
                 max_workers=self.max_workers_var.get(),

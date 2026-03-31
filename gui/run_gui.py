@@ -9,6 +9,7 @@ import argparse
 import tkinter as tk
 from tkinter import messagebox
 from datetime import datetime
+from single_instance_ipc import send_command
 
 def check_dependencies(config_manager=None):
     """检查依赖包是否安装，支持配置管理器保存检查状态"""
@@ -112,6 +113,20 @@ def main():
 
     # 解析命令行参数
     args = parse_arguments()
+
+    # 优先尝试把命令发送给已运行实例，避免多开窗口
+    command_payload = {"action": "activate"}
+    if args.date:
+        command_payload = {
+            "action": "run_auto",
+            "date": args.date,
+            "telescope": args.telescope,
+            "region": args.region,
+        }
+
+    if send_command(command_payload):
+        print("检测到已有运行实例，已发送命令到当前窗口，不再启动新实例。")
+        sys.exit(0)
 
     # 导入配置管理器
     try:
