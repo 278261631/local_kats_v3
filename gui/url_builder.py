@@ -573,9 +573,17 @@ class URLBuilderFrame:
 
         is_manual = getattr(self, '_manual_scan', False)
         tel_upper = (tel_name or '').upper()
+        is_today_or_yesterday = False
+        try:
+            selected_date = datetime.strptime(date, "%Y%m%d").date()
+            today = datetime.now().date()
+            is_today_or_yesterday = selected_date in (today, today - timedelta(days=1))
+        except Exception:
+            is_today_or_yesterday = False
 
         # 默认从本地缓存加载（所有系统共用GY1索引，仅在非手动扫描时）
-        if not is_manual:
+        # 但如果日期是今天或昨天，忽略缓存并重新扫描
+        if not is_manual and not is_today_or_yesterday:
             cached_regions = self.__load_regions_cache(tel_name, date)
             if cached_regions:
                 self.last_scanned_url = base_url
@@ -591,9 +599,11 @@ class URLBuilderFrame:
                 )
                 self.logger.info(f"{tel_upper} {date} 本地无缓存，未自动扫描。")
                 return
+        elif not is_manual and is_today_or_yesterday:
+            self.logger.info(f"{tel_upper} {date} 为今天/昨天，忽略本地缓存并执行实时扫描。")
 
         # 检查是否与上次扫描的URL相同，避免重复扫描
-        if base_url == self.last_scanned_url:
+        if base_url == self.last_scanned_url and not is_today_or_yesterday:
             return
 
         # 在后台线程中扫描天区
