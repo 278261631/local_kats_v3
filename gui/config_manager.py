@@ -123,7 +123,11 @@ class ConfigManager:
             "display_settings": {
                 "default_display_mode": "linear",
                 "default_colormap": "gray",
-                "auto_select_from_download_dir": True
+                "auto_select_from_download_dir": True,
+                # CSV候选浏览默认尺寸（像素）
+                "csv_candidate_patch_size": "512",
+                # CSV候选局部拉伸档位
+                "csv_local_hist_level": "high",
             },
             "local_catalog_settings": {
                 "asteroid_catalog_path": self._default_asteroid_catalog_path,
@@ -237,12 +241,28 @@ class ConfigManager:
 
     def get_display_settings(self) -> Dict[str, Any]:
         """获取显示设置"""
+        if "display_settings" not in self.config:
+            self.config["display_settings"] = self.default_config.get("display_settings", {}).copy()
+            self.save_config()
+            return self.config["display_settings"]
+
+        # 兼容旧配置：补齐缺失键
+        changed = False
+        default_display = self.default_config.get("display_settings", {})
+        for key, default_value in default_display.items():
+            if key not in self.config["display_settings"]:
+                self.config["display_settings"][key] = default_value
+                changed = True
+        if changed:
+            self.save_config()
         return self.config["display_settings"]
 
     def update_display_settings(self, **kwargs):
         """更新显示设置"""
+        if "display_settings" not in self.config:
+            self.config["display_settings"] = self.default_config.get("display_settings", {}).copy()
         for key, value in kwargs.items():
-            if key in self.config["display_settings"]:
+            if key in self.default_config.get("display_settings", {}):
                 self.config["display_settings"][key] = value
         self.save_config()
 

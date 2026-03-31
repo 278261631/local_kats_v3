@@ -121,6 +121,9 @@ class FitsImageViewer:
         # 创建界面
         self._create_widgets()
 
+        # 从配置文件加载显示设置（含CSV候选尺寸）
+        self._load_display_settings()
+
         # 从配置文件加载批量处理参数到控件
         self._load_batch_settings()
 
@@ -1523,6 +1526,42 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"保存查询设置失败: {str(e)}")
 
+    def _load_display_settings(self):
+        """从配置文件加载显示设置（显示模式、颜色映射、CSV尺寸等）。"""
+        if not self.config_manager:
+            return
+
+        try:
+            display_settings = self.config_manager.get_display_settings()
+            self.display_mode.set(str(display_settings.get("default_display_mode", "linear")))
+            self.colormap.set(str(display_settings.get("default_colormap", "gray")))
+
+            csv_patch_size = str(display_settings.get("csv_candidate_patch_size", "512"))
+            if csv_patch_size not in {"128", "256", "384", "512", "640", "768", "1024"}:
+                csv_patch_size = "512"
+            self.csv_candidate_patch_size_var.set(csv_patch_size)
+
+            csv_hist_level = str(display_settings.get("csv_local_hist_level", "high")).lower()
+            if csv_hist_level not in {"low", "medium", "high"}:
+                csv_hist_level = "high"
+            self.csv_local_hist_level_var.set(csv_hist_level)
+        except Exception as e:
+            self.logger.error(f"加载显示设置失败: {str(e)}")
+
+    def _save_display_settings(self):
+        """保存显示设置到配置文件。"""
+        if not self.config_manager:
+            return
+        try:
+            self.config_manager.update_display_settings(
+                default_display_mode=str(self.display_mode.get()).strip(),
+                default_colormap=str(self.colormap.get()).strip(),
+                csv_candidate_patch_size=str(self.csv_candidate_patch_size_var.get()).strip(),
+                csv_local_hist_level=str(self.csv_local_hist_level_var.get()).strip().lower(),
+            )
+        except Exception as e:
+            self.logger.warning(f"保存显示设置失败: {e}")
+
     def _get_batch_query_interval_seconds(self) -> float:
         """获取批量查询间隔（秒），优先从配置读取，失败时返回默认值5秒"""
         # 默认值
@@ -1947,15 +1986,18 @@ class FitsImageViewer:
 
     def _on_display_mode_change(self, event=None):
         """显示模式改变事件"""
+        self._save_display_settings()
         self._update_image_display()
 
     def _on_colormap_change(self, event=None):
         """颜色映射改变事件"""
+        self._save_display_settings()
         self._update_image_display()
 
     def _on_csv_candidate_view_option_changed(self, event=None):
         """CSV候选浏览显示参数改变时，重绘当前候选。"""
         try:
+            self._save_display_settings()
             if not getattr(self, "_csv_candidate_mode", False):
                 return
             if not getattr(self, "_csv_candidates", None):
