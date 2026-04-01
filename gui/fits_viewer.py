@@ -593,7 +593,7 @@ class FitsImageViewer:
         ).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
-        # CSV 条件搜索（在当前选中节点子树范围内）
+        # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
         csv_search_frame = ttk.Frame(left_frame)
         csv_search_frame.pack(fill=tk.X, pady=(0, 5))
 
@@ -627,6 +627,13 @@ class FitsImageViewer:
             side=tk.LEFT, padx=(6, 2)
         )
         ttk.Button(csv_search_frame, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(side=tk.LEFT)
+
+        self.csv_filter_search_status_var = tk.StringVar(value="当前命中：-- / 条件摘要：--")
+        ttk.Label(
+            left_frame,
+            textvariable=self.csv_filter_search_status_var,
+            foreground="blue"
+        ).pack(fill=tk.X, pady=(0, 5))
 
 
         # 创建目录树
@@ -2098,9 +2105,6 @@ class FitsImageViewer:
         if hasattr(self, '_search_root_node') and not getattr(self, '_auto_selecting', False):
             self.logger.info("用户手动选择文件，清除搜索根节点")
             delattr(self, '_search_root_node')
-        if hasattr(self, "_csv_filter_search_root_node") and not getattr(self, "_auto_selecting", False):
-            delattr(self, "_csv_filter_search_root_node")
-
         selection = self.directory_tree.selection()
         if not selection:
             self.selected_file_path = None
@@ -2951,11 +2955,11 @@ class FitsImageViewer:
         messagebox.showinfo("提示", "跳转未查询功能已移除。")
 
     def _jump_to_next_csv_row_by_filters(self):
-        """在当前选中节点子树内，向下查找满足 CSV 条件的下一条记录。"""
+        """在整棵树内，基于当前选中节点向下查找满足条件的下一条 CSV 记录。"""
         self._jump_csv_row_by_filters(direction=1)
 
     def _jump_to_prev_csv_row_by_filters(self):
-        """在当前选中节点子树内，向上查找满足 CSV 条件的上一条记录。"""
+        """在整棵树内，基于当前选中节点向上查找满足条件的上一条 CSV 记录。"""
         self._jump_csv_row_by_filters(direction=-1)
 
     def _normalize_csv_row_for_compare(self, row: dict):
@@ -3002,14 +3006,19 @@ class FitsImageViewer:
             return False
         return True
 
-    def _collect_tree_subtree_preorder(self, root_node):
-        """收集 root_node 子树的先序遍历节点序列（包含 root_node）。"""
+    def _collect_tree_subtree_preorder(self, root_node=None):
+        """收集先序遍历节点序列；root_node=None 时遍历整棵树。"""
         order = []
 
         def walk(node):
             order.append(node)
             for child in self.directory_tree.get_children(node):
                 walk(child)
+
+        if root_node is None:
+            for root in self.directory_tree.get_children(""):
+                walk(root)
+            return order
 
         walk(root_node)
         return order
@@ -3039,8 +3048,17 @@ class FitsImageViewer:
                 return i
         return -1
 
+    def _get_csv_filter_condition_summary(self, flux_threshold: float, var_mode: str, mpc_mode: str) -> str:
+        """返回 CSV 条件摘要文本。"""
+        return f"median_flux_norm>{flux_threshold:g} AND variable_count{var_mode} AND mpc_count{mpc_mode}"
+
+    def _set_csv_filter_search_status(self, text: str):
+        """更新 CSV 条件搜索状态栏。"""
+        if hasattr(self, "csv_filter_search_status_var"):
+            self.csv_filter_search_status_var.set(str(text))
+
     def _jump_csv_row_by_filters(self, direction: int):
-        """在当前选中节点子树内，按条件向上/向下搜索 CSV 行并精确定位。"""
+        """在整棵树内，按当前选中节点向上/向下搜索 CSV 行并精确定位。"""
         try:
             if not hasattr(self, "directory_tree"):
                 messagebox.showinfo("提示", "目录树未初始化")
@@ -3057,6 +3075,7 @@ class FitsImageViewer:
             if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
                 messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
                 return
+            condition_summary = self._get_csv_filter_condition_summary(flux_threshold, var_mode, mpc_mode)
 
             selection = self.directory_tree.selection()
             if not selection:
@@ -3064,31 +3083,21 @@ class FitsImageViewer:
                 return
             selected_node = selection[0]
 
-            # 固定搜索范围：当前选中节点整棵子树（自动跳转时保持不变，手动选择会在 _on_tree_select 中清除）
-            if not hasattr(self, "_csv_filter_search_root_node"):
-                self._csv_filter_search_root_node = selected_node
-            root_node = self._csv_filter_search_root_node
-
-            # 若当前选中节点已不在搜索根节点下，重置搜索根节点
-            if not self._is_node_under_root(selected_node, root_node):
-                root_node = selected_node
-                self._csv_filter_search_root_node = root_node
-
-            subtree_order = self._collect_tree_subtree_preorder(root_node)
-            if not subtree_order:
+            tree_order = self._collect_tree_subtree_preorder(root_node=None)
+            if not tree_order:
                 messagebox.showinfo("提示", "当前范围内没有可搜索节点")
                 return
 
             # 仅保留文件节点，按目录树可见顺序
             file_nodes = []
-            for node in subtree_order:
+            for node in tree_order:
                 tags = self.directory_tree.item(node, "tags")
                 if "fits_file" in tags:
                     values = self.directory_tree.item(node, "values")
                     if values:
                         file_nodes.append(node)
             if not file_nodes:
-                messagebox.showinfo("提示", "当前选中节点子树内没有 FITS 文件")
+                messagebox.showinfo("提示", "整棵树内没有 FITS 文件")
                 return
 
             # 起始文件索引：优先当前选中节点；若不是文件节点，则从其后（向下）/其前（向上）最近文件开始
@@ -3096,10 +3105,10 @@ class FitsImageViewer:
                 start_file_idx = file_nodes.index(selected_node)
             else:
                 try:
-                    selected_pos = subtree_order.index(selected_node)
+                    selected_pos = tree_order.index(selected_node)
                 except ValueError:
                     selected_pos = 0
-                positions = {n: subtree_order.index(n) for n in file_nodes}
+                positions = {n: tree_order.index(n) for n in file_nodes}
                 if direction > 0:
                     candidates = [i for i, n in enumerate(file_nodes) if positions[n] >= selected_pos]
                     start_file_idx = candidates[0] if candidates else 0
@@ -3164,7 +3173,8 @@ class FitsImageViewer:
 
             if not hit:
                 direction_text = "向下" if direction > 0 else "向上"
-                messagebox.showinfo("提示", f"在当前选中节点子树内，{direction_text}未找到满足条件的 CSV 行")
+                self._set_csv_filter_search_status(f"当前命中：未找到 / 条件摘要：{condition_summary}")
+                messagebox.showinfo("提示", f"在整棵树内，{direction_text}未找到满足条件的 CSV 行")
                 return
 
             hit_node, hit_file_path, hit_output_dir, hit_raw_idx, hit_row = hit
@@ -3205,6 +3215,9 @@ class FitsImageViewer:
             # 显示精确命中行
             self.selected_file_path = hit_file_path
             self._display_csv_candidate_by_index(display_index)
+            self._set_csv_filter_search_status(
+                f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
+            )
             self.logger.info(
                 "CSV条件命中: file=%s, raw_row=%d, display_row=%d, flux>%s, var=%s, mpc=%s",
                 os.path.basename(hit_file_path),
