@@ -593,6 +593,41 @@ class FitsImageViewer:
         ).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
+        # CSV 条件搜索（在当前选中节点子树范围内）
+        csv_search_frame = ttk.Frame(left_frame)
+        csv_search_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.csv_search_median_flux_min_var = tk.StringVar(value="10")
+        self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
+        self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
+
+        ttk.Label(csv_search_frame, text="CSV筛选").pack(side=tk.LEFT)
+        ttk.Label(csv_search_frame, text="flux>").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Entry(csv_search_frame, textvariable=self.csv_search_median_flux_min_var, width=6).pack(side=tk.LEFT)
+
+        ttk.Label(csv_search_frame, text="var").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Combobox(
+            csv_search_frame,
+            textvariable=self.csv_search_variable_count_mode_var,
+            values=["=0", "=-1", ">0"],
+            state="readonly",
+            width=4,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(csv_search_frame, text="mpc").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Combobox(
+            csv_search_frame,
+            textvariable=self.csv_search_mpc_count_mode_var,
+            values=["=0", "=-1", ">0"],
+            state="readonly",
+            width=4,
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(csv_search_frame, text="向上搜", command=self._jump_to_prev_csv_row_by_filters).pack(
+            side=tk.LEFT, padx=(6, 2)
+        )
+        ttk.Button(csv_search_frame, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(side=tk.LEFT)
+
 
         # 创建目录树
         tree_frame = ttk.Frame(left_frame)
@@ -2063,6 +2098,8 @@ class FitsImageViewer:
         if hasattr(self, '_search_root_node') and not getattr(self, '_auto_selecting', False):
             self.logger.info("用户手动选择文件，清除搜索根节点")
             delattr(self, '_search_root_node')
+        if hasattr(self, "_csv_filter_search_root_node") and not getattr(self, "_auto_selecting", False):
+            delattr(self, "_csv_filter_search_root_node")
 
         selection = self.directory_tree.selection()
         if not selection:
@@ -2912,6 +2949,274 @@ class FitsImageViewer:
     def _jump_to_next_unqueried(self):
         """已移除：原按未查询条件筛选跳转逻辑。"""
         messagebox.showinfo("提示", "跳转未查询功能已移除。")
+
+    def _jump_to_next_csv_row_by_filters(self):
+        """在当前选中节点子树内，向下查找满足 CSV 条件的下一条记录。"""
+        self._jump_csv_row_by_filters(direction=1)
+
+    def _jump_to_prev_csv_row_by_filters(self):
+        """在当前选中节点子树内，向上查找满足 CSV 条件的上一条记录。"""
+        self._jump_csv_row_by_filters(direction=-1)
+
+    def _normalize_csv_row_for_compare(self, row: dict):
+        """将 CSV 行归一化，便于跨读取过程做等价比较。"""
+        if not isinstance(row, dict):
+            return tuple()
+        pairs = []
+        for k in sorted(row.keys()):
+            pairs.append((str(k).strip(), str(row.get(k, "")).strip()))
+        return tuple(pairs)
+
+    def _try_parse_int_from_csv_value(self, value):
+        """将 CSV 中数值文本解析为 int，失败返回 None。"""
+        if value is None:
+            return None
+        try:
+            return int(float(str(value).strip()))
+        except Exception:
+            return None
+
+    def _csv_count_mode_match(self, value, mode: str) -> bool:
+        """判断计数字段是否满足 =0 / =-1 / >0 三态条件。"""
+        iv = self._try_parse_int_from_csv_value(value)
+        if iv is None:
+            return False
+        if mode == "=0":
+            return iv == 0
+        if mode == "=-1":
+            return iv == -1
+        if mode == ">0":
+            return iv > 0
+        return False
+
+    def _row_matches_csv_filter_conditions(self, row: dict, flux_threshold: float, var_mode: str, mpc_mode: str) -> bool:
+        """按 AND 逻辑判断一行是否满足搜索条件。"""
+        if not isinstance(row, dict):
+            return False
+        flux = self._try_get_float_from_row(row, ["median_flux_norm"])
+        if flux is None or not (flux > float(flux_threshold)):
+            return False
+        if not self._csv_count_mode_match(row.get("variable_count"), var_mode):
+            return False
+        if not self._csv_count_mode_match(row.get("mpc_count"), mpc_mode):
+            return False
+        return True
+
+    def _collect_tree_subtree_preorder(self, root_node):
+        """收集 root_node 子树的先序遍历节点序列（包含 root_node）。"""
+        order = []
+
+        def walk(node):
+            order.append(node)
+            for child in self.directory_tree.get_children(node):
+                walk(child)
+
+        walk(root_node)
+        return order
+
+    def _resolve_current_raw_csv_index(self, output_dir: str, all_rows):
+        """将当前显示中的 CSV 行，映射回原始 CSV 行索引。"""
+        if not all_rows:
+            return -1
+        if not getattr(self, "_csv_candidate_mode", False):
+            return -1
+        if not getattr(self, "_csv_candidates", None):
+            return -1
+        current_idx = int(getattr(self, "_current_csv_candidate_index", -1))
+        if current_idx < 0 or current_idx >= len(self._csv_candidates):
+            return -1
+
+        current_output_dir = getattr(self, "_current_csv_output_dir", None)
+        if not current_output_dir:
+            return -1
+        if os.path.normpath(current_output_dir) != os.path.normpath(output_dir):
+            return -1
+
+        current_row = self._csv_candidates[current_idx]
+        current_key = self._normalize_csv_row_for_compare(current_row)
+        for i, row in enumerate(all_rows):
+            if self._normalize_csv_row_for_compare(row) == current_key:
+                return i
+        return -1
+
+    def _jump_csv_row_by_filters(self, direction: int):
+        """在当前选中节点子树内，按条件向上/向下搜索 CSV 行并精确定位。"""
+        try:
+            if not hasattr(self, "directory_tree"):
+                messagebox.showinfo("提示", "目录树未初始化")
+                return
+
+            # 解析筛选条件
+            try:
+                flux_threshold = float(str(self.csv_search_median_flux_min_var.get()).strip())
+            except Exception:
+                messagebox.showwarning("警告", "median_flux_norm 阈值无效，请输入数字")
+                return
+            var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
+            mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
+            if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
+                messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
+                return
+
+            selection = self.directory_tree.selection()
+            if not selection:
+                messagebox.showinfo("提示", "请先在目录树中选择一个起始节点")
+                return
+            selected_node = selection[0]
+
+            # 固定搜索范围：当前选中节点整棵子树（自动跳转时保持不变，手动选择会在 _on_tree_select 中清除）
+            if not hasattr(self, "_csv_filter_search_root_node"):
+                self._csv_filter_search_root_node = selected_node
+            root_node = self._csv_filter_search_root_node
+
+            # 若当前选中节点已不在搜索根节点下，重置搜索根节点
+            if not self._is_node_under_root(selected_node, root_node):
+                root_node = selected_node
+                self._csv_filter_search_root_node = root_node
+
+            subtree_order = self._collect_tree_subtree_preorder(root_node)
+            if not subtree_order:
+                messagebox.showinfo("提示", "当前范围内没有可搜索节点")
+                return
+
+            # 仅保留文件节点，按目录树可见顺序
+            file_nodes = []
+            for node in subtree_order:
+                tags = self.directory_tree.item(node, "tags")
+                if "fits_file" in tags:
+                    values = self.directory_tree.item(node, "values")
+                    if values:
+                        file_nodes.append(node)
+            if not file_nodes:
+                messagebox.showinfo("提示", "当前选中节点子树内没有 FITS 文件")
+                return
+
+            # 起始文件索引：优先当前选中节点；若不是文件节点，则从其后（向下）/其前（向上）最近文件开始
+            if selected_node in file_nodes:
+                start_file_idx = file_nodes.index(selected_node)
+            else:
+                try:
+                    selected_pos = subtree_order.index(selected_node)
+                except ValueError:
+                    selected_pos = 0
+                positions = {n: subtree_order.index(n) for n in file_nodes}
+                if direction > 0:
+                    candidates = [i for i, n in enumerate(file_nodes) if positions[n] >= selected_pos]
+                    start_file_idx = candidates[0] if candidates else 0
+                else:
+                    candidates = [i for i, n in enumerate(file_nodes) if positions[n] <= selected_pos]
+                    start_file_idx = candidates[-1] if candidates else (len(file_nodes) - 1)
+
+            # 预计算文件遍历顺序
+            if direction > 0:
+                file_iter_indices = range(start_file_idx, len(file_nodes))
+            else:
+                file_iter_indices = range(start_file_idx, -1, -1)
+
+            download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+            base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+            if not download_dir or not os.path.isdir(download_dir):
+                messagebox.showwarning("警告", "下载目录未设置或不存在")
+                return
+            if not base_output_dir or not os.path.isdir(base_output_dir):
+                messagebox.showwarning("警告", "输出目录未设置或不存在")
+                return
+
+            # 逐文件搜索匹配行
+            hit = None  # (file_node, file_path, output_dir, raw_row_index, row_dict)
+            for file_i in file_iter_indices:
+                node = file_nodes[file_i]
+                values = self.directory_tree.item(node, "values")
+                if not values:
+                    continue
+                file_path = values[0]
+                output_dir = self._map_download_file_to_output_dir(file_path, download_dir, base_output_dir)
+                if not output_dir:
+                    continue
+                csv_path = self._get_nonref_candidates_csv_path(output_dir)
+                if not csv_path:
+                    continue
+
+                all_rows = self._load_variable_candidates_nonref_only(output_dir)
+                if not all_rows:
+                    continue
+
+                # 同一文件内，基于当前显示行继续向前/向后，确保“每次命中都跳到精确下一条/上一条”
+                current_raw_idx = -1
+                if selected_node == node:
+                    current_raw_idx = self._resolve_current_raw_csv_index(output_dir, all_rows)
+
+                if direction > 0:
+                    row_start = (current_raw_idx + 1) if current_raw_idx >= 0 else 0
+                    row_range = range(row_start, len(all_rows))
+                else:
+                    row_start = (current_raw_idx - 1) if current_raw_idx >= 0 else (len(all_rows) - 1)
+                    row_range = range(row_start, -1, -1)
+
+                for raw_idx in row_range:
+                    row = all_rows[raw_idx]
+                    if self._row_matches_csv_filter_conditions(row, flux_threshold, var_mode, mpc_mode):
+                        hit = (node, file_path, output_dir, raw_idx, row)
+                        break
+
+                if hit:
+                    break
+
+            if not hit:
+                direction_text = "向下" if direction > 0 else "向上"
+                messagebox.showinfo("提示", f"在当前选中节点子树内，{direction_text}未找到满足条件的 CSV 行")
+                return
+
+            hit_node, hit_file_path, hit_output_dir, hit_raw_idx, hit_row = hit
+
+            # 加载该文件 CSV 结果
+            if not self._load_diff_results_for_file(hit_file_path, os.path.dirname(hit_file_path)):
+                messagebox.showwarning("警告", "已找到命中行，但加载对应文件 CSV 失败")
+                return
+
+            # 依据命中“原始行”精确映射到当前展示列表索引
+            target_key = self._normalize_csv_row_for_compare(hit_row)
+            display_index = -1
+            for i, row in enumerate(getattr(self, "_csv_candidates", []) or []):
+                if self._normalize_csv_row_for_compare(row) == target_key:
+                    display_index = i
+                    break
+
+            # 若当前过滤导致该行不可见（例如跳过 has_ref_nearby），自动关闭该过滤后重试一次
+            if display_index < 0 and hasattr(self, "skip_has_ref_nearby_var") and self.skip_has_ref_nearby_var.get():
+                self.skip_has_ref_nearby_var.set(False)
+                self._reload_csv_candidates_for_display(hit_output_dir, keep_current_index=False)
+                for i, row in enumerate(getattr(self, "_csv_candidates", []) or []):
+                    if self._normalize_csv_row_for_compare(row) == target_key:
+                        display_index = i
+                        break
+
+            if display_index < 0:
+                messagebox.showwarning("警告", "命中行已找到，但无法在当前 CSV 列表中定位到精确行")
+                return
+
+            # 程序自动选择树节点，不重置搜索根范围
+            self._auto_selecting = True
+            self.directory_tree.selection_set(hit_node)
+            self.directory_tree.focus(hit_node)
+            self.directory_tree.see(hit_node)
+            self.parent_frame.after(10, lambda: setattr(self, "_auto_selecting", False))
+
+            # 显示精确命中行
+            self.selected_file_path = hit_file_path
+            self._display_csv_candidate_by_index(display_index)
+            self.logger.info(
+                "CSV条件命中: file=%s, raw_row=%d, display_row=%d, flux>%s, var=%s, mpc=%s",
+                os.path.basename(hit_file_path),
+                hit_raw_idx + 1,
+                display_index + 1,
+                flux_threshold,
+                var_mode,
+                mpc_mode,
+            )
+        except Exception as e:
+            self.logger.error(f"CSV条件搜索失败: {e}", exc_info=True)
+            messagebox.showerror("错误", f"CSV条件搜索失败:\n{e}")
 
     def _delete_output_dirs_from_selected_node(self):
         """删除当前选中节点以及其后续同级节点映射的输出目录。"""
