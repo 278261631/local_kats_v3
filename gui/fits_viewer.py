@@ -759,6 +759,14 @@ class FitsImageViewer:
         save_btn = ttk.Button(control_frame2, text="保存图像", command=self._save_image)
         save_btn.pack(side=tk.LEFT, padx=(0, 5))
 
+        # 对当前CSV行重跑 crossmatch_nonref_candidates
+        self.rerun_crossmatch_button = ttk.Button(
+            control_frame2,
+            text="重跑Crossmatch(当前行)",
+            command=self._rerun_crossmatch_for_current_csv_row,
+        )
+        self.rerun_crossmatch_button.pack(side=tk.LEFT, padx=(0, 5))
+
         # 自动分类手动标记按钮：直接标记为 SUSPECT / FALSE / ERROR
         self.mark_suspect_button = ttk.Button(
             control_frame2,
@@ -3084,6 +3092,121 @@ class FitsImageViewer:
         """更新 CSV 条件搜索状态栏。"""
         if hasattr(self, "csv_filter_search_status_var"):
             self.csv_filter_search_status_var.set(str(text))
+
+    def _rerun_crossmatch_for_current_csv_row(self):
+        """针对当前CSV候选行，重跑 crossmatch_nonref_candidates（--only-rank）。"""
+        try:
+            if not getattr(self, "_csv_candidate_mode", False):
+                messagebox.showwarning("警告", "请先进入CSV候选浏览模式")
+                return
+            if not getattr(self, "_csv_candidates", None):
+                messagebox.showwarning("警告", "当前没有可用的CSV候选")
+                return
+
+            current_idx = int(getattr(self, "_current_csv_candidate_index", -1))
+            if current_idx < 0 or current_idx >= len(self._csv_candidates):
+                messagebox.showwarning("警告", "当前CSV候选索引无效")
+                return
+
+            row = self._csv_candidates[current_idx]
+            rank_value = self._try_parse_int_from_csv_value(row.get("rank"))
+            if rank_value is None or rank_value <= 0:
+                messagebox.showwarning("警告", "当前CSV行缺少有效 rank，无法执行 --only-rank")
+                return
+
+            output_dir = getattr(self, "_current_csv_output_dir", None)
+            if not output_dir or not os.path.isdir(output_dir):
+                messagebox.showwarning("警告", "当前输出目录无效")
+                return
+            input_csv = self._get_nonref_candidates_csv_path(output_dir)
+            if not input_csv or not os.path.exists(input_csv):
+                messagebox.showwarning("警告", "未找到 variable_candidates_nonref_only_inner_border.csv")
+                return
+
+            default_crossmatch = "D:/github/misaligned_fits/crossmatch_nonref_candidates.py"
+            pipeline_settings = {}
+            if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
+                try:
+                    loaded = self.config_manager.get_diff_pipeline_settings()
+                    if isinstance(loaded, dict):
+                        pipeline_settings = loaded
+                except Exception as e:
+                    self.logger.warning(f"读取diff流水线配置失败，使用默认crossmatch脚本路径: {e}")
+            script_paths = pipeline_settings.get("script_paths", {}) if isinstance(pipeline_settings, dict) else {}
+            crossmatch_script = script_paths.get("crossmatch_nonref_candidates", default_crossmatch)
+
+            if not crossmatch_script or not os.path.exists(crossmatch_script):
+                messagebox.showwarning("警告", f"crossmatch脚本不存在:\n{crossmatch_script}")
+                return
+
+            if hasattr(self, "rerun_crossmatch_button"):
+                self.rerun_crossmatch_button.config(state="disabled")
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(
+                    text=f"重跑Crossmatch: rank={rank_value}",
+                    foreground="blue",
+                )
+
+            thread = threading.Thread(
+                target=self._rerun_crossmatch_for_current_csv_row_thread,
+                args=(crossmatch_script, input_csv, rank_value, output_dir),
+                daemon=True,
+            )
+            thread.start()
+        except Exception as e:
+            self.logger.error(f"启动重跑crossmatch失败: {e}", exc_info=True)
+            messagebox.showerror("错误", f"启动重跑crossmatch失败:\n{e}")
+
+    def _rerun_crossmatch_for_current_csv_row_thread(self, crossmatch_script: str, input_csv: str, rank_value: int, output_dir: str):
+        """后台执行 crossmatch_nonref_candidates 并刷新当前CSV显示。"""
+        py = sys.executable or "python"
+        cmd = [
+            py,
+            crossmatch_script,
+            "--input-csv", input_csv,
+            "--only-rank", str(rank_value),
+        ]
+        cmd_text = " ".join(cmd)
+        try:
+            self.logger.info("重跑Crossmatch命令: %s", cmd_text)
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+            if proc.returncode != 0:
+                if proc.stdout:
+                    self.logger.error("crossmatch stdout:\n%s", proc.stdout)
+                if proc.stderr:
+                    self.logger.error("crossmatch stderr:\n%s", proc.stderr)
+                raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "unknown error")
+
+            if proc.stdout:
+                self.logger.info("crossmatch stdout:\n%s", proc.stdout)
+            if proc.stderr:
+                self.logger.warning("crossmatch stderr:\n%s", proc.stderr)
+
+            # 刷新CSV候选并尽量保持当前位置
+            self.parent_frame.after(0, lambda: self._reload_csv_candidates_for_display(output_dir, keep_current_index=True))
+            if hasattr(self, "diff_progress_label"):
+                self.parent_frame.after(
+                    0,
+                    lambda: self.diff_progress_label.config(
+                        text=f"✓ Crossmatch完成 (rank={rank_value})",
+                        foreground="green",
+                    ),
+                )
+            self.logger.info("重跑Crossmatch完成: rank=%s", rank_value)
+        except Exception as e:
+            self.logger.error("重跑Crossmatch失败: %s", e, exc_info=True)
+            if hasattr(self, "diff_progress_label"):
+                self.parent_frame.after(
+                    0,
+                    lambda msg=str(e): self.diff_progress_label.config(
+                        text=f"✗ Crossmatch失败: {msg}",
+                        foreground="red",
+                    ),
+                )
+            self.parent_frame.after(0, lambda msg=str(e): messagebox.showerror("错误", f"重跑Crossmatch失败:\n{msg}"))
+        finally:
+            if hasattr(self, "rerun_crossmatch_button"):
+                self.parent_frame.after(0, lambda: self.rerun_crossmatch_button.config(state="normal"))
 
     def _get_csv_count_status_style(self, value) -> Tuple[str, str]:
         """按 -1/0/>0 规则返回状态文本与颜色。"""
