@@ -3234,6 +3234,24 @@ class FitsImageViewer:
         self.csv_variable_count_status_label.config(text=var_text, foreground=var_color)
         self.csv_mpc_count_status_label.config(text=mpc_text, foreground=mpc_color)
 
+    def _update_coordinate_display_from_csv_row(self, row: Optional[dict]):
+        """将CSV当前行的RA/DEC同步到度数与HMS:DMS显示框。"""
+        if not isinstance(row, dict):
+            self._update_coordinate_display(None)
+            return
+
+        ra = self._try_get_float_from_row(row, ["ra", "ra_deg", "ra_degree", "target_ra"])
+        dec = self._try_get_float_from_row(row, ["dec", "dec_deg", "dec_degree", "target_dec"])
+
+        selected_filename = os.path.basename(self.selected_file_path) if self.selected_file_path else ""
+        file_info = {
+            "filename": selected_filename,
+            "original_filename": selected_filename,
+            "ra": f"{ra:.8f}" if ra is not None else "",
+            "dec": f"{dec:.8f}" if dec is not None else "",
+        }
+        self._update_coordinate_display(file_info)
+
     def _jump_csv_row_by_filters(self, direction: int):
         """在整棵树内，按当前选中节点向上/向下搜索 CSV 行并精确定位。"""
         try:
@@ -6157,6 +6175,7 @@ class FitsImageViewer:
         total = len(self._csv_candidates)
         row = self._csv_candidates[index]
         self._update_csv_count_status_labels(row)
+        self._update_coordinate_display_from_csv_row(row)
 
         # 停止cutout相关动画/点击事件
         if hasattr(self, "_blink_animation_id") and self._blink_animation_id:
