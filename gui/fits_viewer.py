@@ -2133,6 +2133,10 @@ class FitsImageViewer:
             file_path = values[0]
             self.selected_file_path = file_path
             filename = os.path.basename(file_path)
+            # 用户手动切换文件时，清空 CSV 搜索命中位置缓存
+            if not getattr(self, "_auto_selecting", False):
+                self._csv_search_current_raw_row_index = -1
+                self._csv_search_current_raw_output_dir = None
 
             # 启用显示按钮
             self.display_button.config(state="normal")
@@ -2203,7 +2207,9 @@ class FitsImageViewer:
             if is_download_file:
                 # 若当前是通过“下一个 GOOD/BAD/SUSPECT/FALSE/ERROR”自动跳转，则已经手动加载了diff结果，
                 # 这里不再调用 _auto_load_diff_results，避免覆盖目标cutout的位置。
-                if not getattr(self, '_jumping_to_labeled_next', False):
+                if not getattr(self, '_jumping_to_labeled_next', False) and not getattr(
+                    self, "_jumping_to_csv_filter_search", False
+                ):
                     self._auto_load_diff_results(file_path)
             else:
                 # 模板文件或非下载文件：不应显示上一文件的检测结果，清空显示
@@ -2226,6 +2232,9 @@ class FitsImageViewer:
                 self._clear_diff_display()
             except Exception:
                 pass
+            if not getattr(self, "_auto_selecting", False):
+                self._csv_search_current_raw_row_index = -1
+                self._csv_search_current_raw_output_dir = None
             self.selected_file_path = None
             self.display_button.config(state="disabled")
             self.diff_button.config(state="disabled")
@@ -3027,6 +3036,17 @@ class FitsImageViewer:
         """将当前显示中的 CSV 行，映射回原始 CSV 行索引。"""
         if not all_rows:
             return -1
+        # 优先使用最近一次搜索命中时记录的原始行索引，避免反复读取后无法稳定映射。
+        last_raw_idx = getattr(self, "_csv_search_current_raw_row_index", None)
+        last_raw_outdir = getattr(self, "_csv_search_current_raw_output_dir", None)
+        if (
+            isinstance(last_raw_idx, int)
+            and last_raw_idx >= 0
+            and isinstance(last_raw_outdir, str)
+            and os.path.normpath(last_raw_outdir) == os.path.normpath(output_dir)
+            and last_raw_idx < len(all_rows)
+        ):
+            return last_raw_idx
         if not getattr(self, "_csv_candidate_mode", False):
             return -1
         if not getattr(self, "_csv_candidates", None):
@@ -3205,16 +3225,27 @@ class FitsImageViewer:
                 messagebox.showwarning("警告", "命中行已找到，但无法在当前 CSV 列表中定位到精确行")
                 return
 
-            # 程序自动选择树节点，不重置搜索根范围
+            # 程序自动选择树节点；加抑制标志，避免 _on_tree_select 自动重载覆盖命中行定位
             self._auto_selecting = True
-            self.directory_tree.selection_set(hit_node)
+            self._jumping_to_csv_filter_search = True
+            current_selection = self.directory_tree.selection()
+            if not current_selection or current_selection[0] != hit_node:
+                self.directory_tree.selection_set(hit_node)
             self.directory_tree.focus(hit_node)
             self.directory_tree.see(hit_node)
-            self.parent_frame.after(10, lambda: setattr(self, "_auto_selecting", False))
+
+            def _clear_csv_search_auto_flags():
+                setattr(self, "_auto_selecting", False)
+                setattr(self, "_jumping_to_csv_filter_search", False)
+
+            self.parent_frame.after(10, _clear_csv_search_auto_flags)
 
             # 显示精确命中行
             self.selected_file_path = hit_file_path
             self._display_csv_candidate_by_index(display_index)
+            # 记录当前命中在原始CSV中的行索引，供下一次“向上/向下”作为稳定起点
+            self._csv_search_current_raw_row_index = int(hit_raw_idx)
+            self._csv_search_current_raw_output_dir = str(hit_output_dir)
             self._set_csv_filter_search_status(
                 f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
             )
