@@ -739,6 +739,14 @@ class FitsImageViewer:
         self.current_center_distance_label.pack(side=tk.LEFT, padx=(0, 2))
         ttk.Label(control_frame1, text="像素").pack(side=tk.LEFT, padx=(0, 5))
 
+        # CSV当前行状态显示：variable_count / mpc_count
+        ttk.Label(control_frame1, text="Var:").pack(side=tk.LEFT, padx=(10, 2))
+        self.csv_variable_count_status_label = ttk.Label(control_frame1, text="--", foreground="gray", font=("Arial", 9, "bold"))
+        self.csv_variable_count_status_label.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(control_frame1, text="MPC:").pack(side=tk.LEFT, padx=(2, 2))
+        self.csv_mpc_count_status_label = ttk.Label(control_frame1, text="--", foreground="gray", font=("Arial", 9, "bold"))
+        self.csv_mpc_count_status_label.pack(side=tk.LEFT, padx=(0, 2))
+
         # 第二行控制面板：操作按钮
         control_frame2 = ttk.Frame(control_container)
         control_frame2.pack(fill=tk.X)
@@ -3076,6 +3084,32 @@ class FitsImageViewer:
         """更新 CSV 条件搜索状态栏。"""
         if hasattr(self, "csv_filter_search_status_var"):
             self.csv_filter_search_status_var.set(str(text))
+
+    def _get_csv_count_status_style(self, value) -> Tuple[str, str]:
+        """按 -1/0/>0 规则返回状态文本与颜色。"""
+        iv = self._try_parse_int_from_csv_value(value)
+        if iv is None:
+            return "--", "gray"
+        if iv == -1:
+            return "-1", "blue"
+        if iv == 0:
+            return "0", "green"
+        if iv > 0:
+            return ">0", "#B58900"
+        return str(iv), "gray"
+
+    def _update_csv_count_status_labels(self, row: Optional[dict]):
+        """刷新右侧图像区域的 variable_count/mpc_count 彩色状态。"""
+        if not hasattr(self, "csv_variable_count_status_label") or not hasattr(self, "csv_mpc_count_status_label"):
+            return
+        if not isinstance(row, dict):
+            self.csv_variable_count_status_label.config(text="--", foreground="gray")
+            self.csv_mpc_count_status_label.config(text="--", foreground="gray")
+            return
+        var_text, var_color = self._get_csv_count_status_style(row.get("variable_count"))
+        mpc_text, mpc_color = self._get_csv_count_status_style(row.get("mpc_count"))
+        self.csv_variable_count_status_label.config(text=var_text, foreground=var_color)
+        self.csv_mpc_count_status_label.config(text=mpc_text, foreground=mpc_color)
 
     def _jump_csv_row_by_filters(self, direction: int):
         """在整棵树内，按当前选中节点向上/向下搜索 CSV 行并精确定位。"""
@@ -5999,6 +6033,7 @@ class FitsImageViewer:
         self._current_csv_candidate_index = index
         total = len(self._csv_candidates)
         row = self._csv_candidates[index]
+        self._update_csv_count_status_labels(row)
 
         # 停止cutout相关动画/点击事件
         if hasattr(self, "_blink_animation_id") and self._blink_animation_id:
@@ -6272,6 +6307,7 @@ class FitsImageViewer:
         # 重置当前中心距离标签
         if hasattr(self, 'current_center_distance_label'):
             self.current_center_distance_label.config(text="--")
+        self._update_csv_count_status_labels(None)
 
         # 禁用导航按钮
         if hasattr(self, 'prev_cutout_button'):
@@ -6844,6 +6880,7 @@ class FitsImageViewer:
         self._csv_candidate_mode = False
         self._current_cutout_index = index
         cutout_set = self._all_cutout_sets[index]
+        self._update_csv_count_status_labels(None)
 
         # 从文件加载查询结果状态（如果存在）
         self._load_query_results_from_file(cutout_set, index)
