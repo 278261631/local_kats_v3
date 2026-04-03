@@ -597,7 +597,7 @@ class FitsImageViewer:
         csv_search_frame = ttk.Frame(left_frame)
         csv_search_frame.pack(fill=tk.X, pady=(0, 5))
 
-        self.csv_search_median_flux_min_var = tk.StringVar(value="10")
+        self.csv_search_median_flux_min_var = tk.StringVar(value="30")
         self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
 
@@ -1603,6 +1603,23 @@ class FitsImageViewer:
             if csv_hist_level not in {"low", "medium", "high"}:
                 csv_hist_level = "high"
             self.csv_local_hist_level_var.set(csv_hist_level)
+
+            csv_search_flux_min = str(display_settings.get("csv_search_median_flux_min", "30")).strip()
+            try:
+                float(csv_search_flux_min)
+            except Exception:
+                csv_search_flux_min = "30"
+            self.csv_search_median_flux_min_var.set(csv_search_flux_min)
+
+            csv_search_var_mode = str(display_settings.get("csv_search_variable_count_mode", "=0")).strip()
+            if csv_search_var_mode not in {"=0", "=-1", ">0"}:
+                csv_search_var_mode = "=0"
+            self.csv_search_variable_count_mode_var.set(csv_search_var_mode)
+
+            csv_search_mpc_mode = str(display_settings.get("csv_search_mpc_count_mode", "=0")).strip()
+            if csv_search_mpc_mode not in {"=0", "=-1", ">0"}:
+                csv_search_mpc_mode = "=0"
+            self.csv_search_mpc_count_mode_var.set(csv_search_mpc_mode)
         except Exception as e:
             self.logger.error(f"加载显示设置失败: {str(e)}")
 
@@ -1616,6 +1633,9 @@ class FitsImageViewer:
                 default_colormap=str(self.colormap.get()).strip(),
                 csv_candidate_patch_size=str(self.csv_candidate_patch_size_var.get()).strip(),
                 csv_local_hist_level=str(self.csv_local_hist_level_var.get()).strip().lower(),
+                csv_search_median_flux_min=str(self.csv_search_median_flux_min_var.get()).strip(),
+                csv_search_variable_count_mode=str(self.csv_search_variable_count_mode_var.get()).strip(),
+                csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
             )
         except Exception as e:
             self.logger.warning(f"保存显示设置失败: {e}")
@@ -3270,6 +3290,7 @@ class FitsImageViewer:
             if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
                 messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
                 return
+            self._save_display_settings()
             condition_summary = self._get_csv_filter_condition_summary(flux_threshold, var_mode, mpc_mode)
 
             selection = self.directory_tree.selection()

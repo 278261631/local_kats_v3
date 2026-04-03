@@ -131,6 +131,10 @@ class ConfigManager:
                 "csv_candidate_patch_size": "512",
                 # CSV候选局部拉伸档位
                 "csv_local_hist_level": "high",
+                # CSV条件搜索默认参数
+                "csv_search_median_flux_min": "30",
+                "csv_search_variable_count_mode": "=0",
+                "csv_search_mpc_count_mode": "=0",
             },
             "local_catalog_settings": {
                 "asteroid_catalog_path": self._default_asteroid_catalog_path,
