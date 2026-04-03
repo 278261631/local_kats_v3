@@ -3466,6 +3466,7 @@ class FitsImageViewer:
             return
 
         selected_item = selection[0]
+        restore_anchor_paths = self._build_nearest_restore_anchor_paths(selected_item)
         values = self.directory_tree.item(selected_item, "values")
         tags = self.directory_tree.item(selected_item, "tags")
         if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
@@ -3548,6 +3549,7 @@ class FitsImageViewer:
                 self.logger.error("删除输出目录失败: %s, error=%s", target_dir, e)
 
         self._refresh_directory_tree()
+        self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
 
         if failed:
             msg_lines = [f"成功删除 {deleted_count} 个目录，失败 {len(failed)} 个。", ""]
@@ -3558,6 +3560,76 @@ class FitsImageViewer:
             messagebox.showwarning("部分删除失败", "\n".join(msg_lines))
         else:
             messagebox.showinfo("完成", f"已删除 {deleted_count} 个输出目录")
+
+    def _build_nearest_restore_anchor_paths(self, selected_item) -> list:
+        """按“当前节点->相邻同级->父级祖先”顺序构建刷新后恢复选择的路径候选。"""
+        anchors = []
+        parent_item = self.directory_tree.parent(selected_item)
+        siblings = list(self.directory_tree.get_children(parent_item))
+
+        if selected_item in siblings:
+            selected_idx = siblings.index(selected_item)
+            max_offset = max(selected_idx, len(siblings) - 1 - selected_idx)
+            for offset in range(max_offset + 1):
+                if offset == 0:
+                    probe_indices = [selected_idx]
+                else:
+                    probe_indices = [selected_idx + offset, selected_idx - offset]
+                for idx in probe_indices:
+                    if idx < 0 or idx >= len(siblings):
+                        continue
+                    vals = self.directory_tree.item(siblings[idx], "values")
+                    if vals and vals[0]:
+                        anchors.append(os.path.normpath(vals[0]))
+
+        current = parent_item
+        while current:
+            vals = self.directory_tree.item(current, "values")
+            if vals and vals[0]:
+                anchors.append(os.path.normpath(vals[0]))
+            current = self.directory_tree.parent(current)
+
+        unique = []
+        seen = set()
+        for path in anchors:
+            if path in seen:
+                continue
+            seen.add(path)
+            unique.append(path)
+        return unique
+
+    def _find_tree_node_by_value_path(self, target_path):
+        """按节点 values[0] 精确匹配路径并返回节点 ID。"""
+        if not target_path:
+            return None
+        target_norm = os.path.normpath(str(target_path))
+
+        def walk(parent):
+            for child in self.directory_tree.get_children(parent):
+                vals = self.directory_tree.item(child, "values")
+                if vals and vals[0] and os.path.normpath(str(vals[0])) == target_norm:
+                    return child
+                found = walk(child)
+                if found:
+                    return found
+            return None
+
+        return walk("")
+
+    def _restore_tree_selection_by_anchor_paths(self, anchor_paths):
+        """刷新后根据候选路径恢复到最近节点。"""
+        if not anchor_paths:
+            return
+        for path in anchor_paths:
+            node = self._find_tree_node_by_value_path(path)
+            if not node:
+                continue
+            self._auto_selecting = True
+            self.directory_tree.selection_set(node)
+            self.directory_tree.focus(node)
+            self.directory_tree.see(node)
+            self.parent_frame.after(10, lambda: setattr(self, "_auto_selecting", False))
+            return
 
     def _get_same_level_items_from_selected(self, selected_item):
         """获取从当前选中节点开始到末尾的同级节点列表。"""
