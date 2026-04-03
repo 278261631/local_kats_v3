@@ -591,6 +591,11 @@ class FitsImageViewer:
             text="删除输出目录(以下)",
             command=self._delete_output_dirs_from_selected_node
         ).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(
+            refresh_frame,
+            text="更新MJD(当前节点)",
+            command=self._update_mjd_in_csvs_from_selected_node
+        ).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
         # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
@@ -3560,6 +3565,196 @@ class FitsImageViewer:
             messagebox.showwarning("部分删除失败", "\n".join(msg_lines))
         else:
             messagebox.showinfo("完成", f"已删除 {deleted_count} 个输出目录")
+
+    def _update_mjd_in_csvs_from_selected_node(self):
+        """按当前选中节点批量更新 nonref inner_border CSV 的 mjd 列。"""
+        selection = self.directory_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择一个目录或文件节点")
+            return
+
+        selected_item = selection[0]
+        restore_anchor_paths = self._build_nearest_restore_anchor_paths(selected_item)
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
+            messagebox.showwarning("警告", "请先选择下载目录树中的目录/文件节点（望远镜/日期/天区/FITS文件）")
+            return
+
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            messagebox.showwarning("警告", "输出根目录未设置或不存在")
+            return
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            messagebox.showwarning("警告", "下载目录未设置或不存在")
+            return
+
+        target_csv_paths = self._collect_nonref_inner_border_csv_paths_from_selected_node(
+            selected_item, download_dir, base_output_dir
+        )
+        if not target_csv_paths:
+            messagebox.showinfo("提示", "当前节点下未找到 variable_candidates_nonref_only_inner_border.csv")
+            return
+
+        preview_rel = []
+        for path in target_csv_paths[:8]:
+            try:
+                preview_rel.append(os.path.relpath(path, base_output_dir))
+            except Exception:
+                preview_rel.append(path)
+        preview_text = "\n".join(f"- {p}" for p in preview_rel)
+        suffix = "\n..." if len(target_csv_paths) > 8 else ""
+        confirm_msg = (
+            f"将更新 {len(target_csv_paths)} 个 CSV 的 mjd 列。\n"
+            f"时间来源：各 CSV 上级“文件名目录”中的 UTC 时间。\n\n"
+            f"{preview_text}{suffix}\n\n是否继续？"
+        )
+        if not messagebox.askyesno("确认更新MJD", confirm_msg):
+            return
+
+        try:
+            from astropy.time import Time
+        except Exception as e:
+            messagebox.showerror("错误", f"导入 astropy.time.Time 失败，无法计算MJD：\n{e}")
+            return
+
+        updated_files = 0
+        skipped_no_utc = 0
+        failed = []
+        updated_rows = 0
+
+        for csv_path in target_csv_paths:
+            try:
+                file_dir_name = os.path.basename(os.path.dirname(csv_path))
+                utc_dt = self._extract_utc_datetime_from_name(file_dir_name)
+                if utc_dt is None:
+                    skipped_no_utc += 1
+                    continue
+
+                mjd_value = float(Time(utc_dt).mjd)
+                row_count = self._write_mjd_column_to_csv(csv_path, mjd_value)
+                updated_files += 1
+                updated_rows += max(0, int(row_count))
+            except Exception as e:
+                failed.append((csv_path, str(e)))
+                self.logger.error("更新CSV的mjd失败: %s, error=%s", csv_path, e, exc_info=True)
+
+        self._refresh_directory_tree()
+        self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
+
+        if failed:
+            lines = [
+                f"共扫描 {len(target_csv_paths)} 个CSV",
+                f"成功更新 {updated_files} 个，更新行数 {updated_rows}",
+                f"跳过(未解析到UTC) {skipped_no_utc} 个",
+                f"失败 {len(failed)} 个",
+                "",
+            ]
+            for path, err in failed[:5]:
+                lines.append(f"- {path}: {err}")
+            if len(failed) > 5:
+                lines.append("...")
+            messagebox.showwarning("更新完成（部分失败）", "\n".join(lines))
+        else:
+            messagebox.showinfo(
+                "更新完成",
+                (
+                    f"共扫描 {len(target_csv_paths)} 个CSV\n"
+                    f"成功更新 {updated_files} 个，更新行数 {updated_rows}\n"
+                    f"跳过(未解析到UTC) {skipped_no_utc} 个"
+                ),
+            )
+
+    def _collect_nonref_inner_border_csv_paths_from_selected_node(self, selected_item, download_dir, base_output_dir):
+        """收集当前节点映射输出目录下所有目标CSV路径。"""
+        csv_name = "variable_candidates_nonref_only_inner_border.csv"
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        collected = set()
+
+        if values and "fits_file" in tags:
+            mapped_file_output_dir = self._map_download_file_to_output_dir(values[0], download_dir, base_output_dir)
+            if mapped_file_output_dir:
+                csv_path = os.path.join(mapped_file_output_dir, csv_name)
+                if os.path.isfile(csv_path):
+                    collected.add(os.path.normpath(csv_path))
+            return sorted(collected)
+
+        source_dirs = self._collect_download_directory_nodes(selected_item, download_dir)
+        mapped_output_dirs = []
+        for source_dir in source_dirs:
+            mapped = self._map_download_dir_to_output_dir(source_dir, download_dir, base_output_dir)
+            if mapped and os.path.isdir(mapped):
+                mapped_output_dirs.append(mapped)
+
+        mapped_output_dirs = self._compress_parent_paths(mapped_output_dirs)
+        for output_dir in mapped_output_dirs:
+            for root, _dirs, files in os.walk(output_dir):
+                if csv_name in files:
+                    collected.add(os.path.normpath(os.path.join(root, csv_name)))
+
+        return sorted(collected)
+
+    def _extract_utc_datetime_from_name(self, name: str):
+        """从名称中提取 UTC 时间（UTCYYYYMMDD_HHMMSS）并返回 datetime。"""
+        try:
+            if not name:
+                return None
+            match = re.search(r"UTC(\d{8})_(\d{6})", str(name))
+            if not match:
+                return None
+            date_str = match.group(1)
+            time_str = match.group(2)
+            return datetime.strptime(f"{date_str}{time_str}", "%Y%m%d%H%M%S")
+        except Exception:
+            return None
+
+    def _write_mjd_column_to_csv(self, csv_path: str, mjd_value: float) -> int:
+        """将CSV中每行的mjd写为给定值；若无mjd列则新增。返回写入行数。"""
+        rows = []
+        fieldnames = []
+
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            for row in reader:
+                if row is None:
+                    continue
+                rows.append(dict(row))
+
+        if not fieldnames:
+            raise ValueError("CSV缺少表头，无法写入mjd")
+
+        if "mjd" not in fieldnames:
+            fieldnames.append("mjd")
+
+        mjd_text = f"{float(mjd_value):.8f}"
+        for row in rows:
+            row["mjd"] = mjd_text
+
+        backup_path = f"{csv_path}.bak"
+        try:
+            shutil.copy2(csv_path, backup_path)
+        except Exception as e:
+            self.logger.warning("创建CSV备份失败，将继续写入: %s, error=%s", csv_path, e)
+
+        temp_path = f"{csv_path}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            os.replace(temp_path, csv_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+        return len(rows)
 
     def _build_nearest_restore_anchor_paths(self, selected_item) -> list:
         """按“当前节点->相邻同级->父级祖先”顺序构建刷新后恢复选择的路径候选。"""
