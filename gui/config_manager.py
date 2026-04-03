@@ -52,10 +52,10 @@ class ConfigManager:
                 "telescope_name": "GY5",
                 "date": datetime.now().strftime("%Y%m%d"),
                 "k_number": "K096",
-                "download_directory": "",
-                "template_directory": "",
-                "diff_output_directory": "",
-                "detected_directory": "",
+                "download_directory": "E:/fix_data/download",
+                "template_directory": "E:/fix_data/template",
+                "diff_output_directory": "E:/fix_data/output",
+                "detected_directory": "E:/fix_data/output\\detected"
             },
             "download_settings": {
                 "max_workers": 1,
@@ -72,13 +72,14 @@ class ConfigManager:
             },
             "diff_pipeline_settings": {
                 "script_paths": {
-                    "export_fits_stars": "D:/github/misaligned_fits/export_fits_stars.py",
-                    "recommended_pipeline_console": "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
-                    "reproject_wcs_and_export_stars": "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
-                    "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
-                    "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
-                    "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
-                    "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
+                    "export_fits_stars": "E:/github/misaligned_fits/export_fits_stars.py",
+                    "recommended_pipeline_console": "E:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+                    "reproject_wcs_and_export_stars": "E:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+                    "solve_alignment_from_stars": "E:/github/misaligned_fits/solve_alignment_from_stars.py",
+                    "render_alignment_outputs": "E:/github/misaligned_fits/render_alignment_outputs.py",
+                    "rank_variable_candidates": "E:/github/misaligned_fits/rank_variable_candidates.py",
+                    "crossmatch_nonref_candidates": "E:/github/misaligned_fits/crossmatch_nonref_candidates.py",
+                    "export_nonref_candidate_ab_cutouts": "E:/github/misaligned_fits/export_nonref_candidate_ab_cutouts.py",
                 },
                 "export_uniform_grid_x": 7,
                 "export_uniform_grid_y": 7,
@@ -94,7 +95,9 @@ class ConfigManager:
                 "reproject_uniform_per_cell": 100,
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
-                "enable_crossmatch_nonref_candidates": True
+                "enable_crossmatch_nonref_candidates": True,
+                "enable_export_nonref_candidate_ab_cutouts": True,
+                "nonref_candidate_cutout_size": 128
             },
             "dss_flip_settings": {
                 "flip_vertical": True,  # 上下翻转DSS（默认值：True）
