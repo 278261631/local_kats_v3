@@ -5637,7 +5637,7 @@ class FitsImageViewer:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
-                "enable_export_nonref_candidate_ab_cutouts": True,
+                "enable_export_nonref_candidate_ab_cutouts": False,
                 "nonref_candidate_cutout_size": 128,
             }
             pipeline_settings = default_pipeline
@@ -6210,7 +6210,7 @@ class FitsImageViewer:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
-                "enable_export_nonref_candidate_ab_cutouts": True,
+                "enable_export_nonref_candidate_ab_cutouts": False,
                 "nonref_candidate_cutout_size": 128,
             }
             pipeline_settings = default_pipeline
