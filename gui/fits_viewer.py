@@ -5848,8 +5848,34 @@ class FitsImageViewer:
                     )
                 )
 
+            commands_manifest_path = os.path.join(output_dir, "pipeline_commands.txt")
+            try:
+                manifest_lines = [
+                    "# Diff pipeline commands",
+                    f"# Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"# Template FITS: {template_file}",
+                    f"# Source FITS: {source_file_for_pipeline}",
+                    f"# Output directory: {output_dir}",
+                    f"# Fast mode: {'on' if fast_mode_enabled else 'off'}",
+                    "",
+                ]
+                for index, (step_name, cmd) in enumerate(commands, start=1):
+                    manifest_lines.extend(
+                        [
+                            f"[{index}] {step_name}",
+                            subprocess.list2cmdline(cmd),
+                            "",
+                        ]
+                    )
+
+                with open(commands_manifest_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(manifest_lines))
+                self.logger.info("已写入命令清单: %s", commands_manifest_path)
+            except Exception as e:
+                self.logger.warning("写入命令清单失败: %s", e)
+
             for step_name, cmd in commands:
-                cmd_text = " ".join(cmd)
+                cmd_text = subprocess.list2cmdline(cmd)
                 self.parent_frame.after(
                     0,
                     lambda n=step_name: self.diff_progress_label.config(
@@ -6421,9 +6447,35 @@ class FitsImageViewer:
                     )
                 )
 
+            commands_manifest_path = os.path.join(output_dir, "pipeline_commands.txt")
+            try:
+                manifest_lines = [
+                    "# Diff pipeline commands",
+                    f"# Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"# Template FITS: {template_file}",
+                    f"# Source FITS: {source_file_for_pipeline}",
+                    f"# Output directory: {output_dir}",
+                    f"# Fast mode: {'on' if fast_mode_enabled else 'off'}",
+                    "",
+                ]
+                for index, (step_name, cmd) in enumerate(commands, start=1):
+                    manifest_lines.extend(
+                        [
+                            f"[{index}] {step_name}",
+                            subprocess.list2cmdline(cmd),
+                            "",
+                        ]
+                    )
+
+                with open(commands_manifest_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(manifest_lines))
+                self.logger.info("已写入命令清单: %s", commands_manifest_path)
+            except Exception as e:
+                self.logger.warning("写入命令清单失败: %s", e)
+
             for step_name, cmd in commands:
                 progress_callback(f"正在执行: {step_name}")
-                cmd_text = " ".join(cmd)
+                cmd_text = subprocess.list2cmdline(cmd)
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
                 proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
                 if proc.returncode != 0:
