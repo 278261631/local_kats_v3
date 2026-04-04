@@ -5803,48 +5803,60 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            skipped_commands = []
+            render_command = (
+                "渲染对齐结果",
+                [
+                    py, render_script,
+                    "--a", template_file,
+                    "--b", rp_fit,
+                    "--align", align_npz,
+                    "--outdir", output_dir,
+                ],
+            )
             if not fast_mode_enabled:
-                commands.insert(
-                    4,
-                    (
-                        "渲染对齐结果",
-                        [
-                            py, render_script,
-                            "--a", template_file,
-                            "--b", rp_fit,
-                            "--align", align_npz,
-                            "--outdir", output_dir,
-                        ],
-                    ),
-                )
+                commands.insert(4, render_command)
             else:
                 self.logger.info("快速模式已启用：跳过步骤[渲染对齐结果]")
-            if enable_crossmatch_nonref_candidates:
-                commands.append(
-                    (
-                        "交叉匹配非参考候选",
-                        [
-                            py, crossmatch_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--find-mpc-csv", out_find_mpc_csv,
-                            "--ref-fits", template_file,
-                        ],
-                    )
+                skipped_commands.append(
+                    (render_command[0], render_command[1], "快速模式已启用")
                 )
+            crossmatch_command = (
+                "交叉匹配非参考候选",
+                [
+                    py, crossmatch_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--find-mpc-csv", out_find_mpc_csv,
+                    "--ref-fits", template_file,
+                ],
+            )
+            if enable_crossmatch_nonref_candidates:
+                commands.append(crossmatch_command)
+            else:
+                skipped_commands.append(
+                    (crossmatch_command[0], crossmatch_command[1], "配置已禁用 enable_crossmatch_nonref_candidates")
+                )
+            export_nonref_cutouts_command = (
+                "导出非参考候选AB切图",
+                [
+                    py, export_nonref_cutouts_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--a-fits", template_file,
+                    "--b-fits", rp_fit,
+                    "--a-stars-all", template_stars_all,
+                    "--b-stars-all", rp_stars_all,
+                    "--align-npz", align_npz,
+                    "--cutout-size", nonref_candidate_cutout_size,
+                ],
+            )
             if enable_export_nonref_candidate_ab_cutouts:
-                commands.append(
+                commands.append(export_nonref_cutouts_command)
+            else:
+                skipped_commands.append(
                     (
-                        "导出非参考候选AB切图",
-                        [
-                            py, export_nonref_cutouts_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--a-fits", template_file,
-                            "--b-fits", rp_fit,
-                            "--a-stars-all", template_stars_all,
-                            "--b-stars-all", rp_stars_all,
-                            "--align-npz", align_npz,
-                            "--cutout-size", nonref_candidate_cutout_size,
-                        ],
+                        export_nonref_cutouts_command[0],
+                        export_nonref_cutouts_command[1],
+                        "配置已禁用 enable_export_nonref_candidate_ab_cutouts",
                     )
                 )
 
@@ -5858,6 +5870,8 @@ class FitsImageViewer:
                     f"# Output directory: {output_dir}",
                     f"# Fast mode: {'on' if fast_mode_enabled else 'off'}",
                     "",
+                    "## Will Execute",
+                    "",
                 ]
                 for index, (step_name, cmd) in enumerate(commands, start=1):
                     manifest_lines.extend(
@@ -5867,6 +5881,19 @@ class FitsImageViewer:
                             "",
                         ]
                     )
+                manifest_lines.extend(["## Skipped", ""])
+                if skipped_commands:
+                    for index, (step_name, cmd, reason) in enumerate(skipped_commands, start=1):
+                        manifest_lines.extend(
+                            [
+                                f"[{index}] {step_name}",
+                                f"Reason: {reason}",
+                                subprocess.list2cmdline(cmd),
+                                "",
+                            ]
+                        )
+                else:
+                    manifest_lines.extend(["(none)", ""])
 
                 with open(commands_manifest_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(manifest_lines))
@@ -6402,48 +6429,60 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            skipped_commands = []
+            render_command = (
+                "渲染对齐结果",
+                [
+                    py, render_script,
+                    "--a", template_file,
+                    "--b", rp_fit,
+                    "--align", align_npz,
+                    "--outdir", output_dir,
+                ],
+            )
             if not fast_mode_enabled:
-                commands.insert(
-                    4,
-                    (
-                        "渲染对齐结果",
-                        [
-                            py, render_script,
-                            "--a", template_file,
-                            "--b", rp_fit,
-                            "--align", align_npz,
-                            "--outdir", output_dir,
-                        ],
-                    ),
-                )
+                commands.insert(4, render_command)
             else:
                 self.logger.info("快速模式已启用：跳过步骤[渲染对齐结果]")
-            if enable_crossmatch_nonref_candidates:
-                commands.append(
-                    (
-                        "交叉匹配非参考候选",
-                        [
-                            py, crossmatch_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--find-mpc-csv", out_find_mpc_csv,
-                            "--ref-fits", template_file,
-                        ],
-                    )
+                skipped_commands.append(
+                    (render_command[0], render_command[1], "快速模式已启用")
                 )
+            crossmatch_command = (
+                "交叉匹配非参考候选",
+                [
+                    py, crossmatch_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--find-mpc-csv", out_find_mpc_csv,
+                    "--ref-fits", template_file,
+                ],
+            )
+            if enable_crossmatch_nonref_candidates:
+                commands.append(crossmatch_command)
+            else:
+                skipped_commands.append(
+                    (crossmatch_command[0], crossmatch_command[1], "配置已禁用 enable_crossmatch_nonref_candidates")
+                )
+            export_nonref_cutouts_command = (
+                "导出非参考候选AB切图",
+                [
+                    py, export_nonref_cutouts_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--a-fits", template_file,
+                    "--b-fits", rp_fit,
+                    "--a-stars-all", template_stars_all,
+                    "--b-stars-all", rp_stars_all,
+                    "--align-npz", align_npz,
+                    "--cutout-size", nonref_candidate_cutout_size,
+                ],
+            )
             if enable_export_nonref_candidate_ab_cutouts:
-                commands.append(
+                commands.append(export_nonref_cutouts_command)
+            else:
+                skipped_commands.append(
                     (
-                        "导出非参考候选AB切图",
-                        [
-                            py, export_nonref_cutouts_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--a-fits", template_file,
-                            "--b-fits", rp_fit,
-                            "--a-stars-all", template_stars_all,
-                            "--b-stars-all", rp_stars_all,
-                            "--align-npz", align_npz,
-                            "--cutout-size", nonref_candidate_cutout_size,
-                        ],
+                        export_nonref_cutouts_command[0],
+                        export_nonref_cutouts_command[1],
+                        "配置已禁用 enable_export_nonref_candidate_ab_cutouts",
                     )
                 )
 
@@ -6457,6 +6496,8 @@ class FitsImageViewer:
                     f"# Output directory: {output_dir}",
                     f"# Fast mode: {'on' if fast_mode_enabled else 'off'}",
                     "",
+                    "## Will Execute",
+                    "",
                 ]
                 for index, (step_name, cmd) in enumerate(commands, start=1):
                     manifest_lines.extend(
@@ -6466,6 +6507,19 @@ class FitsImageViewer:
                             "",
                         ]
                     )
+                manifest_lines.extend(["## Skipped", ""])
+                if skipped_commands:
+                    for index, (step_name, cmd, reason) in enumerate(skipped_commands, start=1):
+                        manifest_lines.extend(
+                            [
+                                f"[{index}] {step_name}",
+                                f"Reason: {reason}",
+                                subprocess.list2cmdline(cmd),
+                                "",
+                            ]
+                        )
+                else:
+                    manifest_lines.extend(["(none)", ""])
 
                 with open(commands_manifest_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(manifest_lines))
