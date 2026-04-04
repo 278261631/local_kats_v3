@@ -124,8 +124,6 @@ class ConfigManager:
                 "confidence_threshold": 0.5  # AI GOOD/BAD 自动标记置信度阈值（默认：0.7）
             },
             "display_settings": {
-                "default_display_mode": "linear",
-                "default_colormap": "gray",
                 "auto_select_from_download_dir": True,
                 # CSV候选浏览默认尺寸（像素）
                 "csv_candidate_patch_size": "512",

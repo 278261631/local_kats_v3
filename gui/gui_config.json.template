@@ -74,8 +74,6 @@
     "flip_vertical": false
   },
   "display_settings": {
-    "default_display_mode": "linear",
-    "default_colormap": "gray",
     "auto_select_from_download_dir": true
   },
   "url_template_type": "standard",

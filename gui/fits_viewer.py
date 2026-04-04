@@ -121,7 +121,7 @@ class FitsImageViewer:
         # 创建界面
         self._create_widgets()
 
-        # 从配置文件加载显示设置（含CSV候选尺寸）
+        # 从配置文件加载显示设置（含 CSV 候选等）
         self._load_display_settings()
 
         # 从配置文件加载批量处理参数到控件
@@ -700,27 +700,9 @@ class FitsImageViewer:
         control_container = ttk.Frame(right_frame)
         control_container.pack(fill=tk.X, pady=(5, 0))
 
-        # 第一行控制面板：显示模式和颜色映射
+        # 第一行控制面板：CSV 候选等
         control_frame1 = ttk.Frame(control_container)
         control_frame1.pack(fill=tk.X, pady=(0, 2))
-
-        # 显示模式选择
-        ttk.Label(control_frame1, text="显示模式:").pack(side=tk.LEFT, padx=(0, 5))
-        self.display_mode = tk.StringVar(value="linear")
-        mode_combo = ttk.Combobox(control_frame1, textvariable=self.display_mode,
-                                 values=["linear", "log", "sqrt", "asinh"],
-                                 state="readonly", width=10)
-        mode_combo.pack(side=tk.LEFT, padx=(0, 10))
-        mode_combo.bind('<<ComboboxSelected>>', self._on_display_mode_change)
-
-        # 颜色映射选择
-        ttk.Label(control_frame1, text="颜色映射:").pack(side=tk.LEFT, padx=(0, 5))
-        self.colormap = tk.StringVar(value="gray")
-        cmap_combo = ttk.Combobox(control_frame1, textvariable=self.colormap,
-                                 values=["gray", "viridis", "plasma", "inferno", "hot", "cool"],
-                                 state="readonly", width=10)
-        cmap_combo.pack(side=tk.LEFT, padx=(0, 10))
-        cmap_combo.bind('<<ComboboxSelected>>', self._on_colormap_change)
 
         # CSV候选浏览显示尺寸（单位：像素，默认512）
         ttk.Label(control_frame1, text="CSV尺寸:").pack(side=tk.LEFT, padx=(0, 5))
@@ -1610,14 +1592,12 @@ class FitsImageViewer:
             self.logger.error(f"保存查询设置失败: {str(e)}")
 
     def _load_display_settings(self):
-        """从配置文件加载显示设置（显示模式、颜色映射、CSV尺寸等）。"""
+        """从配置文件加载显示设置（CSV 候选尺寸等）。"""
         if not self.config_manager:
             return
 
         try:
             display_settings = self.config_manager.get_display_settings()
-            self.display_mode.set(str(display_settings.get("default_display_mode", "linear")))
-            self.colormap.set(str(display_settings.get("default_colormap", "gray")))
 
             csv_patch_size = str(display_settings.get("csv_candidate_patch_size", "512"))
             if csv_patch_size not in {"128", "256", "384", "512", "640", "768", "1024"}:
@@ -1679,8 +1659,6 @@ class FitsImageViewer:
             return
         try:
             self.config_manager.update_display_settings(
-                default_display_mode=str(self.display_mode.get()).strip(),
-                default_colormap=str(self.colormap.get()).strip(),
                 csv_candidate_patch_size=str(self.csv_candidate_patch_size_var.get()).strip(),
                 csv_local_hist_level=str(self.csv_local_hist_level_var.get()).strip().lower(),
                 csv_search_median_flux_min=str(self.csv_search_median_flux_min_var.get()).strip(),
@@ -2067,11 +2045,8 @@ class FitsImageViewer:
             # 创建子图
             ax = self.figure.add_subplot(111)
 
-            # 应用显示模式变换
-            display_data = self._apply_display_transform(self.current_fits_data)
-
-            # 显示图像
-            im = ax.imshow(display_data, cmap=self.colormap.get(), origin='lower')
+            # 显示图像（固定线性灰度）
+            im = ax.imshow(self.current_fits_data, cmap="gray", origin='lower')
 
             # 添加颜色条
             self.figure.colorbar(im, ax=ax, shrink=0.8)
@@ -2093,37 +2068,6 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"更新图像显示失败: {str(e)}")
             messagebox.showerror("错误", f"更新图像显示失败:\n{str(e)}")
-
-    def _apply_display_transform(self, data: np.ndarray) -> np.ndarray:
-        """应用显示变换"""
-        mode = self.display_mode.get()
-
-        # 处理负值和零值
-        data_min = np.min(data)
-        if data_min <= 0 and mode in ['log', 'sqrt']:
-            # 对于log和sqrt变换，需要处理负值
-            data = data - data_min + 1e-10
-
-        if mode == "linear":
-            return data
-        elif mode == "log":
-            return np.log10(np.maximum(data, 1e-10))
-        elif mode == "sqrt":
-            return np.sqrt(np.maximum(data, 0))
-        elif mode == "asinh":
-            return np.arcsinh(data)
-        else:
-            return data
-
-    def _on_display_mode_change(self, event=None):
-        """显示模式改变事件"""
-        self._save_display_settings()
-        self._update_image_display()
-
-    def _on_colormap_change(self, event=None):
-        """颜色映射改变事件"""
-        self._save_display_settings()
-        self._update_image_display()
 
     def _on_csv_candidate_view_option_changed(self, event=None):
         """CSV候选浏览显示参数改变时，重绘当前候选。"""
@@ -3374,10 +3318,20 @@ class FitsImageViewer:
             condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
 
             selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showinfo("提示", "请先在目录树中选择一个起始节点")
-                return
-            selected_node = selection[0]
+            if selection:
+                selected_node = selection[0]
+            else:
+                roots = self.directory_tree.get_children("")
+                if not roots:
+                    messagebox.showinfo("提示", "目录树为空，无法搜索")
+                    return
+                selected_node = roots[0]
+                try:
+                    self.directory_tree.selection_set(selected_node)
+                    self.directory_tree.focus(selected_node)
+                    self.directory_tree.see(selected_node)
+                except Exception:
+                    pass
 
             tree_order = self._collect_tree_subtree_preorder(root_node=None)
             if not tree_order:
@@ -6907,7 +6861,7 @@ class FitsImageViewer:
             ref_data, ref_x, ref_y, half_size=patch_half_size
         )
 
-        # Reference/Aligned 在局部裁剪后先做 low/medium/high 拉伸，再进入显示变换
+        # Reference/Aligned 在局部裁剪后先做 low/medium/high 拉伸
         aligned_patch_u8 = self._stretch_patch_to_uint8(aligned_patch, level=hist_level)
         ref_patch_u8 = self._stretch_patch_to_uint8(ref_patch, level=hist_level)
 
@@ -6934,8 +6888,8 @@ class FitsImageViewer:
         self.figure.clear()
         axes = self.figure.subplots(1, 3)
 
-        ref_show = self._apply_display_transform(ref_patch_u8.astype(np.float64))
-        axes[0].imshow(ref_show, cmap=self.colormap.get(), origin="lower")
+        ref_show = ref_patch_u8.astype(np.float64)
+        axes[0].imshow(ref_show, cmap="gray", origin="lower")
         axes[0].set_title("Reference 局部", fontsize=10, fontweight="bold")
         axes[0].axis("off")
         # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
@@ -6944,8 +6898,8 @@ class FitsImageViewer:
                 axes[0], ref_lx, ref_ly, color="orange", linewidth=1.2, size=12, gap=5
             )
 
-        aligned_show = self._apply_display_transform(aligned_patch_u8.astype(np.float64))
-        axes[1].imshow(aligned_show, cmap=self.colormap.get(), origin="lower")
+        aligned_show = aligned_patch_u8.astype(np.float64)
+        axes[1].imshow(aligned_show, cmap="gray", origin="lower")
         axes[1].set_title("Aligned 局部", fontsize=10, fontweight="bold")
         axes[1].axis("off")
         # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
