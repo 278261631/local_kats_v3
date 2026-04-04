@@ -133,6 +133,7 @@ class ConfigManager:
                 "csv_local_hist_level": "high",
                 # CSV条件搜索默认参数
                 "csv_search_median_flux_min": "30",
+                "csv_search_median_flux_max": "800",
                 "csv_search_variable_count_mode": "=0",
                 "csv_search_mpc_count_mode": "=0",
             },

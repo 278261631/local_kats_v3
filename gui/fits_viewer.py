@@ -609,12 +609,16 @@ class FitsImageViewer:
         csv_search_frame.pack(fill=tk.X, pady=(0, 5))
 
         self.csv_search_median_flux_min_var = tk.StringVar(value="30")
+        self.csv_search_median_flux_max_var = tk.StringVar(value="800")
         self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
 
         ttk.Label(csv_search_frame, text="CSV筛选").pack(side=tk.LEFT)
-        ttk.Label(csv_search_frame, text="flux>").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(csv_search_frame, text="flux[").pack(side=tk.LEFT, padx=(6, 2))
         ttk.Entry(csv_search_frame, textvariable=self.csv_search_median_flux_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_search_frame, text=",").pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Entry(csv_search_frame, textvariable=self.csv_search_median_flux_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_search_frame, text="]").pack(side=tk.LEFT, padx=(2, 0))
 
         ttk.Label(csv_search_frame, text="var").pack(side=tk.LEFT, padx=(6, 2))
         ttk.Combobox(
@@ -1617,10 +1621,23 @@ class FitsImageViewer:
 
             csv_search_flux_min = str(display_settings.get("csv_search_median_flux_min", "30")).strip()
             try:
-                float(csv_search_flux_min)
+                csv_search_flux_min_val = float(csv_search_flux_min)
             except Exception:
                 csv_search_flux_min = "30"
+                csv_search_flux_min_val = 30.0
             self.csv_search_median_flux_min_var.set(csv_search_flux_min)
+
+            csv_search_flux_max = str(display_settings.get("csv_search_median_flux_max", "800")).strip()
+            try:
+                csv_search_flux_max_val = float(csv_search_flux_max)
+            except Exception:
+                csv_search_flux_max = "800"
+                csv_search_flux_max_val = 800.0
+            self.csv_search_median_flux_max_var.set(csv_search_flux_max)
+
+            if csv_search_flux_min_val >= csv_search_flux_max_val:
+                self.csv_search_median_flux_min_var.set("30")
+                self.csv_search_median_flux_max_var.set("800")
 
             csv_search_var_mode = str(display_settings.get("csv_search_variable_count_mode", "=0")).strip()
             if csv_search_var_mode not in {"=0", "=-1", ">0"}:
@@ -1645,6 +1662,7 @@ class FitsImageViewer:
                 csv_candidate_patch_size=str(self.csv_candidate_patch_size_var.get()).strip(),
                 csv_local_hist_level=str(self.csv_local_hist_level_var.get()).strip().lower(),
                 csv_search_median_flux_min=str(self.csv_search_median_flux_min_var.get()).strip(),
+                csv_search_median_flux_max=str(self.csv_search_median_flux_max_var.get()).strip(),
                 csv_search_variable_count_mode=str(self.csv_search_variable_count_mode_var.get()).strip(),
                 csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
             )
@@ -3049,12 +3067,23 @@ class FitsImageViewer:
             return iv > 0
         return False
 
-    def _row_matches_csv_filter_conditions(self, row: dict, flux_threshold: float, var_mode: str, mpc_mode: str) -> bool:
+    def _parse_csv_flux_range(self) -> Tuple[float, float]:
+        """解析 CSV flux 区间筛选条件，返回 (min, max)。"""
+        try:
+            flux_min = float(str(self.csv_search_median_flux_min_var.get()).strip())
+            flux_max = float(str(self.csv_search_median_flux_max_var.get()).strip())
+        except Exception:
+            raise ValueError("median_flux_norm 区间无效，请输入数字")
+        if flux_min >= flux_max:
+            raise ValueError("median_flux_norm 区间无效：下限必须小于上限")
+        return flux_min, flux_max
+
+    def _row_matches_csv_filter_conditions(self, row: dict, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> bool:
         """按 AND 逻辑判断一行是否满足搜索条件。"""
         if not isinstance(row, dict):
             return False
         flux = self._try_get_float_from_row(row, ["median_flux_norm"])
-        if flux is None or not (flux > float(flux_threshold)):
+        if flux is None or not (float(flux_min) < flux < float(flux_max)):
             return False
         if not self._csv_count_mode_match(row.get("variable_count"), var_mode):
             return False
@@ -3115,9 +3144,9 @@ class FitsImageViewer:
                 return i
         return -1
 
-    def _get_csv_filter_condition_summary(self, flux_threshold: float, var_mode: str, mpc_mode: str) -> str:
+    def _get_csv_filter_condition_summary(self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> str:
         """返回 CSV 条件摘要文本。"""
-        return f"median_flux_norm>{flux_threshold:g} AND variable_count{var_mode} AND mpc_count{mpc_mode}"
+        return f"{flux_min:g}<median_flux_norm<{flux_max:g} AND variable_count{var_mode} AND mpc_count{mpc_mode}"
 
     def _set_csv_filter_search_status(self, text: str):
         """更新 CSV 条件搜索状态栏。"""
@@ -3292,9 +3321,9 @@ class FitsImageViewer:
 
             # 解析筛选条件
             try:
-                flux_threshold = float(str(self.csv_search_median_flux_min_var.get()).strip())
-            except Exception:
-                messagebox.showwarning("警告", "median_flux_norm 阈值无效，请输入数字")
+                flux_min, flux_max = self._parse_csv_flux_range()
+            except ValueError as e:
+                messagebox.showwarning("警告", str(e))
                 return
             var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
             mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
@@ -3302,7 +3331,7 @@ class FitsImageViewer:
                 messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
                 return
             self._save_display_settings()
-            condition_summary = self._get_csv_filter_condition_summary(flux_threshold, var_mode, mpc_mode)
+            condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
 
             selection = self.directory_tree.selection()
             if not selection:
@@ -3391,7 +3420,7 @@ class FitsImageViewer:
 
                 for raw_idx in row_range:
                     row = all_rows[raw_idx]
-                    if self._row_matches_csv_filter_conditions(row, flux_threshold, var_mode, mpc_mode):
+                    if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
                         hit = (node, file_path, output_dir, raw_idx, row)
                         break
 
@@ -3457,11 +3486,12 @@ class FitsImageViewer:
                 f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
             )
             self.logger.info(
-                "CSV条件命中: file=%s, raw_row=%d, display_row=%d, flux>%s, var=%s, mpc=%s",
+                "CSV条件命中: file=%s, raw_row=%d, display_row=%d, %s<flux<%s, var=%s, mpc=%s",
                 os.path.basename(hit_file_path),
                 hit_raw_idx + 1,
                 display_index + 1,
-                flux_threshold,
+                flux_min,
+                flux_max,
                 var_mode,
                 mpc_mode,
             )
@@ -3711,9 +3741,9 @@ class FitsImageViewer:
 
         # 复用当前CSV筛选条件
         try:
-            flux_threshold = float(str(self.csv_search_median_flux_min_var.get()).strip())
-        except Exception:
-            messagebox.showwarning("警告", "median_flux_norm 阈值无效，请输入数字")
+            flux_min, flux_max = self._parse_csv_flux_range()
+        except ValueError as e:
+            messagebox.showwarning("警告", str(e))
             return
         var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
         mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
@@ -3721,7 +3751,7 @@ class FitsImageViewer:
             messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
             return
         self._save_display_settings()
-        condition_summary = self._get_csv_filter_condition_summary(flux_threshold, var_mode, mpc_mode)
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
 
         crossmatch_script = self._get_crossmatch_nonref_script_path()
         if not crossmatch_script or not os.path.exists(crossmatch_script):
@@ -3729,7 +3759,7 @@ class FitsImageViewer:
             return
 
         tasks, stats = self._collect_crossmatch_tasks_for_csv_filters(
-            target_csv_paths, flux_threshold, var_mode, mpc_mode
+            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode
         )
         if not tasks:
             messagebox.showinfo(
@@ -3793,7 +3823,7 @@ class FitsImageViewer:
         script_paths = pipeline_settings.get("script_paths", {}) if isinstance(pipeline_settings, dict) else {}
         return script_paths.get("crossmatch_nonref_candidates", default_crossmatch)
 
-    def _collect_crossmatch_tasks_for_csv_filters(self, csv_paths, flux_threshold, var_mode, mpc_mode):
+    def _collect_crossmatch_tasks_for_csv_filters(self, csv_paths, flux_min, flux_max, var_mode, mpc_mode):
         """扫描CSV并收集需执行的 (csv_path, rank) 任务，按顺序串行。"""
         tasks = []
         matched_rows = 0
@@ -3805,7 +3835,7 @@ class FitsImageViewer:
             rows = self._load_variable_candidates_nonref_only(output_dir)
             seen_ranks = set()
             for row in rows:
-                if not self._row_matches_csv_filter_conditions(row, flux_threshold, var_mode, mpc_mode):
+                if not self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
                     continue
                 matched_rows += 1
                 rank_value = self._try_parse_int_from_csv_value(row.get("rank"))
