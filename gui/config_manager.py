@@ -136,6 +136,8 @@ class ConfigManager:
                 "csv_search_median_flux_max": "800",
                 "csv_search_variable_count_mode": "=0",
                 "csv_search_mpc_count_mode": "=0",
+                "csv_filter_skip_large_rows_enabled": False,
+                "csv_filter_max_rows": "200",
             },
             "local_catalog_settings": {
                 "asteroid_catalog_path": self._default_asteroid_catalog_path,

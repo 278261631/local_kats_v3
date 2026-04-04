@@ -612,6 +612,8 @@ class FitsImageViewer:
         self.csv_search_median_flux_max_var = tk.StringVar(value="800")
         self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
+        self.csv_filter_skip_large_rows_var = tk.BooleanVar(value=False)
+        self.csv_filter_max_rows_var = tk.StringVar(value="200")
 
         ttk.Label(csv_search_frame, text="CSV筛选").pack(side=tk.LEFT)
         ttk.Label(csv_search_frame, text="flux[").pack(side=tk.LEFT, padx=(6, 2))
@@ -637,6 +639,14 @@ class FitsImageViewer:
             state="readonly",
             width=4,
         ).pack(side=tk.LEFT)
+
+        ttk.Checkbutton(
+            csv_search_frame,
+            text="跳过大CSV",
+            variable=self.csv_filter_skip_large_rows_var,
+        ).pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Label(csv_search_frame, text="行>").pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Entry(csv_search_frame, textvariable=self.csv_filter_max_rows_var, width=5).pack(side=tk.LEFT)
 
         ttk.Button(csv_search_frame, text="向上搜", command=self._jump_to_prev_csv_row_by_filters).pack(
             side=tk.LEFT, padx=(6, 2)
@@ -1639,6 +1649,18 @@ class FitsImageViewer:
                 self.csv_search_median_flux_min_var.set("30")
                 self.csv_search_median_flux_max_var.set("800")
 
+            csv_skip_large_rows_enabled = bool(display_settings.get("csv_filter_skip_large_rows_enabled", False))
+            self.csv_filter_skip_large_rows_var.set(csv_skip_large_rows_enabled)
+
+            csv_filter_max_rows = str(display_settings.get("csv_filter_max_rows", "200")).strip()
+            try:
+                csv_filter_max_rows_int = int(float(csv_filter_max_rows))
+                if csv_filter_max_rows_int <= 0:
+                    raise ValueError("non-positive")
+            except Exception:
+                csv_filter_max_rows = "200"
+            self.csv_filter_max_rows_var.set(csv_filter_max_rows)
+
             csv_search_var_mode = str(display_settings.get("csv_search_variable_count_mode", "=0")).strip()
             if csv_search_var_mode not in {"=0", "=-1", ">0"}:
                 csv_search_var_mode = "=0"
@@ -1665,6 +1687,8 @@ class FitsImageViewer:
                 csv_search_median_flux_max=str(self.csv_search_median_flux_max_var.get()).strip(),
                 csv_search_variable_count_mode=str(self.csv_search_variable_count_mode_var.get()).strip(),
                 csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
+                csv_filter_skip_large_rows_enabled=bool(self.csv_filter_skip_large_rows_var.get()),
+                csv_filter_max_rows=str(self.csv_filter_max_rows_var.get()).strip(),
             )
         except Exception as e:
             self.logger.warning(f"保存显示设置失败: {e}")
@@ -3078,6 +3102,17 @@ class FitsImageViewer:
             raise ValueError("median_flux_norm 区间无效：下限必须小于上限")
         return flux_min, flux_max
 
+    def _parse_csv_large_rows_skip_settings(self) -> Tuple[bool, int]:
+        """解析是否跳过大CSV及其行数阈值配置。"""
+        enabled = bool(self.csv_filter_skip_large_rows_var.get()) if hasattr(self, "csv_filter_skip_large_rows_var") else False
+        try:
+            max_rows = int(float(str(self.csv_filter_max_rows_var.get()).strip()))
+        except Exception:
+            raise ValueError("大CSV行数阈值无效，请输入正整数")
+        if max_rows <= 0:
+            raise ValueError("大CSV行数阈值无效，必须大于0")
+        return enabled, max_rows
+
     def _row_matches_csv_filter_conditions(self, row: dict, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> bool:
         """按 AND 逻辑判断一行是否满足搜索条件。"""
         if not isinstance(row, dict):
@@ -3330,6 +3365,11 @@ class FitsImageViewer:
             if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
                 messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
                 return
+            try:
+                skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
+            except ValueError as e:
+                messagebox.showwarning("警告", str(e))
+                return
             self._save_display_settings()
             condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
 
@@ -3389,6 +3429,7 @@ class FitsImageViewer:
 
             # 逐文件搜索匹配行
             hit = None  # (file_node, file_path, output_dir, raw_row_index, row_dict)
+            skipped_large_csv_count = 0
             for file_i in file_iter_indices:
                 node = file_nodes[file_i]
                 values = self.directory_tree.item(node, "values")
@@ -3404,6 +3445,9 @@ class FitsImageViewer:
 
                 all_rows = self._load_variable_candidates_nonref_only(output_dir)
                 if not all_rows:
+                    continue
+                if skip_large_csv and len(all_rows) > large_csv_max_rows:
+                    skipped_large_csv_count += 1
                     continue
 
                 # 同一文件内，基于当前显示行继续向前/向后，确保“每次命中都跳到精确下一条/上一条”
@@ -3429,7 +3473,12 @@ class FitsImageViewer:
 
             if not hit:
                 direction_text = "向下" if direction > 0 else "向上"
-                self._set_csv_filter_search_status(f"当前命中：未找到 / 条件摘要：{condition_summary}")
+                if skip_large_csv:
+                    self._set_csv_filter_search_status(
+                        f"当前命中：未找到 / 条件摘要：{condition_summary} / 跳过大CSV={skipped_large_csv_count}"
+                    )
+                else:
+                    self._set_csv_filter_search_status(f"当前命中：未找到 / 条件摘要：{condition_summary}")
                 messagebox.showinfo("提示", f"在整棵树内，{direction_text}未找到满足条件的 CSV 行")
                 return
 
@@ -3482,9 +3531,14 @@ class FitsImageViewer:
             # 记录当前命中在原始CSV中的行索引，供下一次“向上/向下”作为稳定起点
             self._csv_search_current_raw_row_index = int(hit_raw_idx)
             self._csv_search_current_raw_output_dir = str(hit_output_dir)
-            self._set_csv_filter_search_status(
-                f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
-            )
+            if skip_large_csv:
+                self._set_csv_filter_search_status(
+                    f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary} / 跳过大CSV={skipped_large_csv_count}"
+                )
+            else:
+                self._set_csv_filter_search_status(
+                    f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
+                )
             self.logger.info(
                 "CSV条件命中: file=%s, raw_row=%d, display_row=%d, %s<flux<%s, var=%s, mpc=%s",
                 os.path.basename(hit_file_path),
@@ -3750,6 +3804,11 @@ class FitsImageViewer:
         if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
             messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
             return
+        try:
+            skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
+        except ValueError as e:
+            messagebox.showwarning("警告", str(e))
+            return
         self._save_display_settings()
         condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
 
@@ -3759,7 +3818,7 @@ class FitsImageViewer:
             return
 
         tasks, stats = self._collect_crossmatch_tasks_for_csv_filters(
-            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode
+            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode, skip_large_csv, large_csv_max_rows
         )
         if not tasks:
             messagebox.showinfo(
@@ -3768,7 +3827,8 @@ class FitsImageViewer:
                     "当前节点下没有命中筛选条件且可执行的 rank。\n"
                     f"条件：{condition_summary}\n"
                     f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
-                    f"无效rank行: {stats.get('invalid_rank_rows', 0)}"
+                    f"无效rank行: {stats.get('invalid_rank_rows', 0)}，"
+                    f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}"
                 ),
             )
             return
@@ -3788,7 +3848,8 @@ class FitsImageViewer:
             f"将串行执行 {len(tasks)} 次 Crossmatch（不并行）。\n"
             f"条件：{condition_summary}\n"
             f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
-            f"无效rank行: {stats.get('invalid_rank_rows', 0)}，重复rank去重: {stats.get('dedup_rank_rows', 0)}\n\n"
+            f"无效rank行: {stats.get('invalid_rank_rows', 0)}，重复rank去重: {stats.get('dedup_rank_rows', 0)}，"
+            f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}\n\n"
             f"{preview_text}{suffix}\n\n是否继续？"
         )
         if not messagebox.askyesno("确认批量重跑Crossmatch", confirm_msg):
@@ -3823,16 +3884,29 @@ class FitsImageViewer:
         script_paths = pipeline_settings.get("script_paths", {}) if isinstance(pipeline_settings, dict) else {}
         return script_paths.get("crossmatch_nonref_candidates", default_crossmatch)
 
-    def _collect_crossmatch_tasks_for_csv_filters(self, csv_paths, flux_min, flux_max, var_mode, mpc_mode):
+    def _collect_crossmatch_tasks_for_csv_filters(
+        self,
+        csv_paths,
+        flux_min,
+        flux_max,
+        var_mode,
+        mpc_mode,
+        skip_large_csv: bool = False,
+        large_csv_max_rows: int = 200,
+    ):
         """扫描CSV并收集需执行的 (csv_path, rank) 任务，按顺序串行。"""
         tasks = []
         matched_rows = 0
         invalid_rank_rows = 0
         dedup_rank_rows = 0
+        skipped_large_csv_count = 0
 
         for csv_path in csv_paths:
             output_dir = os.path.dirname(csv_path)
             rows = self._load_variable_candidates_nonref_only(output_dir)
+            if skip_large_csv and len(rows) > large_csv_max_rows:
+                skipped_large_csv_count += 1
+                continue
             seen_ranks = set()
             for row in rows:
                 if not self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
@@ -3858,6 +3932,7 @@ class FitsImageViewer:
             "matched_rows": matched_rows,
             "invalid_rank_rows": invalid_rank_rows,
             "dedup_rank_rows": dedup_rank_rows,
+            "skipped_large_csv_count": skipped_large_csv_count,
             "csv_count": len(csv_paths),
             "task_count": len(tasks),
         }
@@ -3970,6 +4045,7 @@ class FitsImageViewer:
             f"命中行: {stats.get('matched_rows', 0)}",
             f"无效rank行: {stats.get('invalid_rank_rows', 0)}",
             f"重复rank去重: {stats.get('dedup_rank_rows', 0)}",
+            f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}",
             f"执行任务: {total}",
             f"成功: {success_count}",
             f"失败: {failed_count}",
