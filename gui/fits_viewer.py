@@ -596,6 +596,12 @@ class FitsImageViewer:
             text="更新MJD(当前节点)",
             command=self._update_mjd_in_csvs_from_selected_node
         ).pack(side=tk.LEFT, padx=(5, 0))
+        self.rerun_crossmatch_filtered_button = ttk.Button(
+            refresh_frame,
+            text="重跑Crossmatch(筛选命中)",
+            command=self._rerun_crossmatch_for_selected_node_filtered_rows
+        )
+        self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
         # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
@@ -3666,6 +3672,288 @@ class FitsImageViewer:
                     f"跳过(未解析到UTC) {skipped_no_utc} 个"
                 ),
             )
+
+    def _rerun_crossmatch_for_selected_node_filtered_rows(self):
+        """对当前节点下命中CSV筛选条件的行，按顺序串行重跑 crossmatch。"""
+        if getattr(self, "_batch_crossmatch_running", False):
+            messagebox.showinfo("提示", "批量Crossmatch正在执行，请稍候")
+            return
+
+        selection = self.directory_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择一个目录或文件节点")
+            return
+
+        selected_item = selection[0]
+        restore_anchor_paths = self._build_nearest_restore_anchor_paths(selected_item)
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
+            messagebox.showwarning("警告", "请先选择下载目录树中的目录/文件节点（望远镜/日期/天区/FITS文件）")
+            return
+
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            messagebox.showwarning("警告", "输出根目录未设置或不存在")
+            return
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            messagebox.showwarning("警告", "下载目录未设置或不存在")
+            return
+
+        target_csv_paths = self._collect_nonref_inner_border_csv_paths_from_selected_node(
+            selected_item, download_dir, base_output_dir
+        )
+        if not target_csv_paths:
+            messagebox.showinfo("提示", "当前节点下未找到 variable_candidates_nonref_only_inner_border.csv")
+            return
+
+        # 复用当前CSV筛选条件
+        try:
+            flux_threshold = float(str(self.csv_search_median_flux_min_var.get()).strip())
+        except Exception:
+            messagebox.showwarning("警告", "median_flux_norm 阈值无效，请输入数字")
+            return
+        var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
+        mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
+            messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
+            return
+        self._save_display_settings()
+        condition_summary = self._get_csv_filter_condition_summary(flux_threshold, var_mode, mpc_mode)
+
+        crossmatch_script = self._get_crossmatch_nonref_script_path()
+        if not crossmatch_script or not os.path.exists(crossmatch_script):
+            messagebox.showwarning("警告", f"crossmatch脚本不存在:\n{crossmatch_script}")
+            return
+
+        tasks, stats = self._collect_crossmatch_tasks_for_csv_filters(
+            target_csv_paths, flux_threshold, var_mode, mpc_mode
+        )
+        if not tasks:
+            messagebox.showinfo(
+                "提示",
+                (
+                    "当前节点下没有命中筛选条件且可执行的 rank。\n"
+                    f"条件：{condition_summary}\n"
+                    f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
+                    f"无效rank行: {stats.get('invalid_rank_rows', 0)}"
+                ),
+            )
+            return
+
+        preview = []
+        for task in tasks[:8]:
+            csv_path = task["csv_path"]
+            rank_value = task["rank"]
+            try:
+                rel = os.path.relpath(csv_path, base_output_dir)
+            except Exception:
+                rel = csv_path
+            preview.append(f"- {rel} | rank={rank_value}")
+        preview_text = "\n".join(preview)
+        suffix = "\n..." if len(tasks) > 8 else ""
+        confirm_msg = (
+            f"将串行执行 {len(tasks)} 次 Crossmatch（不并行）。\n"
+            f"条件：{condition_summary}\n"
+            f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
+            f"无效rank行: {stats.get('invalid_rank_rows', 0)}，重复rank去重: {stats.get('dedup_rank_rows', 0)}\n\n"
+            f"{preview_text}{suffix}\n\n是否继续？"
+        )
+        if not messagebox.askyesno("确认批量重跑Crossmatch", confirm_msg):
+            return
+
+        self._batch_crossmatch_running = True
+        self._set_crossmatch_rerun_buttons_enabled(False)
+        if hasattr(self, "diff_progress_label"):
+            self.diff_progress_label.config(
+                text=f"批量Crossmatch准备执行: 0/{len(tasks)}",
+                foreground="blue",
+            )
+
+        thread = threading.Thread(
+            target=self._rerun_crossmatch_tasks_serial_thread,
+            args=(crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats),
+            daemon=True,
+        )
+        thread.start()
+
+    def _get_crossmatch_nonref_script_path(self):
+        """读取 crossmatch_nonref_candidates 脚本路径（含默认值回退）。"""
+        default_crossmatch = "D:/github/misaligned_fits/crossmatch_nonref_candidates.py"
+        pipeline_settings = {}
+        if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
+            try:
+                loaded = self.config_manager.get_diff_pipeline_settings()
+                if isinstance(loaded, dict):
+                    pipeline_settings = loaded
+            except Exception as e:
+                self.logger.warning(f"读取diff流水线配置失败，使用默认crossmatch脚本路径: {e}")
+        script_paths = pipeline_settings.get("script_paths", {}) if isinstance(pipeline_settings, dict) else {}
+        return script_paths.get("crossmatch_nonref_candidates", default_crossmatch)
+
+    def _collect_crossmatch_tasks_for_csv_filters(self, csv_paths, flux_threshold, var_mode, mpc_mode):
+        """扫描CSV并收集需执行的 (csv_path, rank) 任务，按顺序串行。"""
+        tasks = []
+        matched_rows = 0
+        invalid_rank_rows = 0
+        dedup_rank_rows = 0
+
+        for csv_path in csv_paths:
+            output_dir = os.path.dirname(csv_path)
+            rows = self._load_variable_candidates_nonref_only(output_dir)
+            seen_ranks = set()
+            for row in rows:
+                if not self._row_matches_csv_filter_conditions(row, flux_threshold, var_mode, mpc_mode):
+                    continue
+                matched_rows += 1
+                rank_value = self._try_parse_int_from_csv_value(row.get("rank"))
+                if rank_value is None or rank_value <= 0:
+                    invalid_rank_rows += 1
+                    continue
+                if rank_value in seen_ranks:
+                    dedup_rank_rows += 1
+                    continue
+                seen_ranks.add(rank_value)
+                tasks.append(
+                    {
+                        "csv_path": csv_path,
+                        "output_dir": output_dir,
+                        "rank": int(rank_value),
+                    }
+                )
+
+        stats = {
+            "matched_rows": matched_rows,
+            "invalid_rank_rows": invalid_rank_rows,
+            "dedup_rank_rows": dedup_rank_rows,
+            "csv_count": len(csv_paths),
+            "task_count": len(tasks),
+        }
+        return tasks, stats
+
+    def _set_crossmatch_rerun_buttons_enabled(self, enabled: bool):
+        """统一控制重跑Crossmatch相关按钮状态。"""
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "rerun_crossmatch_button"):
+            self.rerun_crossmatch_button.config(state=state)
+        if hasattr(self, "rerun_crossmatch_filtered_button"):
+            self.rerun_crossmatch_filtered_button.config(state=state)
+
+    def _rerun_crossmatch_tasks_serial_thread(self, crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats):
+        """后台串行执行批量 crossmatch 任务（单线程、按顺序）。"""
+        py = sys.executable or "python"
+        success_count = 0
+        failed = []
+        total = len(tasks)
+
+        try:
+            for index, task in enumerate(tasks, start=1):
+                csv_path = task["csv_path"]
+                output_dir = task["output_dir"]
+                rank_value = task["rank"]
+                cmd = [
+                    py,
+                    crossmatch_script,
+                    "--input-csv", csv_path,
+                    "--only-rank", str(rank_value),
+                ]
+                cmd_text = " ".join(cmd)
+                self.logger.info("批量重跑Crossmatch(%d/%d): %s", index, total, cmd_text)
+
+                if hasattr(self, "diff_progress_label"):
+                    self.parent_frame.after(
+                        0,
+                        lambda i=index, t=total, r=rank_value: self.diff_progress_label.config(
+                            text=f"批量Crossmatch执行中: {i}/{t} (rank={r})",
+                            foreground="blue",
+                        ),
+                    )
+
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                if proc.returncode != 0:
+                    err_text = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+                    failed.append((csv_path, rank_value, err_text))
+                    if proc.stdout:
+                        self.logger.error("crossmatch stdout:\n%s", proc.stdout)
+                    if proc.stderr:
+                        self.logger.error("crossmatch stderr:\n%s", proc.stderr)
+                    continue
+
+                if proc.stdout:
+                    self.logger.info("crossmatch stdout:\n%s", proc.stdout)
+                if proc.stderr:
+                    self.logger.warning("crossmatch stderr:\n%s", proc.stderr)
+
+                success_count += 1
+                # 仅在当前正在浏览同一输出目录时刷新缓存，避免跳屏
+                if os.path.normpath(str(getattr(self, "_current_csv_output_dir", ""))) == os.path.normpath(output_dir):
+                    self.parent_frame.after(
+                        0,
+                        lambda od=output_dir: self._reload_csv_candidates_for_display(od, keep_current_index=True),
+                    )
+
+        except Exception as e:
+            self.logger.error("批量重跑Crossmatch异常: %s", e, exc_info=True)
+            failed.append(("<thread>", -1, str(e)))
+        finally:
+            self.parent_frame.after(
+                0,
+                lambda: self._on_crossmatch_tasks_serial_done(
+                    success_count=success_count,
+                    failed=failed,
+                    restore_anchor_paths=restore_anchor_paths,
+                    condition_summary=condition_summary,
+                    stats=stats,
+                ),
+            )
+
+    def _on_crossmatch_tasks_serial_done(self, success_count, failed, restore_anchor_paths, condition_summary, stats):
+        """批量 crossmatch 串行任务结束后的UI收尾。"""
+        try:
+            self._refresh_directory_tree()
+            self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
+        except Exception as e:
+            self.logger.warning(f"批量Crossmatch完成后刷新目录失败: {e}")
+
+        self._batch_crossmatch_running = False
+        self._set_crossmatch_rerun_buttons_enabled(True)
+
+        failed_count = len(failed)
+        total = int(stats.get("task_count", success_count + failed_count))
+        if hasattr(self, "diff_progress_label"):
+            if failed_count == 0:
+                self.diff_progress_label.config(
+                    text=f"✓ 批量Crossmatch完成: {success_count}/{total}",
+                    foreground="green",
+                )
+            else:
+                self.diff_progress_label.config(
+                    text=f"✗ 批量Crossmatch部分失败: 成功{success_count} 失败{failed_count}",
+                    foreground="red",
+                )
+
+        summary_lines = [
+            f"条件: {condition_summary}",
+            f"扫描CSV: {stats.get('csv_count', 0)}",
+            f"命中行: {stats.get('matched_rows', 0)}",
+            f"无效rank行: {stats.get('invalid_rank_rows', 0)}",
+            f"重复rank去重: {stats.get('dedup_rank_rows', 0)}",
+            f"执行任务: {total}",
+            f"成功: {success_count}",
+            f"失败: {failed_count}",
+        ]
+
+        if failed_count > 0:
+            summary_lines.append("")
+            for csv_path, rank_value, err in failed[:5]:
+                summary_lines.append(f"- rank={rank_value} | {csv_path}: {err}")
+            if failed_count > 5:
+                summary_lines.append("...")
+            messagebox.showwarning("批量重跑Crossmatch完成（部分失败）", "\n".join(summary_lines))
+        else:
+            messagebox.showinfo("批量重跑Crossmatch完成", "\n".join(summary_lines))
 
     def _collect_nonref_inner_border_csv_paths_from_selected_node(self, selected_item, download_dir, base_output_dir):
         """收集当前节点映射输出目录下所有目标CSV路径。"""
