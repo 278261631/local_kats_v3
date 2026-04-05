@@ -30,7 +30,7 @@ from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Callable
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from datetime import datetime, timedelta
 from diff_orb_integration import DiffOrbIntegration
 import cv2
@@ -93,6 +93,14 @@ def _run_command_capture_text(cmd, **kwargs):
         _decode_subprocess_stream(proc.stdout),
         _decode_subprocess_stream(proc.stderr),
     )
+
+
+class _CsvFilterSearchSetupError(Exception):
+    """CSV 条件树遍历前置校验失败；kind 为 'info' 或 'warning'，对应对话框类型。"""
+
+    def __init__(self, message: str, *, kind: str = "warning"):
+        super().__init__(message)
+        self.kind = kind
 
 
 class FitsImageViewer:
@@ -2943,139 +2951,180 @@ class FitsImageViewer:
         }
         self._update_coordinate_display(file_info)
 
+    def _build_csv_filter_tree_search_context(self, direction: int) -> Dict[str, Any]:
+        """与「向上/向下搜」相同的前置校验与树遍历参数。失败抛出 _CsvFilterSearchSetupError。"""
+        if not hasattr(self, "directory_tree"):
+            raise _CsvFilterSearchSetupError("目录树未初始化", kind="info")
+        try:
+            flux_min, flux_max = self._parse_csv_flux_range()
+        except ValueError as e:
+            raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
+        var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
+        mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
+            raise _CsvFilterSearchSetupError("variable_count / mpc_count 条件无效", kind="warning")
+        try:
+            skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
+        except ValueError as e:
+            raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
+
+        selection = self.directory_tree.selection()
+        if selection:
+            selected_node = selection[0]
+        else:
+            roots = self.directory_tree.get_children("")
+            if not roots:
+                raise _CsvFilterSearchSetupError("目录树为空，无法搜索", kind="info")
+            selected_node = roots[0]
+            try:
+                self.directory_tree.selection_set(selected_node)
+                self.directory_tree.focus(selected_node)
+                self.directory_tree.see(selected_node)
+            except Exception:
+                pass
+
+        tree_order = self._collect_tree_subtree_preorder(root_node=None)
+        if not tree_order:
+            raise _CsvFilterSearchSetupError("当前范围内没有可搜索节点", kind="info")
+
+        file_nodes = []
+        for node in tree_order:
+            tags = self.directory_tree.item(node, "tags")
+            if "fits_file" in tags:
+                values = self.directory_tree.item(node, "values")
+                if values:
+                    file_nodes.append(node)
+        if not file_nodes:
+            raise _CsvFilterSearchSetupError("整棵树内没有 FITS 文件", kind="info")
+
+        if selected_node in file_nodes:
+            start_file_idx = file_nodes.index(selected_node)
+        else:
+            try:
+                selected_pos = tree_order.index(selected_node)
+            except ValueError:
+                selected_pos = 0
+            positions = {n: tree_order.index(n) for n in file_nodes}
+            if direction > 0:
+                candidates = [i for i, n in enumerate(file_nodes) if positions[n] >= selected_pos]
+                start_file_idx = candidates[0] if candidates else 0
+            else:
+                candidates = [i for i, n in enumerate(file_nodes) if positions[n] <= selected_pos]
+                start_file_idx = candidates[-1] if candidates else (len(file_nodes) - 1)
+
+        if direction > 0:
+            file_iter_indices = range(start_file_idx, len(file_nodes))
+        else:
+            file_iter_indices = range(start_file_idx, -1, -1)
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            raise _CsvFilterSearchSetupError("下载目录未设置或不存在", kind="warning")
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            raise _CsvFilterSearchSetupError("输出目录未设置或不存在", kind="warning")
+
+        return {
+            "flux_min": flux_min,
+            "flux_max": flux_max,
+            "var_mode": var_mode,
+            "mpc_mode": mpc_mode,
+            "skip_large_csv": skip_large_csv,
+            "large_csv_max_rows": large_csv_max_rows,
+            "condition_summary": condition_summary,
+            "file_nodes": file_nodes,
+            "file_iter_indices": file_iter_indices,
+            "selected_node": selected_node,
+            "download_dir": download_dir,
+            "base_output_dir": base_output_dir,
+        }
+
+    def _iter_csv_filter_hits_from_context(
+        self,
+        ctx: Dict[str, Any],
+        direction: int,
+        *,
+        stop_after_first: bool,
+        stats: Dict[str, int],
+    ) -> Iterator[Tuple[Any, str, str, int, dict]]:
+        """按 ctx 在目录树序与行序上产出命中：(file_node, file_path, output_dir, raw_idx, row)。"""
+        flux_min = ctx["flux_min"]
+        flux_max = ctx["flux_max"]
+        var_mode = ctx["var_mode"]
+        mpc_mode = ctx["mpc_mode"]
+        skip_large_csv = ctx["skip_large_csv"]
+        large_csv_max_rows = ctx["large_csv_max_rows"]
+        file_nodes = ctx["file_nodes"]
+        file_iter_indices = ctx["file_iter_indices"]
+        selected_node = ctx["selected_node"]
+        download_dir = ctx["download_dir"]
+        base_output_dir = ctx["base_output_dir"]
+
+        for file_i in file_iter_indices:
+            node = file_nodes[file_i]
+            values = self.directory_tree.item(node, "values")
+            if not values:
+                continue
+            file_path = values[0]
+            output_dir = self._map_download_file_to_output_dir(file_path, download_dir, base_output_dir)
+            if not output_dir:
+                continue
+            csv_path = self._get_nonref_candidates_csv_path(output_dir)
+            if not csv_path:
+                continue
+
+            all_rows = self._load_variable_candidates_nonref_only(output_dir)
+            if not all_rows:
+                continue
+            if skip_large_csv and len(all_rows) > large_csv_max_rows:
+                stats["skipped_large_csv"] = stats.get("skipped_large_csv", 0) + 1
+                continue
+
+            current_raw_idx = -1
+            if selected_node == node:
+                current_raw_idx = self._resolve_current_raw_csv_index(output_dir, all_rows)
+
+            if direction > 0:
+                row_start = (current_raw_idx + 1) if current_raw_idx >= 0 else 0
+                row_range = range(row_start, len(all_rows))
+            else:
+                row_start = (current_raw_idx - 1) if current_raw_idx >= 0 else (len(all_rows) - 1)
+                row_range = range(row_start, -1, -1)
+
+            for raw_idx in row_range:
+                row = all_rows[raw_idx]
+                if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
+                    yield (node, file_path, output_dir, raw_idx, row)
+                    if stop_after_first:
+                        return
+
     def _jump_csv_row_by_filters(self, direction: int):
         """在整棵树内，按当前选中节点向上/向下搜索 CSV 行并精确定位。"""
         try:
-            if not hasattr(self, "directory_tree"):
-                messagebox.showinfo("提示", "目录树未初始化")
+            try:
+                ctx = self._build_csv_filter_tree_search_context(direction)
+            except _CsvFilterSearchSetupError as e:
+                if e.kind == "info":
+                    messagebox.showinfo("提示", str(e))
+                else:
+                    messagebox.showwarning("警告", str(e))
                 return
 
-            # 解析筛选条件
-            try:
-                flux_min, flux_max = self._parse_csv_flux_range()
-            except ValueError as e:
-                messagebox.showwarning("警告", str(e))
-                return
-            var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
-            mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
-            if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
-                messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
-                return
-            try:
-                skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
-            except ValueError as e:
-                messagebox.showwarning("警告", str(e))
-                return
             self._save_display_settings()
-            condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
+            flux_min, flux_max = ctx["flux_min"], ctx["flux_max"]
+            var_mode, mpc_mode = ctx["var_mode"], ctx["mpc_mode"]
+            skip_large_csv = ctx["skip_large_csv"]
+            condition_summary = ctx["condition_summary"]
 
-            selection = self.directory_tree.selection()
-            if selection:
-                selected_node = selection[0]
-            else:
-                roots = self.directory_tree.get_children("")
-                if not roots:
-                    messagebox.showinfo("提示", "目录树为空，无法搜索")
-                    return
-                selected_node = roots[0]
-                try:
-                    self.directory_tree.selection_set(selected_node)
-                    self.directory_tree.focus(selected_node)
-                    self.directory_tree.see(selected_node)
-                except Exception:
-                    pass
-
-            tree_order = self._collect_tree_subtree_preorder(root_node=None)
-            if not tree_order:
-                messagebox.showinfo("提示", "当前范围内没有可搜索节点")
-                return
-
-            # 仅保留文件节点，按目录树可见顺序
-            file_nodes = []
-            for node in tree_order:
-                tags = self.directory_tree.item(node, "tags")
-                if "fits_file" in tags:
-                    values = self.directory_tree.item(node, "values")
-                    if values:
-                        file_nodes.append(node)
-            if not file_nodes:
-                messagebox.showinfo("提示", "整棵树内没有 FITS 文件")
-                return
-
-            # 起始文件索引：优先当前选中节点；若不是文件节点，则从其后（向下）/其前（向上）最近文件开始
-            if selected_node in file_nodes:
-                start_file_idx = file_nodes.index(selected_node)
-            else:
-                try:
-                    selected_pos = tree_order.index(selected_node)
-                except ValueError:
-                    selected_pos = 0
-                positions = {n: tree_order.index(n) for n in file_nodes}
-                if direction > 0:
-                    candidates = [i for i, n in enumerate(file_nodes) if positions[n] >= selected_pos]
-                    start_file_idx = candidates[0] if candidates else 0
-                else:
-                    candidates = [i for i, n in enumerate(file_nodes) if positions[n] <= selected_pos]
-                    start_file_idx = candidates[-1] if candidates else (len(file_nodes) - 1)
-
-            # 预计算文件遍历顺序
-            if direction > 0:
-                file_iter_indices = range(start_file_idx, len(file_nodes))
-            else:
-                file_iter_indices = range(start_file_idx, -1, -1)
-
-            download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
-            base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
-            if not download_dir or not os.path.isdir(download_dir):
-                messagebox.showwarning("警告", "下载目录未设置或不存在")
-                return
-            if not base_output_dir or not os.path.isdir(base_output_dir):
-                messagebox.showwarning("警告", "输出目录未设置或不存在")
-                return
-
-            # 逐文件搜索匹配行
-            hit = None  # (file_node, file_path, output_dir, raw_row_index, row_dict)
-            skipped_large_csv_count = 0
-            for file_i in file_iter_indices:
-                node = file_nodes[file_i]
-                values = self.directory_tree.item(node, "values")
-                if not values:
-                    continue
-                file_path = values[0]
-                output_dir = self._map_download_file_to_output_dir(file_path, download_dir, base_output_dir)
-                if not output_dir:
-                    continue
-                csv_path = self._get_nonref_candidates_csv_path(output_dir)
-                if not csv_path:
-                    continue
-
-                all_rows = self._load_variable_candidates_nonref_only(output_dir)
-                if not all_rows:
-                    continue
-                if skip_large_csv and len(all_rows) > large_csv_max_rows:
-                    skipped_large_csv_count += 1
-                    continue
-
-                # 同一文件内，基于当前显示行继续向前/向后，确保“每次命中都跳到精确下一条/上一条”
-                current_raw_idx = -1
-                if selected_node == node:
-                    current_raw_idx = self._resolve_current_raw_csv_index(output_dir, all_rows)
-
-                if direction > 0:
-                    row_start = (current_raw_idx + 1) if current_raw_idx >= 0 else 0
-                    row_range = range(row_start, len(all_rows))
-                else:
-                    row_start = (current_raw_idx - 1) if current_raw_idx >= 0 else (len(all_rows) - 1)
-                    row_range = range(row_start, -1, -1)
-
-                for raw_idx in row_range:
-                    row = all_rows[raw_idx]
-                    if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
-                        hit = (node, file_path, output_dir, raw_idx, row)
-                        break
-
-                if hit:
-                    break
+            stats = {"skipped_large_csv": 0}
+            hit = None
+            for h in self._iter_csv_filter_hits_from_context(
+                ctx, direction, stop_after_first=True, stats=stats
+            ):
+                hit = h
+                break
+            skipped_large_csv_count = stats.get("skipped_large_csv", 0)
 
             if not hit:
                 direction_text = "向下" if direction > 0 else "向上"
@@ -6570,32 +6619,39 @@ class FitsImageViewer:
             return None
         return os.path.normpath(root)
 
-    def _resolve_current_frame_diff_output_dir_for_export(self) -> Optional[str]:
-        """解析当前选中帧对应的 Diff 输出目录（需含 inner_border CSV）。"""
-        cur = getattr(self, "_current_csv_output_dir", None)
-        if cur and os.path.isdir(cur) and self._get_nonref_candidates_csv_path(cur):
-            return os.path.normpath(cur)
-        if not self.selected_file_path:
-            return None
-        dl = self.get_download_dir_callback() if self.get_download_dir_callback else None
-        base = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
-        if not dl or not base:
-            return None
-        mapped = self._map_download_file_to_output_dir(self.selected_file_path, dl, base)
-        if mapped and os.path.isdir(mapped) and self._get_nonref_candidates_csv_path(mapped):
-            return os.path.normpath(mapped)
-        return None
-
     def _export_filtered_aligned_csv_patches(self):
-        """后台导出：当前帧、符合 CSV 筛选条件的 Aligned 局部图（无星标），尺寸与拉伸同 CSV 设置。
+        """主线程按「向下搜」相同规则枚举全部命中，后台逐条导出 Aligned 局部 PNG（无星标）。
 
         保存目录：配置的 diff_output_directory 的**父目录**下新建 ai_{YYYYMMDD}。
         """
         btn = getattr(self, "_export_aligned_filtered_button", None)
 
+        try:
+            ctx = self._build_csv_filter_tree_search_context(direction=1)
+        except _CsvFilterSearchSetupError as e:
+            if e.kind == "info":
+                messagebox.showinfo("提示", str(e))
+            else:
+                messagebox.showwarning("警告", str(e))
+            return
+
+        self._save_display_settings()
+        stats: Dict[str, int] = {"skipped_large_csv": 0}
+        hits = list(
+            self._iter_csv_filter_hits_from_context(ctx, 1, stop_after_first=False, stats=stats)
+        )
+        if not hits:
+            msg = "在整棵树内，向下未找到满足条件的 CSV 行。"
+            if ctx["skip_large_csv"]:
+                msg += f"\n（跳过大 CSV 的文件数：{stats.get('skipped_large_csv', 0)}）"
+            messagebox.showinfo("提示", msg)
+            return
+
+        condition_summary = ctx["condition_summary"]
+
         def worker():
             try:
-                n, dest = self._export_filtered_aligned_csv_patches_worker()
+                n, dest = self._export_filtered_aligned_csv_patches_worker(hits, condition_summary)
                 self.parent_frame.after(
                     0,
                     lambda: messagebox.showinfo(
@@ -6619,44 +6675,13 @@ class FitsImageViewer:
             btn.config(state="disabled")
         threading.Thread(target=worker, daemon=True).start()
 
-    def _export_filtered_aligned_csv_patches_worker(self) -> Tuple[int, str]:
+    def _export_filtered_aligned_csv_patches_worker(
+        self, hits: List[Tuple[Any, str, str, int, dict]], condition_summary: str
+    ) -> Tuple[int, str]:
         """执行导出，返回 (导出数量, 目标目录路径)。可能抛出 ValueError。"""
         root = self._get_configured_diff_output_root_dir()
         if not root:
             raise ValueError("请先在配置中设置 diff 输出目录（且路径存在）。")
-
-        frame_dir = self._resolve_current_frame_diff_output_dir_for_export()
-        if not frame_dir:
-            raise ValueError(
-                "无法解析当前帧的 Diff 输出目录或缺少 variable_candidates_nonref_only_inner_border.csv。\n"
-                "请先选中已跑过 Diff 的 FITS，或进入 CSV 候选浏览模式。"
-            )
-
-        try:
-            flux_min, flux_max = self._parse_csv_flux_range()
-        except ValueError as e:
-            raise ValueError(str(e)) from e
-
-        var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
-        mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
-        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
-            raise ValueError("variable_count / mpc_count 条件无效")
-
-        aligned_fits = self._find_primary_aligned_fits_in_output_dir(frame_dir)
-        if not aligned_fits:
-            raise ValueError(f"在输出目录中未找到 *.02rp.fit：\n{frame_dir}")
-
-        all_rows = self._load_variable_candidates_nonref_only(frame_dir)
-        if not all_rows:
-            raise ValueError("inner_border CSV 无数据行。")
-
-        matching = [
-            row
-            for row in all_rows
-            if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode)
-        ]
-        if not matching:
-            raise ValueError("没有符合当前 CSV 筛选条件的行。")
 
         root_path = Path(os.path.normpath(root)).resolve()
         parent_dir = root_path.parent
@@ -6667,10 +6692,6 @@ class FitsImageViewer:
         dest_dir = str(parent_dir / f"ai_{datetime.now().strftime('%Y%m%d')}")
         os.makedirs(dest_dir, exist_ok=True)
 
-        aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
-        if aligned_data is None:
-            raise ValueError(f"无法读取 aligned FITS：\n{aligned_fits}")
-
         patch_size_px = self._get_csv_patch_size_px()
         half = max(1, int(round(patch_size_px / 2.0)))
         hist_level = (
@@ -6679,18 +6700,43 @@ class FitsImageViewer:
             else "high"
         )
 
-        frame_tag = self._sanitize_output_name(os.path.basename(frame_dir.rstrip("/\\")))
+        cached_output_dir: Optional[str] = None
+        aligned_data = None
+        aligned_header = None
         n_ok = 0
-        for idx, row in enumerate(matching):
+        for seq_idx, (_node, _file_path, output_dir, raw_idx, row) in enumerate(hits):
+            if output_dir != cached_output_dir:
+                aligned_fits = self._find_primary_aligned_fits_in_output_dir(output_dir)
+                if not aligned_fits:
+                    self.logger.warning("跳过：输出目录中未找到 aligned FITS：%s", output_dir)
+                    cached_output_dir = None
+                    aligned_data = None
+                    aligned_header = None
+                    continue
+                aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
+                if aligned_data is None:
+                    self.logger.warning("跳过：无法读取 aligned FITS：%s", aligned_fits)
+                    cached_output_dir = None
+                    aligned_data = None
+                    aligned_header = None
+                    continue
+                cached_output_dir = output_dir
+
+            if aligned_data is None or aligned_header is None:
+                continue
+
             x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
             if x is None or y is None:
-                self.logger.warning("跳过一行：无法解析像素坐标 (index=%s)", idx)
+                self.logger.warning(
+                    "跳过一行：无法解析像素坐标 output_dir=%s raw_idx=%s", output_dir, raw_idx
+                )
                 continue
             patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=half)
             u8 = self._stretch_patch_to_uint8(patch, level=hist_level)
-            rank_raw = str(row.get("rank", "") or "").strip() or str(idx + 1)
+            rank_raw = str(row.get("rank", "") or "").strip() or str(seq_idx + 1)
             rank_safe = self._sanitize_output_name(rank_raw)
-            fname = f"{frame_tag}_rank{rank_safe}_{idx:04d}_aligned.png"
+            frame_tag = self._sanitize_output_name(os.path.basename(output_dir.rstrip("/\\")))
+            fname = f"{frame_tag}_rank{rank_safe}_{n_ok:04d}_aligned.png"
             out_path = os.path.join(dest_dir, fname)
             if not cv2.imwrite(out_path, u8):
                 self.logger.warning("写入失败: %s", out_path)
@@ -6698,13 +6744,14 @@ class FitsImageViewer:
             n_ok += 1
 
         self.logger.info(
-            "导出 Aligned(筛选): %d 张 -> %s (条件: %s)",
+            "导出 Aligned(向下搜全量): %d 张 -> %s (条件: %s, 枚举命中=%d)",
             n_ok,
             dest_dir,
-            self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode),
+            condition_summary,
+            len(hits),
         )
         if n_ok == 0:
-            raise ValueError("没有可导出的候选（坐标解析失败或写入失败）。")
+            raise ValueError("没有可导出的候选（缺少 aligned FITS、坐标解析失败或写入失败）。")
         return n_ok, os.path.abspath(dest_dir)
 
     def _display_csv_candidate_by_index(self, index: int):
