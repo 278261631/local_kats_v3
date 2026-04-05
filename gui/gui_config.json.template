@@ -37,9 +37,7 @@
   },
   "batch_process_settings": {
     "thread_count": 4,
-    "fast_mode": true,
-    "stretch_method": "percentile",
-    "percentile_low": 99.95
+    "fast_mode": true
   },
   "diff_pipeline_settings": {
     "script_paths": {
@@ -78,6 +76,6 @@
   },
   "url_template_type": "standard",
   "_note": "URL模板现在从独立的config/url_config.json文件中读取，请修改该文件来配置URL",
-  "_batch_process_note": "batch_process_settings: thread_count, fast_mode, stretch_method, percentile_low。检测结果筛选/导出/对齐评判相关项已从 GUI 移除。",
+  "_batch_process_note": "batch_process_settings: thread_count（下载/URL 构建）、fast_mode（Diff 替代流水线是否跳过渲染对齐结果）。",
   "_diff_pipeline_note": "diff_pipeline_settings 用于替代流程命令（脚本路径与关键参数），无需新增GUI控件，直接编辑配置文件生效。"
 }

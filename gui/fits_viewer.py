@@ -255,16 +255,6 @@ class FitsImageViewer:
             if not self.wcs_checker:
                 self.wcs_check_button.config(state="disabled", text="WCS检查不可用")
 
-        # 初始化高级设置变量（这些变量会在高级设置标签页中使用）
-        self.outlier_var = tk.BooleanVar(value=False)  # 默认不选中outlier
-        self.hot_cold_var = tk.BooleanVar(value=False)  # 默认不选中hot_cold
-        self.adaptive_median_var = tk.BooleanVar(value=True)  # 默认选中adaptive_median
-        self.remove_lines_var = tk.BooleanVar(value=True)  # 默认选中去除亮线
-        self.alignment_var = tk.StringVar(value="wcs")  # 默认选择wcs
-        self.jaggedness_ratio_var = tk.StringVar(value="2.0")
-        self.detection_method_var = tk.StringVar(value="contour")
-        self.overlap_edge_exclusion_px_var = tk.StringVar(value="40")
-
         # AI GOOD/BAD 自动标记置信度阈值（在高级设置中可调）
         self.ai_confidence_threshold_var = tk.DoubleVar(value=0.5)
 
@@ -309,10 +299,6 @@ class FitsImageViewer:
         self.fast_mode_checkbox = ttk.Checkbutton(toolbar_frame3, text="快速模式（减少中间文件）",
                                                   variable=self.fast_mode_var)
         self.fast_mode_checkbox.pack(side=tk.LEFT, padx=(0, 0))
-
-        # 拉伸方法变量（控件移至“高级设置”标签页）
-        self.stretch_method_var = tk.StringVar(value="percentile")  # 默认百分位数拉伸
-        self.percentile_var = tk.StringVar(value="99.95")  # 默认99.95%
 
         # 检测结果导航按钮
         ttk.Label(toolbar_frame3, text="  |  ").pack(side=tk.LEFT, padx=(10, 5))
@@ -839,64 +825,9 @@ class FitsImageViewer:
         try:
             batch_settings = self.config_manager.get_batch_process_settings()
 
-            # 降噪方式
-            noise_method = batch_settings.get('noise_method', 'median')
-            # 重置所有降噪选项
-            self.outlier_var.set(False)
-            self.hot_cold_var.set(False)
-            self.adaptive_median_var.set(False)
-
-            if noise_method == 'median':
-                self.adaptive_median_var.set(True)
-            elif noise_method == 'gaussian':
-                self.outlier_var.set(True)
-            # 如果是'none'，所有选项都不选中
-
-            # 对齐方式
-            alignment_method = batch_settings.get('alignment_method', 'orb')
-            # 映射配置文件中的值到GUI选项
-            alignment_mapping = {
-                'orb': 'rigid',
-                'ecc': 'wcs',
-                'astropy_reproject': 'astropy_reproject',
-                'swarp': 'swarp'
-            }
-            self.alignment_var.set(alignment_mapping.get(alignment_method, 'rigid'))
-
-            # 去除亮线
-            remove_bright_lines = batch_settings.get('remove_bright_lines', True)
-            self.remove_lines_var.set(remove_bright_lines)
-
-            # 快速模式
+            # 快速模式（影响替代 Diff 流水线是否跳过「渲染对齐结果」）
             fast_mode = batch_settings.get('fast_mode', True)
             self.fast_mode_var.set(fast_mode)
-
-            # 拉伸方法
-            stretch_method = batch_settings.get('stretch_method', 'percentile')
-            if stretch_method == 'percentile':
-                self.stretch_method_var.set('percentile')
-            elif stretch_method == 'minmax':
-                self.stretch_method_var.set('peak')
-            elif stretch_method == 'asinh':
-                self.stretch_method_var.set('peak')
-            else:
-                self.stretch_method_var.set('percentile')
-
-            # 百分位参数
-            percentile_low = batch_settings.get('percentile_low', 99.95)
-            self.percentile_var.set(str(percentile_low))
-
-            # 锯齿比率
-            max_jaggedness_ratio = batch_settings.get('max_jaggedness_ratio', 2.0)
-            self.jaggedness_ratio_var.set(str(max_jaggedness_ratio))
-
-            # 检测方法
-            detection_method = batch_settings.get('detection_method', 'contour')
-            self.detection_method_var.set(detection_method)
-
-            # 重叠边界剔除宽度（像素）
-            overlap_edge_exclusion_px = batch_settings.get('overlap_edge_exclusion_px', 40)
-            self.overlap_edge_exclusion_px_var.set(str(overlap_edge_exclusion_px))
 
             # AI GOOD/BAD 自动标记相关设置
             try:
@@ -905,11 +836,7 @@ class FitsImageViewer:
             except Exception:
                 pass
 
-            self.logger.info(
-                f"批量处理参数已加载到控件: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={remove_bright_lines}, "
-                f"快速模式={fast_mode}, 拉伸={stretch_method}, 百分位={percentile_low}%, 锯齿比率={max_jaggedness_ratio}, "
-                f"检测方法={detection_method}, 边界剔除宽度={overlap_edge_exclusion_px}px"
-            )
+            self.logger.info(f"批量处理参数已加载到控件: 快速模式={fast_mode}")
 
         except Exception as e:
             self.logger.error(f"加载批量处理参数失败: {str(e)}")
@@ -920,34 +847,8 @@ class FitsImageViewer:
             return
 
         try:
-            # 绑定降噪方式复选框
-            self.outlier_var.trace('w', self._on_batch_settings_change)
-            self.hot_cold_var.trace('w', self._on_batch_settings_change)
-            self.adaptive_median_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定对齐方式单选框
-            self.alignment_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定去除亮线复选框
-            self.remove_lines_var.trace('w', self._on_batch_settings_change)
-
             # 绑定快速模式复选框
             self.fast_mode_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定拉伸方法单选框
-            self.stretch_method_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定百分位输入框（使用延迟保存，避免每次按键都保存）
-            self.percentile_var.trace('w', self._on_percentile_change)
-
-            # 绑定锯齿比率输入框
-            self.jaggedness_ratio_var.trace('w', self._on_jaggedness_ratio_change)
-
-            # 绑定检测方法单选框
-            self.detection_method_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定重叠边界剔除宽度输入框
-            self.overlap_edge_exclusion_px_var.trace('w', self._on_overlap_edge_exclusion_px_change)
 
             # 绑定AI置信度阈值输入框
             self.ai_confidence_threshold_var.trace('w', self._on_ai_confidence_threshold_change)
@@ -958,139 +859,17 @@ class FitsImageViewer:
             self.logger.error(f"绑定批量处理参数事件失败: {str(e)}")
 
     def _on_batch_settings_change(self, *args):
-        """批量处理参数变化时保存到配置文件"""
+        """快速模式变化时保存到配置文件"""
         if not self.config_manager:
             return
 
         try:
-            # 确定降噪方式
-            noise_method = 'none'
-            if self.adaptive_median_var.get():
-                noise_method = 'median'
-            elif self.outlier_var.get():
-                noise_method = 'gaussian'
-            elif self.hot_cold_var.get():
-                noise_method = 'gaussian'  # hot_cold也映射到gaussian
-
-            # 确定对齐方式 - 映射GUI选项到配置文件值
-            alignment_mapping = {
-                'rigid': 'orb',
-                'wcs': 'ecc',
-                'astropy_reproject': 'astropy_reproject',
-                'swarp': 'swarp'
-            }
-            alignment_method = alignment_mapping.get(self.alignment_var.get(), 'orb')
-
-            # 获取检测方法
-            detection_method = self.detection_method_var.get()
-
-            # 重叠边界剔除宽度
-            overlap_edge_exclusion_px = 40
-            try:
-                overlap_edge_exclusion_px = int(float(self.overlap_edge_exclusion_px_var.get()))
-                overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-            except Exception:
-                overlap_edge_exclusion_px = 40
-
-            # 保存到配置文件
             self.config_manager.update_batch_process_settings(
-                noise_method=noise_method,
-                alignment_method=alignment_method,
-                remove_bright_lines=self.remove_lines_var.get(),
                 fast_mode=self.fast_mode_var.get(),
-                detection_method=detection_method,
-                overlap_edge_exclusion_px=overlap_edge_exclusion_px,
             )
-
-            self.logger.info(
-                f"批量处理参数已保存: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={self.remove_lines_var.get()}, "
-                f"快速模式={self.fast_mode_var.get()}, 检测方法={detection_method}, 边界剔除={overlap_edge_exclusion_px}px"
-            )
-
+            self.logger.info(f"批量处理参数已保存: 快速模式={self.fast_mode_var.get()}")
         except Exception as e:
             self.logger.error(f"保存批量处理参数失败: {str(e)}")
-
-    def _on_percentile_change(self, *args):
-        """百分位参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_percentile_save_timer'):
-            self.parent_frame.after_cancel(self._percentile_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._percentile_save_timer = self.parent_frame.after(1000, self._save_percentile)
-
-    def _save_percentile(self):
-        """保存百分位参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            percentile_low = float(self.percentile_var.get())
-            self.config_manager.update_batch_process_settings(percentile_low=percentile_low)
-            self.logger.info(f"百分位参数已保存: {percentile_low}%")
-        except ValueError:
-            self.logger.warning(f"无效的百分位值: {self.percentile_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存百分位参数失败: {str(e)}")
-
-    def _on_jaggedness_ratio_change(self, *args):
-        """锯齿比率参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_jaggedness_save_timer'):
-            self.parent_frame.after_cancel(self._jaggedness_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._jaggedness_save_timer = self.parent_frame.after(1000, self._save_jaggedness_ratio)
-
-    def _save_jaggedness_ratio(self):
-        """保存锯齿比率参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            max_jaggedness_ratio = float(self.jaggedness_ratio_var.get())
-            self.config_manager.update_batch_process_settings(max_jaggedness_ratio=max_jaggedness_ratio)
-            self.logger.info(f"锯齿比率参数已保存: {max_jaggedness_ratio}")
-        except ValueError:
-            self.logger.warning(f"无效的锯齿比率值: {self.jaggedness_ratio_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存锯齿比率参数失败: {str(e)}")
-
-    def _on_overlap_edge_exclusion_px_change(self, *args):
-        """重叠边界剔除宽度变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        if hasattr(self, '_overlap_edge_exclusion_save_timer'):
-            self.parent_frame.after_cancel(self._overlap_edge_exclusion_save_timer)
-
-        self._overlap_edge_exclusion_save_timer = self.parent_frame.after(
-            1000, self._save_overlap_edge_exclusion_px
-        )
-
-
-    def _save_overlap_edge_exclusion_px(self):
-        """保存重叠边界剔除宽度到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            overlap_edge_exclusion_px = int(float(self.overlap_edge_exclusion_px_var.get()))
-            overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-            self.config_manager.update_batch_process_settings(
-                overlap_edge_exclusion_px=overlap_edge_exclusion_px
-            )
-            self.logger.info(f"重叠边界剔除宽度已保存: {overlap_edge_exclusion_px}px")
-        except ValueError:
-            self.logger.warning(f"无效的重叠边界剔除宽度: {self.overlap_edge_exclusion_px_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存重叠边界剔除宽度失败: {str(e)}")
 
     def _on_ai_confidence_threshold_change(self, *args):
         """AI置信度阈值变化时保存到配置文件（延迟保存）"""
@@ -12775,13 +12554,8 @@ class FitsImageViewer:
                 if self.config_manager:
                     batch_settings = self.config_manager.get_batch_process_settings()
                     f.write("Diff处理参数:\n")
-                    f.write(f"  降噪方法: {batch_settings.get('noise_method', 'N/A')}\n")
-                    f.write(f"  对齐方法: {batch_settings.get('alignment_method', 'N/A')}\n")
-                    f.write(f"  去除亮线: {batch_settings.get('remove_bright_lines', 'N/A')}\n")
                     f.write(f"  快速模式: {batch_settings.get('fast_mode', 'N/A')}\n")
-                    f.write(f"  拉伸方法: {batch_settings.get('stretch_method', 'N/A')}\n")
-                    f.write(f"  百分位参数: {batch_settings.get('percentile_low', 'N/A')}\n")
-                    f.write(f"  最大锯齿比率: {batch_settings.get('max_jaggedness_ratio', 'N/A')}\n\n")
+                    f.write(f"  下载线程数: {batch_settings.get('thread_count', 'N/A')}\n\n")
 
                 # Skybot查询结果
                 skybot_result = self.skybot_result_label.cget("text")

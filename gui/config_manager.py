@@ -67,8 +67,6 @@ class ConfigManager:
             "batch_process_settings": {
                 "thread_count": 4,  # 批量处理线程数（GUI默认值：4）
                 "fast_mode": True,  # 快速模式（GUI默认值：True）
-                "stretch_method": "percentile",  # 拉伸方法: percentile, minmax, asinh（GUI默认值：percentile）
-                "percentile_low": 99.95,  # 百分位参数（GUI默认值：99.95）
             },
             "diff_pipeline_settings": {
                 "script_paths": {
