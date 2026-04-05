@@ -594,6 +594,12 @@ class FitsImageViewer:
             side=tk.LEFT, padx=(6, 2)
         )
         ttk.Button(csv_search_frame, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(side=tk.LEFT)
+        self._export_aligned_filtered_button = ttk.Button(
+            csv_search_frame,
+            text="导出Aligned(筛选)",
+            command=self._export_filtered_aligned_csv_patches,
+        )
+        self._export_aligned_filtered_button.pack(side=tk.LEFT, padx=(8, 0))
 
         self.csv_filter_search_status_var = tk.StringVar(value="当前命中：-- / 条件摘要：--")
         ttk.Label(
@@ -6519,11 +6525,10 @@ class FitsImageViewer:
         except Exception:
             return None
 
-    def _get_csv_mode_aligned_fits(self):
-        """CSV模式下获取aligned FITS路径（优先*.02rp.fit）。"""
-        output_dir = getattr(self, "_current_csv_output_dir", None)
+    def _find_primary_aligned_fits_in_output_dir(self, output_dir: str) -> Optional[str]:
+        """在 Diff 输出目录中查找用于 CSV 局部分显示的 aligned FITS（优先 *.02rp.fit）。"""
         if not output_dir or not os.path.exists(output_dir):
-            return self.selected_file_path if self.selected_file_path and os.path.exists(self.selected_file_path) else None
+            return None
         try:
             rp_files = sorted(Path(output_dir).glob("*.02rp.fit"))
             if rp_files:
@@ -6532,7 +6537,15 @@ class FitsImageViewer:
             if fallback:
                 return str(fallback[0])
         except Exception:
-            pass
+            return None
+        return None
+
+    def _get_csv_mode_aligned_fits(self):
+        """CSV模式下获取aligned FITS路径（优先*.02rp.fit）。"""
+        output_dir = getattr(self, "_current_csv_output_dir", None)
+        found = self._find_primary_aligned_fits_in_output_dir(output_dir) if output_dir else None
+        if found:
+            return found
         return self.selected_file_path if self.selected_file_path and os.path.exists(self.selected_file_path) else None
 
     def _get_csv_mode_rank_aligned_png(self):
@@ -6547,6 +6560,152 @@ class FitsImageViewer:
         if os.path.exists(fallback):
             return fallback
         return None
+
+    def _get_configured_diff_output_root_dir(self) -> Optional[str]:
+        """配置的 diff 输出根目录（gui 中 diff_output_directory）。"""
+        if not self.get_diff_output_dir_callback:
+            return None
+        root = self.get_diff_output_dir_callback()
+        if not root or not os.path.isdir(root):
+            return None
+        return os.path.normpath(root)
+
+    def _resolve_current_frame_diff_output_dir_for_export(self) -> Optional[str]:
+        """解析当前选中帧对应的 Diff 输出目录（需含 inner_border CSV）。"""
+        cur = getattr(self, "_current_csv_output_dir", None)
+        if cur and os.path.isdir(cur) and self._get_nonref_candidates_csv_path(cur):
+            return os.path.normpath(cur)
+        if not self.selected_file_path:
+            return None
+        dl = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        base = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not dl or not base:
+            return None
+        mapped = self._map_download_file_to_output_dir(self.selected_file_path, dl, base)
+        if mapped and os.path.isdir(mapped) and self._get_nonref_candidates_csv_path(mapped):
+            return os.path.normpath(mapped)
+        return None
+
+    def _export_filtered_aligned_csv_patches(self):
+        """后台导出：当前帧、符合 CSV 筛选条件的 Aligned 局部图（无星标），尺寸与拉伸同 CSV 设置。
+
+        保存目录：配置的 diff_output_directory 的**父目录**下新建 ai_{YYYYMMDD}。
+        """
+        btn = getattr(self, "_export_aligned_filtered_button", None)
+
+        def worker():
+            try:
+                n, dest = self._export_filtered_aligned_csv_patches_worker()
+                self.parent_frame.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "导出完成",
+                        f"已导出 {n} 张 PNG。\n目录：\n{dest}",
+                    ),
+                )
+            except ValueError as e:
+                self.parent_frame.after(0, lambda msg=str(e): messagebox.showwarning("无法导出", msg))
+            except Exception as e:
+                self.logger.exception("导出 Aligned(筛选) 失败")
+                self.parent_frame.after(
+                    0,
+                    lambda msg=str(e): messagebox.showerror("导出失败", msg),
+                )
+            finally:
+                if btn is not None:
+                    self.parent_frame.after(0, lambda: btn.config(state="normal"))
+
+        if btn is not None:
+            btn.config(state="disabled")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_filtered_aligned_csv_patches_worker(self) -> Tuple[int, str]:
+        """执行导出，返回 (导出数量, 目标目录路径)。可能抛出 ValueError。"""
+        root = self._get_configured_diff_output_root_dir()
+        if not root:
+            raise ValueError("请先在配置中设置 diff 输出目录（且路径存在）。")
+
+        frame_dir = self._resolve_current_frame_diff_output_dir_for_export()
+        if not frame_dir:
+            raise ValueError(
+                "无法解析当前帧的 Diff 输出目录或缺少 variable_candidates_nonref_only_inner_border.csv。\n"
+                "请先选中已跑过 Diff 的 FITS，或进入 CSV 候选浏览模式。"
+            )
+
+        try:
+            flux_min, flux_max = self._parse_csv_flux_range()
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+
+        var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
+        mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
+            raise ValueError("variable_count / mpc_count 条件无效")
+
+        aligned_fits = self._find_primary_aligned_fits_in_output_dir(frame_dir)
+        if not aligned_fits:
+            raise ValueError(f"在输出目录中未找到 *.02rp.fit：\n{frame_dir}")
+
+        all_rows = self._load_variable_candidates_nonref_only(frame_dir)
+        if not all_rows:
+            raise ValueError("inner_border CSV 无数据行。")
+
+        matching = [
+            row
+            for row in all_rows
+            if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode)
+        ]
+        if not matching:
+            raise ValueError("没有符合当前 CSV 筛选条件的行。")
+
+        root_path = Path(os.path.normpath(root)).resolve()
+        parent_dir = root_path.parent
+        if parent_dir == root_path:
+            raise ValueError(
+                "配置的 diff 输出目录没有可用的父目录（例如盘符根），无法在侧级创建 ai_* 目录；请使用更深的路径。"
+            )
+        dest_dir = str(parent_dir / f"ai_{datetime.now().strftime('%Y%m%d')}")
+        os.makedirs(dest_dir, exist_ok=True)
+
+        aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
+        if aligned_data is None:
+            raise ValueError(f"无法读取 aligned FITS：\n{aligned_fits}")
+
+        patch_size_px = self._get_csv_patch_size_px()
+        half = max(1, int(round(patch_size_px / 2.0)))
+        hist_level = (
+            str(self.csv_local_hist_level_var.get()).strip().lower()
+            if hasattr(self, "csv_local_hist_level_var")
+            else "high"
+        )
+
+        frame_tag = self._sanitize_output_name(os.path.basename(frame_dir.rstrip("/\\")))
+        n_ok = 0
+        for idx, row in enumerate(matching):
+            x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
+            if x is None or y is None:
+                self.logger.warning("跳过一行：无法解析像素坐标 (index=%s)", idx)
+                continue
+            patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=half)
+            u8 = self._stretch_patch_to_uint8(patch, level=hist_level)
+            rank_raw = str(row.get("rank", "") or "").strip() or str(idx + 1)
+            rank_safe = self._sanitize_output_name(rank_raw)
+            fname = f"{frame_tag}_rank{rank_safe}_{idx:04d}_aligned.png"
+            out_path = os.path.join(dest_dir, fname)
+            if not cv2.imwrite(out_path, u8):
+                self.logger.warning("写入失败: %s", out_path)
+                continue
+            n_ok += 1
+
+        self.logger.info(
+            "导出 Aligned(筛选): %d 张 -> %s (条件: %s)",
+            n_ok,
+            dest_dir,
+            self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode),
+        )
+        if n_ok == 0:
+            raise ValueError("没有可导出的候选（坐标解析失败或写入失败）。")
+        return n_ok, os.path.abspath(dest_dir)
 
     def _display_csv_candidate_by_index(self, index: int):
         """在主图中显示 CSV 候选，并支持上一条/下一条浏览。"""
