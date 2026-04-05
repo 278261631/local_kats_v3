@@ -267,35 +267,6 @@ class FitsImageViewer:
 
         # AI GOOD/BAD 自动标记置信度阈值（在高级设置中可调）
         self.ai_confidence_threshold_var = tk.DoubleVar(value=0.5)
-        # 科学图背景处理模式（off/scheme_a/scheme_b）
-        self.science_bg_mode_var = tk.StringVar(value="off")
-        self._science_bg_mode_display_map = {
-            "off": "关闭",
-            "scheme_a": "方案A",
-            "scheme_b": "方案B(RPCA)"
-        }
-        self._science_bg_mode_key_map = {v: k for k, v in self._science_bg_mode_display_map.items()}
-        self.science_bg_mode_display_var = tk.StringVar(value=self._science_bg_mode_display_map["off"])
-        # 亚像素精修模式（off/scheme_a/scheme_b/scheme_c）
-        self.subpixel_refine_mode_var = tk.StringVar(value="off")
-        self._subpixel_refine_mode_display_map = {
-            "off": "不启用",
-            "scheme_a": "方案A",
-            "scheme_b": "方案B",
-            "scheme_c": "方案C"
-        }
-        self._subpixel_refine_mode_key_map = {v: k for k, v in self._subpixel_refine_mode_display_map.items()}
-        self.subpixel_refine_mode_display_var = tk.StringVar(value=self._subpixel_refine_mode_display_map["off"])
-        # 差异图计算方式（abs/signed）
-        self.diff_calc_mode_var = tk.StringVar(value="abs")
-        self._diff_calc_mode_display_map = {
-            "abs": "绝对值(abs)",
-            "signed": "带符号(signed)"
-        }
-        self._diff_calc_mode_key_map = {v: k for k, v in self._diff_calc_mode_display_map.items()}
-        self.diff_calc_mode_display_var = tk.StringVar(value=self._diff_calc_mode_display_map["abs"])
-        self.apply_diff_postprocess_var = tk.BooleanVar(value=False)
-
 
         # 初始化GPS和MPC变量（这些变量会在高级设置标签页中使用）
         self.gps_lat_var = tk.StringVar(value="43.4")
@@ -318,59 +289,6 @@ class FitsImageViewer:
         self.diff_button = ttk.Button(toolbar_frame2, text="执行Diff",
                                     command=self._execute_diff, state="disabled")
         self.diff_button.pack(side=tk.LEFT, padx=(0, 0))
-
-        # 科学图背景处理模式（放在执行Diff按钮后）
-        ttk.Label(toolbar_frame2, text="科学图背景:").pack(side=tk.LEFT, padx=(10, 4))
-        self.science_bg_mode_combo = ttk.Combobox(
-            toolbar_frame2,
-            textvariable=self.science_bg_mode_display_var,
-            values=list(self._science_bg_mode_display_map.values()),
-            state="readonly",
-            width=12
-        )
-        self.science_bg_mode_combo.pack(side=tk.LEFT, padx=(0, 6))
-
-        # 亚像素精修模式（放在科学图背景后）
-        ttk.Label(toolbar_frame2, text="亚像素精修:").pack(side=tk.LEFT, padx=(10, 4))
-        self.subpixel_refine_mode_combo = ttk.Combobox(
-            toolbar_frame2,
-            textvariable=self.subpixel_refine_mode_display_var,
-            values=list(self._subpixel_refine_mode_display_map.values()),
-            state="readonly",
-            width=10
-        )
-        self.subpixel_refine_mode_combo.pack(side=tk.LEFT, padx=(0, 6))
-
-        # 差异图计算方式（放在科学图背景后）
-        ttk.Label(toolbar_frame2, text="差异计算:").pack(side=tk.LEFT, padx=(10, 4))
-        self.diff_calc_mode_combo = ttk.Combobox(
-            toolbar_frame2,
-            textvariable=self.diff_calc_mode_display_var,
-            values=list(self._diff_calc_mode_display_map.values()),
-            state="readonly",
-            width=14
-        )
-        self.diff_calc_mode_combo.pack(side=tk.LEFT, padx=(0, 6))
-
-        # difference 后处理开关
-        self.apply_diff_postprocess_checkbox = ttk.Checkbutton(
-            toolbar_frame2,
-            text="difference后处理(去负值+中值)",
-            variable=self.apply_diff_postprocess_var
-        )
-        self.apply_diff_postprocess_checkbox.pack(side=tk.LEFT, padx=(8, 0))
-
-        # WCS稀疏采样优化选项（放在执行Diff按钮后面）
-        self.wcs_sparse_var = tk.BooleanVar(value=False)  # 默认不启用稀疏采样
-        self.wcs_sparse_checkbox = ttk.Checkbutton(toolbar_frame2, text="WCS稀疏采样",
-                                                   variable=self.wcs_sparse_var)
-        self.wcs_sparse_checkbox.pack(side=tk.LEFT, padx=(10, 0))
-
-        # 生成GIF选项（放在WCS稀疏采样后面）
-        self.generate_gif_var = tk.BooleanVar(value=False)  # 默认不生成GIF
-        self.generate_gif_checkbox = ttk.Checkbutton(toolbar_frame2, text="生成GIF图像",
-                                                     variable=self.generate_gif_var)
-        self.generate_gif_checkbox.pack(side=tk.LEFT, padx=(10, 0))
 
         # 保存检测结果按钮
         self.save_detection_button = ttk.Button(toolbar_frame2, text="保存检测结果",
@@ -748,7 +666,7 @@ class FitsImageViewer:
         csv_size_combo = ttk.Combobox(
             control_frame1,
             textvariable=self.csv_candidate_patch_size_var,
-            values=["128", "256", "384", "512", "640", "768", "1024"],
+            values=["100", "128", "256", "384", "512", "640", "768", "1024"],
             state="readonly",
             width=6,
         )
@@ -913,36 +831,6 @@ class FitsImageViewer:
         )
         self.requery_suspect_asteroids_button.pack(side=tk.LEFT, padx=(5, 0))
 
-    def _get_science_bg_mode(self) -> str:
-        """获取科学图背景处理模式配置值"""
-        return self._science_bg_mode_key_map.get(self.science_bg_mode_display_var.get(), "off")
-
-    def _set_science_bg_mode(self, mode: str):
-        """设置科学图背景处理模式显示值"""
-        display = self._science_bg_mode_display_map.get(mode, self._science_bg_mode_display_map["off"])
-        self.science_bg_mode_var.set(mode if mode in self._science_bg_mode_display_map else "off")
-        self.science_bg_mode_display_var.set(display)
-
-    def _get_subpixel_refine_mode(self) -> str:
-        """获取亚像素精修模式配置值"""
-        return self._subpixel_refine_mode_key_map.get(self.subpixel_refine_mode_display_var.get(), "off")
-
-    def _set_subpixel_refine_mode(self, mode: str):
-        """设置亚像素精修模式显示值"""
-        display = self._subpixel_refine_mode_display_map.get(mode, self._subpixel_refine_mode_display_map["off"])
-        self.subpixel_refine_mode_var.set(mode if mode in self._subpixel_refine_mode_display_map else "off")
-        self.subpixel_refine_mode_display_var.set(display)
-
-    def _get_diff_calc_mode(self) -> str:
-        """获取差异计算方式配置值"""
-        return self._diff_calc_mode_key_map.get(self.diff_calc_mode_display_var.get(), "abs")
-
-    def _set_diff_calc_mode(self, mode: str):
-        """设置差异计算方式显示值"""
-        display = self._diff_calc_mode_display_map.get(mode, self._diff_calc_mode_display_map["abs"])
-        self.diff_calc_mode_var.set(mode if mode in self._diff_calc_mode_display_map else "abs")
-        self.diff_calc_mode_display_var.set(display)
-
     def _load_batch_settings(self):
         """从配置文件加载批量处理参数到控件"""
         if not self.config_manager:
@@ -1017,33 +905,10 @@ class FitsImageViewer:
             except Exception:
                 pass
 
-            wcs_use_sparse = batch_settings.get('wcs_use_sparse', False)
-            self.wcs_sparse_var.set(wcs_use_sparse)
-
-            # 生成GIF选项
-            generate_gif = batch_settings.get('generate_gif', False)
-            self.generate_gif_var.set(generate_gif)
-
-            # 科学图背景处理模式
-            science_bg_mode = batch_settings.get('science_bg_mode', 'off')
-            self._set_science_bg_mode(science_bg_mode)
-
-            # 亚像素精修模式
-            subpixel_refine_mode = batch_settings.get('subpixel_refine_mode', 'off')
-            self._set_subpixel_refine_mode(subpixel_refine_mode)
-
-            # 差异计算方式
-            diff_calc_mode = batch_settings.get('diff_calc_mode', 'abs')
-            self._set_diff_calc_mode(diff_calc_mode)
-            apply_diff_postprocess = batch_settings.get('apply_diff_postprocess', False)
-            self.apply_diff_postprocess_var.set(bool(apply_diff_postprocess))
-
             self.logger.info(
                 f"批量处理参数已加载到控件: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={remove_bright_lines}, "
                 f"快速模式={fast_mode}, 拉伸={stretch_method}, 百分位={percentile_low}%, 锯齿比率={max_jaggedness_ratio}, "
-                f"检测方法={detection_method}, 边界剔除宽度={overlap_edge_exclusion_px}px, WCS稀疏采样={wcs_use_sparse}, "
-                f"生成GIF={generate_gif}, 科学图背景={science_bg_mode}, 亚像素精修={subpixel_refine_mode}, "
-                f"差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}"
+                f"检测方法={detection_method}, 边界剔除宽度={overlap_edge_exclusion_px}px"
             )
 
         except Exception as e:
@@ -1087,20 +952,6 @@ class FitsImageViewer:
             # 绑定AI置信度阈值输入框
             self.ai_confidence_threshold_var.trace('w', self._on_ai_confidence_threshold_change)
 
-            # 绑定WCS稀疏采样复选框
-            self.wcs_sparse_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定生成GIF复选框
-            self.generate_gif_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定科学图背景处理模式
-            self.science_bg_mode_display_var.trace('w', self._on_batch_settings_change)
-            self.subpixel_refine_mode_display_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定差异计算方式
-            self.diff_calc_mode_display_var.trace('w', self._on_batch_settings_change)
-            self.apply_diff_postprocess_var.trace('w', self._on_batch_settings_change)
-
             self.logger.info("批量处理参数控件事件已绑定")
 
         except Exception as e:
@@ -1141,20 +992,6 @@ class FitsImageViewer:
             except Exception:
                 overlap_edge_exclusion_px = 40
 
-            # 获取WCS稀疏采样设置
-            wcs_use_sparse = self.wcs_sparse_var.get()
-
-            # 获取生成GIF设置
-            generate_gif = self.generate_gif_var.get()
-
-            # 获取科学图背景处理模式
-            science_bg_mode = self._get_science_bg_mode()
-            subpixel_refine_mode = self._get_subpixel_refine_mode()
-
-            # 获取差异计算方式
-            diff_calc_mode = self._get_diff_calc_mode()
-            apply_diff_postprocess = self.apply_diff_postprocess_var.get()
-
             # 保存到配置文件
             self.config_manager.update_batch_process_settings(
                 noise_method=noise_method,
@@ -1163,19 +1000,11 @@ class FitsImageViewer:
                 fast_mode=self.fast_mode_var.get(),
                 detection_method=detection_method,
                 overlap_edge_exclusion_px=overlap_edge_exclusion_px,
-                wcs_use_sparse=wcs_use_sparse,
-                generate_gif=generate_gif,
-                science_bg_mode=science_bg_mode,
-                subpixel_refine_mode=subpixel_refine_mode,
-                diff_calc_mode=diff_calc_mode,
-                apply_diff_postprocess=apply_diff_postprocess,
             )
 
             self.logger.info(
                 f"批量处理参数已保存: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={self.remove_lines_var.get()}, "
-                f"快速模式={self.fast_mode_var.get()}, 检测方法={detection_method}, 边界剔除={overlap_edge_exclusion_px}px, "
-                f"WCS稀疏采样={wcs_use_sparse}, 生成GIF={generate_gif}, 科学图背景={science_bg_mode}, "
-                f"亚像素精修={subpixel_refine_mode}, 差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}"
+                f"快速模式={self.fast_mode_var.get()}, 检测方法={detection_method}, 边界剔除={overlap_edge_exclusion_px}px"
             )
 
         except Exception as e:
