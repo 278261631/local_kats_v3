@@ -9,6 +9,7 @@ import sys
 import re
 import subprocess
 import platform
+import locale
 import numpy as np
 import csv
 import time
@@ -55,6 +56,43 @@ try:
     from ai_filter.classifier import AIPairQualityClassifier
 except Exception:
     AIPairQualityClassifier = None
+
+
+def _decode_subprocess_stream(data):
+    """尽量按常见编码解码子进程输出，避免 Windows 本地编码导致读取线程异常。"""
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data
+
+    preferred_encoding = locale.getpreferredencoding(False) or "utf-8"
+    candidate_encodings = ["utf-8", preferred_encoding]
+    if platform.system() == "Windows":
+        candidate_encodings.extend(["gbk", "cp936"])
+
+    seen = set()
+    for encoding in candidate_encodings:
+        normalized = (encoding or "").lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return data.decode(preferred_encoding, errors="replace")
+
+
+def _run_command_capture_text(cmd, **kwargs):
+    """以字节方式捕获输出，再做容错解码，避免 text=True 在 reader thread 中因编码失败崩溃。"""
+    proc = subprocess.run(cmd, capture_output=True, text=False, **kwargs)
+    return subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode,
+        _decode_subprocess_stream(proc.stdout),
+        _decode_subprocess_stream(proc.stderr),
+    )
 
 
 class FitsImageViewer:
@@ -3208,7 +3246,7 @@ class FitsImageViewer:
         cmd_text = " ".join(cmd)
         try:
             self.logger.info("重跑Crossmatch命令: %s", cmd_text)
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+            proc = _run_command_capture_text(cmd)
             if proc.returncode != 0:
                 if proc.stdout:
                     self.logger.error("crossmatch stdout:\n%s", proc.stdout)
@@ -3930,7 +3968,7 @@ class FitsImageViewer:
                         ),
                     )
 
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                proc = _run_command_capture_text(cmd)
                 if proc.returncode != 0:
                     err_text = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
                     failed.append((csv_path, rank_value, err_text))
@@ -5910,7 +5948,7 @@ class FitsImageViewer:
                     ),
                 )
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                proc = _run_command_capture_text(cmd)
                 if proc.returncode != 0:
                     self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
                     if proc.stdout:
@@ -6531,7 +6569,7 @@ class FitsImageViewer:
                 progress_callback(f"正在执行: {step_name}")
                 cmd_text = subprocess.list2cmdline(cmd)
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                proc = _run_command_capture_text(cmd)
                 if proc.returncode != 0:
                     self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
                     if proc.stdout:
