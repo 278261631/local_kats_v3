@@ -565,49 +565,53 @@ class FitsImageViewer:
         self.csv_filter_skip_large_rows_var = tk.BooleanVar(value=False)
         self.csv_filter_max_rows_var = tk.StringVar(value="200")
 
-        ttk.Label(csv_search_frame, text="CSV筛选").pack(side=tk.LEFT)
-        ttk.Label(csv_search_frame, text="flux[").pack(side=tk.LEFT, padx=(6, 2))
-        ttk.Entry(csv_search_frame, textvariable=self.csv_search_median_flux_min_var, width=6).pack(side=tk.LEFT)
-        ttk.Label(csv_search_frame, text=",").pack(side=tk.LEFT, padx=(2, 2))
-        ttk.Entry(csv_search_frame, textvariable=self.csv_search_median_flux_max_var, width=6).pack(side=tk.LEFT)
-        ttk.Label(csv_search_frame, text="]").pack(side=tk.LEFT, padx=(2, 0))
-
-        ttk.Label(csv_search_frame, text="var").pack(side=tk.LEFT, padx=(6, 2))
+        # 多行排版：第1行 CSV+flux+var+mpc；第2行 大CSV阈值 + 向上/向下搜 + 导出
+        csv_row_filters = ttk.Frame(csv_search_frame)
+        csv_row_filters.pack(fill=tk.X, anchor=tk.W)
+        ttk.Label(csv_row_filters, text="CSV筛选").pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text="flux[").pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Entry(csv_row_filters, textvariable=self.csv_search_median_flux_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text=",").pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Entry(csv_row_filters, textvariable=self.csv_search_median_flux_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text="]").pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Label(csv_row_filters, text="var").pack(side=tk.LEFT)
         ttk.Combobox(
-            csv_search_frame,
+            csv_row_filters,
             textvariable=self.csv_search_variable_count_mode_var,
             values=["=0", "=-1", ">0"],
             state="readonly",
             width=4,
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(csv_search_frame, text="mpc").pack(side=tk.LEFT, padx=(6, 2))
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(csv_row_filters, text="mpc").pack(side=tk.LEFT, padx=(6, 2))
         ttk.Combobox(
-            csv_search_frame,
+            csv_row_filters,
             textvariable=self.csv_search_mpc_count_mode_var,
             values=["=0", "=-1", ">0"],
             state="readonly",
             width=4,
         ).pack(side=tk.LEFT)
 
+        csv_row_actions = ttk.Frame(csv_search_frame)
+        csv_row_actions.pack(fill=tk.X, anchor=tk.W, pady=(3, 0))
         ttk.Checkbutton(
-            csv_search_frame,
+            csv_row_actions,
             text="跳过大CSV",
             variable=self.csv_filter_skip_large_rows_var,
-        ).pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Label(csv_search_frame, text="行>").pack(side=tk.LEFT, padx=(2, 2))
-        ttk.Entry(csv_search_frame, textvariable=self.csv_filter_max_rows_var, width=5).pack(side=tk.LEFT)
-
-        ttk.Button(csv_search_frame, text="向上搜", command=self._jump_to_prev_csv_row_by_filters).pack(
-            side=tk.LEFT, padx=(6, 2)
+        ).pack(side=tk.LEFT)
+        ttk.Label(csv_row_actions, text="行>").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Entry(csv_row_actions, textvariable=self.csv_filter_max_rows_var, width=5).pack(side=tk.LEFT)
+        ttk.Button(csv_row_actions, text="向上搜", command=self._jump_to_prev_csv_row_by_filters).pack(
+            side=tk.LEFT, padx=(8, 4)
         )
-        ttk.Button(csv_search_frame, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(side=tk.LEFT)
+        ttk.Button(csv_row_actions, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
         self._export_aligned_filtered_button = ttk.Button(
-            csv_search_frame,
+            csv_row_actions,
             text="导出Aligned(筛选)",
             command=self._export_filtered_aligned_csv_patches,
         )
-        self._export_aligned_filtered_button.pack(side=tk.LEFT, padx=(8, 0))
+        self._export_aligned_filtered_button.pack(side=tk.LEFT)
 
         self.csv_filter_search_status_var = tk.StringVar(value="当前命中：-- / 条件摘要：--")
         ttk.Label(
