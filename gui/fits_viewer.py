@@ -535,7 +535,6 @@ class FitsImageViewer:
         refresh_frame.pack(fill=tk.X, pady=(0, 5))
 
         ttk.Button(refresh_frame, text="刷新目录", command=self._refresh_directory_tree).pack(side=tk.LEFT)
-        ttk.Button(refresh_frame, text="跳转未查询", command=self._jump_to_next_unqueried).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(
             refresh_frame,
             text="删除输出目录(以下)",
@@ -546,12 +545,15 @@ class FitsImageViewer:
             text="更新MJD(当前节点)",
             command=self._update_mjd_in_csvs_from_selected_node
         ).pack(side=tk.LEFT, padx=(5, 0))
+        refresh_row2 = ttk.Frame(left_frame)
+        refresh_row2.pack(fill=tk.X, pady=(0, 5))
+
         self.rerun_crossmatch_filtered_button = ttk.Button(
-            refresh_frame,
+            refresh_row2,
             text="重跑Crossmatch(筛选命中)",
             command=self._rerun_crossmatch_for_selected_node_filtered_rows
         )
-        self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT, padx=(5, 0))
+        self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT)
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
         # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
