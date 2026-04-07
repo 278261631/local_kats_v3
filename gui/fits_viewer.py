@@ -9,6 +9,7 @@ import sys
 import re
 import subprocess
 import platform
+import locale
 import numpy as np
 import csv
 import time
@@ -29,7 +30,7 @@ from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Callable
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from datetime import datetime, timedelta
 from diff_orb_integration import DiffOrbIntegration
 import cv2
@@ -55,6 +56,51 @@ try:
     from ai_filter.classifier import AIPairQualityClassifier
 except Exception:
     AIPairQualityClassifier = None
+
+
+def _decode_subprocess_stream(data):
+    """尽量按常见编码解码子进程输出，避免 Windows 本地编码导致读取线程异常。"""
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data
+
+    preferred_encoding = locale.getpreferredencoding(False) or "utf-8"
+    candidate_encodings = ["utf-8", preferred_encoding]
+    if platform.system() == "Windows":
+        candidate_encodings.extend(["gbk", "cp936"])
+
+    seen = set()
+    for encoding in candidate_encodings:
+        normalized = (encoding or "").lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return data.decode(preferred_encoding, errors="replace")
+
+
+def _run_command_capture_text(cmd, **kwargs):
+    """以字节方式捕获输出，再做容错解码，避免 text=True 在 reader thread 中因编码失败崩溃。"""
+    proc = subprocess.run(cmd, capture_output=True, text=False, **kwargs)
+    return subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode,
+        _decode_subprocess_stream(proc.stdout),
+        _decode_subprocess_stream(proc.stderr),
+    )
+
+
+class _CsvFilterSearchSetupError(Exception):
+    """CSV 条件树遍历前置校验失败；kind 为 'info' 或 'warning'，对应对话框类型。"""
+
+    def __init__(self, message: str, *, kind: str = "warning"):
+        super().__init__(message)
+        self.kind = kind
 
 
 class FitsImageViewer:
@@ -121,7 +167,7 @@ class FitsImageViewer:
         # 创建界面
         self._create_widgets()
 
-        # 从配置文件加载显示设置（含CSV候选尺寸）
+        # 从配置文件加载显示设置（含 CSV 候选等）
         self._load_display_settings()
 
         # 从配置文件加载批量处理参数到控件
@@ -217,47 +263,8 @@ class FitsImageViewer:
             if not self.wcs_checker:
                 self.wcs_check_button.config(state="disabled", text="WCS检查不可用")
 
-        # 初始化高级设置变量（这些变量会在高级设置标签页中使用）
-        self.outlier_var = tk.BooleanVar(value=False)  # 默认不选中outlier
-        self.hot_cold_var = tk.BooleanVar(value=False)  # 默认不选中hot_cold
-        self.adaptive_median_var = tk.BooleanVar(value=True)  # 默认选中adaptive_median
-        self.remove_lines_var = tk.BooleanVar(value=True)  # 默认选中去除亮线
-        self.alignment_var = tk.StringVar(value="wcs")  # 默认选择wcs
-        self.jaggedness_ratio_var = tk.StringVar(value="2.0")
-        self.detection_method_var = tk.StringVar(value="contour")
-        self.overlap_edge_exclusion_px_var = tk.StringVar(value="40")
-
         # AI GOOD/BAD 自动标记置信度阈值（在高级设置中可调）
         self.ai_confidence_threshold_var = tk.DoubleVar(value=0.5)
-        # 科学图背景处理模式（off/scheme_a/scheme_b）
-        self.science_bg_mode_var = tk.StringVar(value="off")
-        self._science_bg_mode_display_map = {
-            "off": "关闭",
-            "scheme_a": "方案A",
-            "scheme_b": "方案B(RPCA)"
-        }
-        self._science_bg_mode_key_map = {v: k for k, v in self._science_bg_mode_display_map.items()}
-        self.science_bg_mode_display_var = tk.StringVar(value=self._science_bg_mode_display_map["off"])
-        # 亚像素精修模式（off/scheme_a/scheme_b/scheme_c）
-        self.subpixel_refine_mode_var = tk.StringVar(value="off")
-        self._subpixel_refine_mode_display_map = {
-            "off": "不启用",
-            "scheme_a": "方案A",
-            "scheme_b": "方案B",
-            "scheme_c": "方案C"
-        }
-        self._subpixel_refine_mode_key_map = {v: k for k, v in self._subpixel_refine_mode_display_map.items()}
-        self.subpixel_refine_mode_display_var = tk.StringVar(value=self._subpixel_refine_mode_display_map["off"])
-        # 差异图计算方式（abs/signed）
-        self.diff_calc_mode_var = tk.StringVar(value="abs")
-        self._diff_calc_mode_display_map = {
-            "abs": "绝对值(abs)",
-            "signed": "带符号(signed)"
-        }
-        self._diff_calc_mode_key_map = {v: k for k, v in self._diff_calc_mode_display_map.items()}
-        self.diff_calc_mode_display_var = tk.StringVar(value=self._diff_calc_mode_display_map["abs"])
-        self.apply_diff_postprocess_var = tk.BooleanVar(value=False)
-
 
         # 初始化GPS和MPC变量（这些变量会在高级设置标签页中使用）
         self.gps_lat_var = tk.StringVar(value="43.4")
@@ -281,59 +288,6 @@ class FitsImageViewer:
                                     command=self._execute_diff, state="disabled")
         self.diff_button.pack(side=tk.LEFT, padx=(0, 0))
 
-        # 科学图背景处理模式（放在执行Diff按钮后）
-        ttk.Label(toolbar_frame2, text="科学图背景:").pack(side=tk.LEFT, padx=(10, 4))
-        self.science_bg_mode_combo = ttk.Combobox(
-            toolbar_frame2,
-            textvariable=self.science_bg_mode_display_var,
-            values=list(self._science_bg_mode_display_map.values()),
-            state="readonly",
-            width=12
-        )
-        self.science_bg_mode_combo.pack(side=tk.LEFT, padx=(0, 6))
-
-        # 亚像素精修模式（放在科学图背景后）
-        ttk.Label(toolbar_frame2, text="亚像素精修:").pack(side=tk.LEFT, padx=(10, 4))
-        self.subpixel_refine_mode_combo = ttk.Combobox(
-            toolbar_frame2,
-            textvariable=self.subpixel_refine_mode_display_var,
-            values=list(self._subpixel_refine_mode_display_map.values()),
-            state="readonly",
-            width=10
-        )
-        self.subpixel_refine_mode_combo.pack(side=tk.LEFT, padx=(0, 6))
-
-        # 差异图计算方式（放在科学图背景后）
-        ttk.Label(toolbar_frame2, text="差异计算:").pack(side=tk.LEFT, padx=(10, 4))
-        self.diff_calc_mode_combo = ttk.Combobox(
-            toolbar_frame2,
-            textvariable=self.diff_calc_mode_display_var,
-            values=list(self._diff_calc_mode_display_map.values()),
-            state="readonly",
-            width=14
-        )
-        self.diff_calc_mode_combo.pack(side=tk.LEFT, padx=(0, 6))
-
-        # difference 后处理开关
-        self.apply_diff_postprocess_checkbox = ttk.Checkbutton(
-            toolbar_frame2,
-            text="difference后处理(去负值+中值)",
-            variable=self.apply_diff_postprocess_var
-        )
-        self.apply_diff_postprocess_checkbox.pack(side=tk.LEFT, padx=(8, 0))
-
-        # WCS稀疏采样优化选项（放在执行Diff按钮后面）
-        self.wcs_sparse_var = tk.BooleanVar(value=False)  # 默认不启用稀疏采样
-        self.wcs_sparse_checkbox = ttk.Checkbutton(toolbar_frame2, text="WCS稀疏采样",
-                                                   variable=self.wcs_sparse_var)
-        self.wcs_sparse_checkbox.pack(side=tk.LEFT, padx=(10, 0))
-
-        # 生成GIF选项（放在WCS稀疏采样后面）
-        self.generate_gif_var = tk.BooleanVar(value=False)  # 默认不生成GIF
-        self.generate_gif_checkbox = ttk.Checkbutton(toolbar_frame2, text="生成GIF图像",
-                                                     variable=self.generate_gif_var)
-        self.generate_gif_checkbox.pack(side=tk.LEFT, padx=(10, 0))
-
         # 保存检测结果按钮
         self.save_detection_button = ttk.Button(toolbar_frame2, text="保存检测结果",
                                                command=self._save_detection_result, state="disabled")
@@ -353,10 +307,6 @@ class FitsImageViewer:
         self.fast_mode_checkbox = ttk.Checkbutton(toolbar_frame3, text="快速模式（减少中间文件）",
                                                   variable=self.fast_mode_var)
         self.fast_mode_checkbox.pack(side=tk.LEFT, padx=(0, 0))
-
-        # 拉伸方法变量（控件移至“高级设置”标签页）
-        self.stretch_method_var = tk.StringVar(value="percentile")  # 默认百分位数拉伸
-        self.percentile_var = tk.StringVar(value="99.95")  # 默认99.95%
 
         # 检测结果导航按钮
         ttk.Label(toolbar_frame3, text="  |  ").pack(side=tk.LEFT, padx=(10, 5))
@@ -585,48 +535,85 @@ class FitsImageViewer:
         refresh_frame.pack(fill=tk.X, pady=(0, 5))
 
         ttk.Button(refresh_frame, text="刷新目录", command=self._refresh_directory_tree).pack(side=tk.LEFT)
-        ttk.Button(refresh_frame, text="跳转未查询", command=self._jump_to_next_unqueried).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(
             refresh_frame,
             text="删除输出目录(以下)",
             command=self._delete_output_dirs_from_selected_node
         ).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(
+            refresh_frame,
+            text="更新MJD(当前节点)",
+            command=self._update_mjd_in_csvs_from_selected_node
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        refresh_row2 = ttk.Frame(left_frame)
+        refresh_row2.pack(fill=tk.X, pady=(0, 5))
+
+        self.rerun_crossmatch_filtered_button = ttk.Button(
+            refresh_row2,
+            text="重跑Crossmatch(筛选命中)",
+            command=self._rerun_crossmatch_for_selected_node_filtered_rows
+        )
+        self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT)
         ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
         # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
         csv_search_frame = ttk.Frame(left_frame)
         csv_search_frame.pack(fill=tk.X, pady=(0, 5))
 
-        self.csv_search_median_flux_min_var = tk.StringVar(value="10")
+        self.csv_search_median_flux_min_var = tk.StringVar(value="30")
+        self.csv_search_median_flux_max_var = tk.StringVar(value="800")
         self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
+        self.csv_filter_skip_large_rows_var = tk.BooleanVar(value=False)
+        self.csv_filter_max_rows_var = tk.StringVar(value="200")
 
-        ttk.Label(csv_search_frame, text="CSV筛选").pack(side=tk.LEFT)
-        ttk.Label(csv_search_frame, text="flux>").pack(side=tk.LEFT, padx=(6, 2))
-        ttk.Entry(csv_search_frame, textvariable=self.csv_search_median_flux_min_var, width=6).pack(side=tk.LEFT)
-
-        ttk.Label(csv_search_frame, text="var").pack(side=tk.LEFT, padx=(6, 2))
+        # 多行排版：第1行 CSV+flux+var+mpc；第2行 大CSV阈值 + 向上/向下搜 + 导出
+        csv_row_filters = ttk.Frame(csv_search_frame)
+        csv_row_filters.pack(fill=tk.X, anchor=tk.W)
+        ttk.Label(csv_row_filters, text="CSV筛选").pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text="flux[").pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Entry(csv_row_filters, textvariable=self.csv_search_median_flux_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text=",").pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Entry(csv_row_filters, textvariable=self.csv_search_median_flux_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text="]").pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Label(csv_row_filters, text="var").pack(side=tk.LEFT)
         ttk.Combobox(
-            csv_search_frame,
+            csv_row_filters,
             textvariable=self.csv_search_variable_count_mode_var,
             values=["=0", "=-1", ">0"],
             state="readonly",
             width=4,
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(csv_search_frame, text="mpc").pack(side=tk.LEFT, padx=(6, 2))
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(csv_row_filters, text="mpc").pack(side=tk.LEFT, padx=(6, 2))
         ttk.Combobox(
-            csv_search_frame,
+            csv_row_filters,
             textvariable=self.csv_search_mpc_count_mode_var,
             values=["=0", "=-1", ">0"],
             state="readonly",
             width=4,
         ).pack(side=tk.LEFT)
 
-        ttk.Button(csv_search_frame, text="向上搜", command=self._jump_to_prev_csv_row_by_filters).pack(
-            side=tk.LEFT, padx=(6, 2)
+        csv_row_actions = ttk.Frame(csv_search_frame)
+        csv_row_actions.pack(fill=tk.X, anchor=tk.W, pady=(3, 0))
+        ttk.Checkbutton(
+            csv_row_actions,
+            text="跳过大CSV",
+            variable=self.csv_filter_skip_large_rows_var,
+        ).pack(side=tk.LEFT)
+        ttk.Label(csv_row_actions, text="行>").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Entry(csv_row_actions, textvariable=self.csv_filter_max_rows_var, width=5).pack(side=tk.LEFT)
+        ttk.Button(csv_row_actions, text="向上搜", command=self._jump_to_prev_csv_row_by_filters).pack(
+            side=tk.LEFT, padx=(8, 4)
         )
-        ttk.Button(csv_search_frame, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(side=tk.LEFT)
+        ttk.Button(csv_row_actions, text="向下搜", command=self._jump_to_next_csv_row_by_filters).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        self._export_aligned_filtered_button = ttk.Button(
+            csv_row_actions,
+            text="导出Aligned(筛选)",
+            command=self._export_filtered_aligned_csv_patches,
+        )
+        self._export_aligned_filtered_button.pack(side=tk.LEFT)
 
         self.csv_filter_search_status_var = tk.StringVar(value="当前命中：-- / 条件摘要：--")
         ttk.Label(
@@ -675,27 +662,9 @@ class FitsImageViewer:
         control_container = ttk.Frame(right_frame)
         control_container.pack(fill=tk.X, pady=(5, 0))
 
-        # 第一行控制面板：显示模式和颜色映射
+        # 第一行控制面板：CSV 候选等
         control_frame1 = ttk.Frame(control_container)
         control_frame1.pack(fill=tk.X, pady=(0, 2))
-
-        # 显示模式选择
-        ttk.Label(control_frame1, text="显示模式:").pack(side=tk.LEFT, padx=(0, 5))
-        self.display_mode = tk.StringVar(value="linear")
-        mode_combo = ttk.Combobox(control_frame1, textvariable=self.display_mode,
-                                 values=["linear", "log", "sqrt", "asinh"],
-                                 state="readonly", width=10)
-        mode_combo.pack(side=tk.LEFT, padx=(0, 10))
-        mode_combo.bind('<<ComboboxSelected>>', self._on_display_mode_change)
-
-        # 颜色映射选择
-        ttk.Label(control_frame1, text="颜色映射:").pack(side=tk.LEFT, padx=(0, 5))
-        self.colormap = tk.StringVar(value="gray")
-        cmap_combo = ttk.Combobox(control_frame1, textvariable=self.colormap,
-                                 values=["gray", "viridis", "plasma", "inferno", "hot", "cool"],
-                                 state="readonly", width=10)
-        cmap_combo.pack(side=tk.LEFT, padx=(0, 10))
-        cmap_combo.bind('<<ComboboxSelected>>', self._on_colormap_change)
 
         # CSV候选浏览显示尺寸（单位：像素，默认512）
         ttk.Label(control_frame1, text="CSV尺寸:").pack(side=tk.LEFT, padx=(0, 5))
@@ -703,7 +672,7 @@ class FitsImageViewer:
         csv_size_combo = ttk.Combobox(
             control_frame1,
             textvariable=self.csv_candidate_patch_size_var,
-            values=["128", "256", "384", "512", "640", "768", "1024"],
+            values=["100", "128", "256", "384", "512", "640", "768", "1024"],
             state="readonly",
             width=6,
         )
@@ -868,36 +837,6 @@ class FitsImageViewer:
         )
         self.requery_suspect_asteroids_button.pack(side=tk.LEFT, padx=(5, 0))
 
-    def _get_science_bg_mode(self) -> str:
-        """获取科学图背景处理模式配置值"""
-        return self._science_bg_mode_key_map.get(self.science_bg_mode_display_var.get(), "off")
-
-    def _set_science_bg_mode(self, mode: str):
-        """设置科学图背景处理模式显示值"""
-        display = self._science_bg_mode_display_map.get(mode, self._science_bg_mode_display_map["off"])
-        self.science_bg_mode_var.set(mode if mode in self._science_bg_mode_display_map else "off")
-        self.science_bg_mode_display_var.set(display)
-
-    def _get_subpixel_refine_mode(self) -> str:
-        """获取亚像素精修模式配置值"""
-        return self._subpixel_refine_mode_key_map.get(self.subpixel_refine_mode_display_var.get(), "off")
-
-    def _set_subpixel_refine_mode(self, mode: str):
-        """设置亚像素精修模式显示值"""
-        display = self._subpixel_refine_mode_display_map.get(mode, self._subpixel_refine_mode_display_map["off"])
-        self.subpixel_refine_mode_var.set(mode if mode in self._subpixel_refine_mode_display_map else "off")
-        self.subpixel_refine_mode_display_var.set(display)
-
-    def _get_diff_calc_mode(self) -> str:
-        """获取差异计算方式配置值"""
-        return self._diff_calc_mode_key_map.get(self.diff_calc_mode_display_var.get(), "abs")
-
-    def _set_diff_calc_mode(self, mode: str):
-        """设置差异计算方式显示值"""
-        display = self._diff_calc_mode_display_map.get(mode, self._diff_calc_mode_display_map["abs"])
-        self.diff_calc_mode_var.set(mode if mode in self._diff_calc_mode_display_map else "abs")
-        self.diff_calc_mode_display_var.set(display)
-
     def _load_batch_settings(self):
         """从配置文件加载批量处理参数到控件"""
         if not self.config_manager:
@@ -906,64 +845,9 @@ class FitsImageViewer:
         try:
             batch_settings = self.config_manager.get_batch_process_settings()
 
-            # 降噪方式
-            noise_method = batch_settings.get('noise_method', 'median')
-            # 重置所有降噪选项
-            self.outlier_var.set(False)
-            self.hot_cold_var.set(False)
-            self.adaptive_median_var.set(False)
-
-            if noise_method == 'median':
-                self.adaptive_median_var.set(True)
-            elif noise_method == 'gaussian':
-                self.outlier_var.set(True)
-            # 如果是'none'，所有选项都不选中
-
-            # 对齐方式
-            alignment_method = batch_settings.get('alignment_method', 'orb')
-            # 映射配置文件中的值到GUI选项
-            alignment_mapping = {
-                'orb': 'rigid',
-                'ecc': 'wcs',
-                'astropy_reproject': 'astropy_reproject',
-                'swarp': 'swarp'
-            }
-            self.alignment_var.set(alignment_mapping.get(alignment_method, 'rigid'))
-
-            # 去除亮线
-            remove_bright_lines = batch_settings.get('remove_bright_lines', True)
-            self.remove_lines_var.set(remove_bright_lines)
-
-            # 快速模式
+            # 快速模式（影响替代 Diff 流水线是否跳过「渲染对齐结果」）
             fast_mode = batch_settings.get('fast_mode', True)
             self.fast_mode_var.set(fast_mode)
-
-            # 拉伸方法
-            stretch_method = batch_settings.get('stretch_method', 'percentile')
-            if stretch_method == 'percentile':
-                self.stretch_method_var.set('percentile')
-            elif stretch_method == 'minmax':
-                self.stretch_method_var.set('peak')
-            elif stretch_method == 'asinh':
-                self.stretch_method_var.set('peak')
-            else:
-                self.stretch_method_var.set('percentile')
-
-            # 百分位参数
-            percentile_low = batch_settings.get('percentile_low', 99.95)
-            self.percentile_var.set(str(percentile_low))
-
-            # 锯齿比率
-            max_jaggedness_ratio = batch_settings.get('max_jaggedness_ratio', 2.0)
-            self.jaggedness_ratio_var.set(str(max_jaggedness_ratio))
-
-            # 检测方法
-            detection_method = batch_settings.get('detection_method', 'contour')
-            self.detection_method_var.set(detection_method)
-
-            # 重叠边界剔除宽度（像素）
-            overlap_edge_exclusion_px = batch_settings.get('overlap_edge_exclusion_px', 40)
-            self.overlap_edge_exclusion_px_var.set(str(overlap_edge_exclusion_px))
 
             # AI GOOD/BAD 自动标记相关设置
             try:
@@ -972,34 +856,7 @@ class FitsImageViewer:
             except Exception:
                 pass
 
-            wcs_use_sparse = batch_settings.get('wcs_use_sparse', False)
-            self.wcs_sparse_var.set(wcs_use_sparse)
-
-            # 生成GIF选项
-            generate_gif = batch_settings.get('generate_gif', False)
-            self.generate_gif_var.set(generate_gif)
-
-            # 科学图背景处理模式
-            science_bg_mode = batch_settings.get('science_bg_mode', 'off')
-            self._set_science_bg_mode(science_bg_mode)
-
-            # 亚像素精修模式
-            subpixel_refine_mode = batch_settings.get('subpixel_refine_mode', 'off')
-            self._set_subpixel_refine_mode(subpixel_refine_mode)
-
-            # 差异计算方式
-            diff_calc_mode = batch_settings.get('diff_calc_mode', 'abs')
-            self._set_diff_calc_mode(diff_calc_mode)
-            apply_diff_postprocess = batch_settings.get('apply_diff_postprocess', False)
-            self.apply_diff_postprocess_var.set(bool(apply_diff_postprocess))
-
-            self.logger.info(
-                f"批量处理参数已加载到控件: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={remove_bright_lines}, "
-                f"快速模式={fast_mode}, 拉伸={stretch_method}, 百分位={percentile_low}%, 锯齿比率={max_jaggedness_ratio}, "
-                f"检测方法={detection_method}, 边界剔除宽度={overlap_edge_exclusion_px}px, WCS稀疏采样={wcs_use_sparse}, "
-                f"生成GIF={generate_gif}, 科学图背景={science_bg_mode}, 亚像素精修={subpixel_refine_mode}, "
-                f"差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}"
-            )
+            self.logger.info(f"批量处理参数已加载到控件: 快速模式={fast_mode}")
 
         except Exception as e:
             self.logger.error(f"加载批量处理参数失败: {str(e)}")
@@ -1010,51 +867,11 @@ class FitsImageViewer:
             return
 
         try:
-            # 绑定降噪方式复选框
-            self.outlier_var.trace('w', self._on_batch_settings_change)
-            self.hot_cold_var.trace('w', self._on_batch_settings_change)
-            self.adaptive_median_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定对齐方式单选框
-            self.alignment_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定去除亮线复选框
-            self.remove_lines_var.trace('w', self._on_batch_settings_change)
-
             # 绑定快速模式复选框
             self.fast_mode_var.trace('w', self._on_batch_settings_change)
 
-            # 绑定拉伸方法单选框
-            self.stretch_method_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定百分位输入框（使用延迟保存，避免每次按键都保存）
-            self.percentile_var.trace('w', self._on_percentile_change)
-
-            # 绑定锯齿比率输入框
-            self.jaggedness_ratio_var.trace('w', self._on_jaggedness_ratio_change)
-
-            # 绑定检测方法单选框
-            self.detection_method_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定重叠边界剔除宽度输入框
-            self.overlap_edge_exclusion_px_var.trace('w', self._on_overlap_edge_exclusion_px_change)
-
             # 绑定AI置信度阈值输入框
             self.ai_confidence_threshold_var.trace('w', self._on_ai_confidence_threshold_change)
-
-            # 绑定WCS稀疏采样复选框
-            self.wcs_sparse_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定生成GIF复选框
-            self.generate_gif_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定科学图背景处理模式
-            self.science_bg_mode_display_var.trace('w', self._on_batch_settings_change)
-            self.subpixel_refine_mode_display_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定差异计算方式
-            self.diff_calc_mode_display_var.trace('w', self._on_batch_settings_change)
-            self.apply_diff_postprocess_var.trace('w', self._on_batch_settings_change)
 
             self.logger.info("批量处理参数控件事件已绑定")
 
@@ -1062,161 +879,17 @@ class FitsImageViewer:
             self.logger.error(f"绑定批量处理参数事件失败: {str(e)}")
 
     def _on_batch_settings_change(self, *args):
-        """批量处理参数变化时保存到配置文件"""
+        """快速模式变化时保存到配置文件"""
         if not self.config_manager:
             return
 
         try:
-            # 确定降噪方式
-            noise_method = 'none'
-            if self.adaptive_median_var.get():
-                noise_method = 'median'
-            elif self.outlier_var.get():
-                noise_method = 'gaussian'
-            elif self.hot_cold_var.get():
-                noise_method = 'gaussian'  # hot_cold也映射到gaussian
-
-            # 确定对齐方式 - 映射GUI选项到配置文件值
-            alignment_mapping = {
-                'rigid': 'orb',
-                'wcs': 'ecc',
-                'astropy_reproject': 'astropy_reproject',
-                'swarp': 'swarp'
-            }
-            alignment_method = alignment_mapping.get(self.alignment_var.get(), 'orb')
-
-            # 获取检测方法
-            detection_method = self.detection_method_var.get()
-
-            # 重叠边界剔除宽度
-            overlap_edge_exclusion_px = 40
-            try:
-                overlap_edge_exclusion_px = int(float(self.overlap_edge_exclusion_px_var.get()))
-                overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-            except Exception:
-                overlap_edge_exclusion_px = 40
-
-            # 获取WCS稀疏采样设置
-            wcs_use_sparse = self.wcs_sparse_var.get()
-
-            # 获取生成GIF设置
-            generate_gif = self.generate_gif_var.get()
-
-            # 获取科学图背景处理模式
-            science_bg_mode = self._get_science_bg_mode()
-            subpixel_refine_mode = self._get_subpixel_refine_mode()
-
-            # 获取差异计算方式
-            diff_calc_mode = self._get_diff_calc_mode()
-            apply_diff_postprocess = self.apply_diff_postprocess_var.get()
-
-            # 保存到配置文件
             self.config_manager.update_batch_process_settings(
-                noise_method=noise_method,
-                alignment_method=alignment_method,
-                remove_bright_lines=self.remove_lines_var.get(),
                 fast_mode=self.fast_mode_var.get(),
-                detection_method=detection_method,
-                overlap_edge_exclusion_px=overlap_edge_exclusion_px,
-                wcs_use_sparse=wcs_use_sparse,
-                generate_gif=generate_gif,
-                science_bg_mode=science_bg_mode,
-                subpixel_refine_mode=subpixel_refine_mode,
-                diff_calc_mode=diff_calc_mode,
-                apply_diff_postprocess=apply_diff_postprocess,
             )
-
-            self.logger.info(
-                f"批量处理参数已保存: 降噪={noise_method}, 对齐={alignment_method}, 去亮线={self.remove_lines_var.get()}, "
-                f"快速模式={self.fast_mode_var.get()}, 检测方法={detection_method}, 边界剔除={overlap_edge_exclusion_px}px, "
-                f"WCS稀疏采样={wcs_use_sparse}, 生成GIF={generate_gif}, 科学图背景={science_bg_mode}, "
-                f"亚像素精修={subpixel_refine_mode}, 差异计算={diff_calc_mode}, difference后处理={apply_diff_postprocess}"
-            )
-
+            self.logger.info(f"批量处理参数已保存: 快速模式={self.fast_mode_var.get()}")
         except Exception as e:
             self.logger.error(f"保存批量处理参数失败: {str(e)}")
-
-    def _on_percentile_change(self, *args):
-        """百分位参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_percentile_save_timer'):
-            self.parent_frame.after_cancel(self._percentile_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._percentile_save_timer = self.parent_frame.after(1000, self._save_percentile)
-
-    def _save_percentile(self):
-        """保存百分位参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            percentile_low = float(self.percentile_var.get())
-            self.config_manager.update_batch_process_settings(percentile_low=percentile_low)
-            self.logger.info(f"百分位参数已保存: {percentile_low}%")
-        except ValueError:
-            self.logger.warning(f"无效的百分位值: {self.percentile_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存百分位参数失败: {str(e)}")
-
-    def _on_jaggedness_ratio_change(self, *args):
-        """锯齿比率参数变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_jaggedness_save_timer'):
-            self.parent_frame.after_cancel(self._jaggedness_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._jaggedness_save_timer = self.parent_frame.after(1000, self._save_jaggedness_ratio)
-
-    def _save_jaggedness_ratio(self):
-        """保存锯齿比率参数到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            max_jaggedness_ratio = float(self.jaggedness_ratio_var.get())
-            self.config_manager.update_batch_process_settings(max_jaggedness_ratio=max_jaggedness_ratio)
-            self.logger.info(f"锯齿比率参数已保存: {max_jaggedness_ratio}")
-        except ValueError:
-            self.logger.warning(f"无效的锯齿比率值: {self.jaggedness_ratio_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存锯齿比率参数失败: {str(e)}")
-
-    def _on_overlap_edge_exclusion_px_change(self, *args):
-        """重叠边界剔除宽度变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        if hasattr(self, '_overlap_edge_exclusion_save_timer'):
-            self.parent_frame.after_cancel(self._overlap_edge_exclusion_save_timer)
-
-        self._overlap_edge_exclusion_save_timer = self.parent_frame.after(
-            1000, self._save_overlap_edge_exclusion_px
-        )
-
-
-    def _save_overlap_edge_exclusion_px(self):
-        """保存重叠边界剔除宽度到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            overlap_edge_exclusion_px = int(float(self.overlap_edge_exclusion_px_var.get()))
-            overlap_edge_exclusion_px = max(0, overlap_edge_exclusion_px)
-            self.config_manager.update_batch_process_settings(
-                overlap_edge_exclusion_px=overlap_edge_exclusion_px
-            )
-            self.logger.info(f"重叠边界剔除宽度已保存: {overlap_edge_exclusion_px}px")
-        except ValueError:
-            self.logger.warning(f"无效的重叠边界剔除宽度: {self.overlap_edge_exclusion_px_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存重叠边界剔除宽度失败: {str(e)}")
 
     def _on_ai_confidence_threshold_change(self, *args):
         """AI置信度阈值变化时保存到配置文件（延迟保存）"""
@@ -1585,14 +1258,12 @@ class FitsImageViewer:
             self.logger.error(f"保存查询设置失败: {str(e)}")
 
     def _load_display_settings(self):
-        """从配置文件加载显示设置（显示模式、颜色映射、CSV尺寸等）。"""
+        """从配置文件加载显示设置（CSV 候选尺寸等）。"""
         if not self.config_manager:
             return
 
         try:
             display_settings = self.config_manager.get_display_settings()
-            self.display_mode.set(str(display_settings.get("default_display_mode", "linear")))
-            self.colormap.set(str(display_settings.get("default_colormap", "gray")))
 
             csv_patch_size = str(display_settings.get("csv_candidate_patch_size", "512"))
             if csv_patch_size not in {"128", "256", "384", "512", "640", "768", "1024"}:
@@ -1603,6 +1274,48 @@ class FitsImageViewer:
             if csv_hist_level not in {"low", "medium", "high"}:
                 csv_hist_level = "high"
             self.csv_local_hist_level_var.set(csv_hist_level)
+
+            csv_search_flux_min = str(display_settings.get("csv_search_median_flux_min", "30")).strip()
+            try:
+                csv_search_flux_min_val = float(csv_search_flux_min)
+            except Exception:
+                csv_search_flux_min = "30"
+                csv_search_flux_min_val = 30.0
+            self.csv_search_median_flux_min_var.set(csv_search_flux_min)
+
+            csv_search_flux_max = str(display_settings.get("csv_search_median_flux_max", "800")).strip()
+            try:
+                csv_search_flux_max_val = float(csv_search_flux_max)
+            except Exception:
+                csv_search_flux_max = "800"
+                csv_search_flux_max_val = 800.0
+            self.csv_search_median_flux_max_var.set(csv_search_flux_max)
+
+            if csv_search_flux_min_val >= csv_search_flux_max_val:
+                self.csv_search_median_flux_min_var.set("30")
+                self.csv_search_median_flux_max_var.set("800")
+
+            csv_skip_large_rows_enabled = bool(display_settings.get("csv_filter_skip_large_rows_enabled", False))
+            self.csv_filter_skip_large_rows_var.set(csv_skip_large_rows_enabled)
+
+            csv_filter_max_rows = str(display_settings.get("csv_filter_max_rows", "200")).strip()
+            try:
+                csv_filter_max_rows_int = int(float(csv_filter_max_rows))
+                if csv_filter_max_rows_int <= 0:
+                    raise ValueError("non-positive")
+            except Exception:
+                csv_filter_max_rows = "200"
+            self.csv_filter_max_rows_var.set(csv_filter_max_rows)
+
+            csv_search_var_mode = str(display_settings.get("csv_search_variable_count_mode", "=0")).strip()
+            if csv_search_var_mode not in {"=0", "=-1", ">0"}:
+                csv_search_var_mode = "=0"
+            self.csv_search_variable_count_mode_var.set(csv_search_var_mode)
+
+            csv_search_mpc_mode = str(display_settings.get("csv_search_mpc_count_mode", "=0")).strip()
+            if csv_search_mpc_mode not in {"=0", "=-1", ">0"}:
+                csv_search_mpc_mode = "=0"
+            self.csv_search_mpc_count_mode_var.set(csv_search_mpc_mode)
         except Exception as e:
             self.logger.error(f"加载显示设置失败: {str(e)}")
 
@@ -1612,10 +1325,14 @@ class FitsImageViewer:
             return
         try:
             self.config_manager.update_display_settings(
-                default_display_mode=str(self.display_mode.get()).strip(),
-                default_colormap=str(self.colormap.get()).strip(),
                 csv_candidate_patch_size=str(self.csv_candidate_patch_size_var.get()).strip(),
                 csv_local_hist_level=str(self.csv_local_hist_level_var.get()).strip().lower(),
+                csv_search_median_flux_min=str(self.csv_search_median_flux_min_var.get()).strip(),
+                csv_search_median_flux_max=str(self.csv_search_median_flux_max_var.get()).strip(),
+                csv_search_variable_count_mode=str(self.csv_search_variable_count_mode_var.get()).strip(),
+                csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
+                csv_filter_skip_large_rows_enabled=bool(self.csv_filter_skip_large_rows_var.get()),
+                csv_filter_max_rows=str(self.csv_filter_max_rows_var.get()).strip(),
             )
         except Exception as e:
             self.logger.warning(f"保存显示设置失败: {e}")
@@ -1994,11 +1711,8 @@ class FitsImageViewer:
             # 创建子图
             ax = self.figure.add_subplot(111)
 
-            # 应用显示模式变换
-            display_data = self._apply_display_transform(self.current_fits_data)
-
-            # 显示图像
-            im = ax.imshow(display_data, cmap=self.colormap.get(), origin='lower')
+            # 显示图像（固定线性灰度）
+            im = ax.imshow(self.current_fits_data, cmap="gray", origin='lower')
 
             # 添加颜色条
             self.figure.colorbar(im, ax=ax, shrink=0.8)
@@ -2020,37 +1734,6 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"更新图像显示失败: {str(e)}")
             messagebox.showerror("错误", f"更新图像显示失败:\n{str(e)}")
-
-    def _apply_display_transform(self, data: np.ndarray) -> np.ndarray:
-        """应用显示变换"""
-        mode = self.display_mode.get()
-
-        # 处理负值和零值
-        data_min = np.min(data)
-        if data_min <= 0 and mode in ['log', 'sqrt']:
-            # 对于log和sqrt变换，需要处理负值
-            data = data - data_min + 1e-10
-
-        if mode == "linear":
-            return data
-        elif mode == "log":
-            return np.log10(np.maximum(data, 1e-10))
-        elif mode == "sqrt":
-            return np.sqrt(np.maximum(data, 0))
-        elif mode == "asinh":
-            return np.arcsinh(data)
-        else:
-            return data
-
-    def _on_display_mode_change(self, event=None):
-        """显示模式改变事件"""
-        self._save_display_settings()
-        self._update_image_display()
-
-    def _on_colormap_change(self, event=None):
-        """颜色映射改变事件"""
-        self._save_display_settings()
-        self._update_image_display()
 
     def _on_csv_candidate_view_option_changed(self, event=None):
         """CSV候选浏览显示参数改变时，重绘当前候选。"""
@@ -3018,12 +2701,34 @@ class FitsImageViewer:
             return iv > 0
         return False
 
-    def _row_matches_csv_filter_conditions(self, row: dict, flux_threshold: float, var_mode: str, mpc_mode: str) -> bool:
+    def _parse_csv_flux_range(self) -> Tuple[float, float]:
+        """解析 CSV flux 区间筛选条件，返回 (min, max)。"""
+        try:
+            flux_min = float(str(self.csv_search_median_flux_min_var.get()).strip())
+            flux_max = float(str(self.csv_search_median_flux_max_var.get()).strip())
+        except Exception:
+            raise ValueError("median_flux_norm 区间无效，请输入数字")
+        if flux_min >= flux_max:
+            raise ValueError("median_flux_norm 区间无效：下限必须小于上限")
+        return flux_min, flux_max
+
+    def _parse_csv_large_rows_skip_settings(self) -> Tuple[bool, int]:
+        """解析是否跳过大CSV及其行数阈值配置。"""
+        enabled = bool(self.csv_filter_skip_large_rows_var.get()) if hasattr(self, "csv_filter_skip_large_rows_var") else False
+        try:
+            max_rows = int(float(str(self.csv_filter_max_rows_var.get()).strip()))
+        except Exception:
+            raise ValueError("大CSV行数阈值无效，请输入正整数")
+        if max_rows <= 0:
+            raise ValueError("大CSV行数阈值无效，必须大于0")
+        return enabled, max_rows
+
+    def _row_matches_csv_filter_conditions(self, row: dict, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> bool:
         """按 AND 逻辑判断一行是否满足搜索条件。"""
         if not isinstance(row, dict):
             return False
         flux = self._try_get_float_from_row(row, ["median_flux_norm"])
-        if flux is None or not (flux > float(flux_threshold)):
+        if flux is None or not (float(flux_min) < flux < float(flux_max)):
             return False
         if not self._csv_count_mode_match(row.get("variable_count"), var_mode):
             return False
@@ -3084,9 +2789,9 @@ class FitsImageViewer:
                 return i
         return -1
 
-    def _get_csv_filter_condition_summary(self, flux_threshold: float, var_mode: str, mpc_mode: str) -> str:
+    def _get_csv_filter_condition_summary(self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> str:
         """返回 CSV 条件摘要文本。"""
-        return f"median_flux_norm>{flux_threshold:g} AND variable_count{var_mode} AND mpc_count{mpc_mode}"
+        return f"{flux_min:g}<median_flux_norm<{flux_max:g} AND variable_count{var_mode} AND mpc_count{mpc_mode}"
 
     def _set_csv_filter_search_status(self, text: str):
         """更新 CSV 条件搜索状态栏。"""
@@ -3169,7 +2874,7 @@ class FitsImageViewer:
         cmd_text = " ".join(cmd)
         try:
             self.logger.info("重跑Crossmatch命令: %s", cmd_text)
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+            proc = _run_command_capture_text(cmd)
             if proc.returncode != 0:
                 if proc.stdout:
                     self.logger.error("crossmatch stdout:\n%s", proc.stdout)
@@ -3252,123 +2957,189 @@ class FitsImageViewer:
         }
         self._update_coordinate_display(file_info)
 
+    def _build_csv_filter_tree_search_context(self, direction: int) -> Dict[str, Any]:
+        """与「向上/向下搜」相同的前置校验与树遍历参数。失败抛出 _CsvFilterSearchSetupError。"""
+        if not hasattr(self, "directory_tree"):
+            raise _CsvFilterSearchSetupError("目录树未初始化", kind="info")
+        try:
+            flux_min, flux_max = self._parse_csv_flux_range()
+        except ValueError as e:
+            raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
+        var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
+        mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
+            raise _CsvFilterSearchSetupError("variable_count / mpc_count 条件无效", kind="warning")
+        try:
+            skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
+        except ValueError as e:
+            raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
+
+        selection = self.directory_tree.selection()
+        if selection:
+            selected_node = selection[0]
+        else:
+            roots = self.directory_tree.get_children("")
+            if not roots:
+                raise _CsvFilterSearchSetupError("目录树为空，无法搜索", kind="info")
+            selected_node = roots[0]
+            try:
+                self.directory_tree.selection_set(selected_node)
+                self.directory_tree.focus(selected_node)
+                self.directory_tree.see(selected_node)
+            except Exception:
+                pass
+
+        tree_order = self._collect_tree_subtree_preorder(root_node=None)
+        if not tree_order:
+            raise _CsvFilterSearchSetupError("当前范围内没有可搜索节点", kind="info")
+
+        file_nodes = []
+        for node in tree_order:
+            tags = self.directory_tree.item(node, "tags")
+            if "fits_file" in tags:
+                values = self.directory_tree.item(node, "values")
+                if values:
+                    file_nodes.append(node)
+        if not file_nodes:
+            raise _CsvFilterSearchSetupError("整棵树内没有 FITS 文件", kind="info")
+
+        if selected_node in file_nodes:
+            start_file_idx = file_nodes.index(selected_node)
+        else:
+            try:
+                selected_pos = tree_order.index(selected_node)
+            except ValueError:
+                selected_pos = 0
+            positions = {n: tree_order.index(n) for n in file_nodes}
+            if direction > 0:
+                candidates = [i for i, n in enumerate(file_nodes) if positions[n] >= selected_pos]
+                start_file_idx = candidates[0] if candidates else 0
+            else:
+                candidates = [i for i, n in enumerate(file_nodes) if positions[n] <= selected_pos]
+                start_file_idx = candidates[-1] if candidates else (len(file_nodes) - 1)
+
+        if direction > 0:
+            file_iter_indices = range(start_file_idx, len(file_nodes))
+        else:
+            file_iter_indices = range(start_file_idx, -1, -1)
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            raise _CsvFilterSearchSetupError("下载目录未设置或不存在", kind="warning")
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            raise _CsvFilterSearchSetupError("输出目录未设置或不存在", kind="warning")
+
+        return {
+            "flux_min": flux_min,
+            "flux_max": flux_max,
+            "var_mode": var_mode,
+            "mpc_mode": mpc_mode,
+            "skip_large_csv": skip_large_csv,
+            "large_csv_max_rows": large_csv_max_rows,
+            "condition_summary": condition_summary,
+            "file_nodes": file_nodes,
+            "file_iter_indices": file_iter_indices,
+            "selected_node": selected_node,
+            "download_dir": download_dir,
+            "base_output_dir": base_output_dir,
+        }
+
+    def _iter_csv_filter_hits_from_context(
+        self,
+        ctx: Dict[str, Any],
+        direction: int,
+        *,
+        stop_after_first: bool,
+        stats: Dict[str, int],
+    ) -> Iterator[Tuple[Any, str, str, int, dict]]:
+        """按 ctx 在目录树序与行序上产出命中：(file_node, file_path, output_dir, raw_idx, row)。"""
+        flux_min = ctx["flux_min"]
+        flux_max = ctx["flux_max"]
+        var_mode = ctx["var_mode"]
+        mpc_mode = ctx["mpc_mode"]
+        skip_large_csv = ctx["skip_large_csv"]
+        large_csv_max_rows = ctx["large_csv_max_rows"]
+        file_nodes = ctx["file_nodes"]
+        file_iter_indices = ctx["file_iter_indices"]
+        selected_node = ctx["selected_node"]
+        download_dir = ctx["download_dir"]
+        base_output_dir = ctx["base_output_dir"]
+
+        for file_i in file_iter_indices:
+            node = file_nodes[file_i]
+            values = self.directory_tree.item(node, "values")
+            if not values:
+                continue
+            file_path = values[0]
+            output_dir = self._map_download_file_to_output_dir(file_path, download_dir, base_output_dir)
+            if not output_dir:
+                continue
+            csv_path = self._get_nonref_candidates_csv_path(output_dir)
+            if not csv_path:
+                continue
+
+            all_rows = self._load_variable_candidates_nonref_only(output_dir)
+            if not all_rows:
+                continue
+            if skip_large_csv and len(all_rows) > large_csv_max_rows:
+                stats["skipped_large_csv"] = stats.get("skipped_large_csv", 0) + 1
+                continue
+
+            current_raw_idx = -1
+            if selected_node == node:
+                current_raw_idx = self._resolve_current_raw_csv_index(output_dir, all_rows)
+
+            if direction > 0:
+                row_start = (current_raw_idx + 1) if current_raw_idx >= 0 else 0
+                row_range = range(row_start, len(all_rows))
+            else:
+                row_start = (current_raw_idx - 1) if current_raw_idx >= 0 else (len(all_rows) - 1)
+                row_range = range(row_start, -1, -1)
+
+            for raw_idx in row_range:
+                row = all_rows[raw_idx]
+                if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
+                    yield (node, file_path, output_dir, raw_idx, row)
+                    if stop_after_first:
+                        return
+
     def _jump_csv_row_by_filters(self, direction: int):
         """在整棵树内，按当前选中节点向上/向下搜索 CSV 行并精确定位。"""
         try:
-            if not hasattr(self, "directory_tree"):
-                messagebox.showinfo("提示", "目录树未初始化")
-                return
-
-            # 解析筛选条件
             try:
-                flux_threshold = float(str(self.csv_search_median_flux_min_var.get()).strip())
-            except Exception:
-                messagebox.showwarning("警告", "median_flux_norm 阈值无效，请输入数字")
-                return
-            var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
-            mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
-            if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
-                messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
-                return
-            condition_summary = self._get_csv_filter_condition_summary(flux_threshold, var_mode, mpc_mode)
-
-            selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showinfo("提示", "请先在目录树中选择一个起始节点")
-                return
-            selected_node = selection[0]
-
-            tree_order = self._collect_tree_subtree_preorder(root_node=None)
-            if not tree_order:
-                messagebox.showinfo("提示", "当前范围内没有可搜索节点")
-                return
-
-            # 仅保留文件节点，按目录树可见顺序
-            file_nodes = []
-            for node in tree_order:
-                tags = self.directory_tree.item(node, "tags")
-                if "fits_file" in tags:
-                    values = self.directory_tree.item(node, "values")
-                    if values:
-                        file_nodes.append(node)
-            if not file_nodes:
-                messagebox.showinfo("提示", "整棵树内没有 FITS 文件")
-                return
-
-            # 起始文件索引：优先当前选中节点；若不是文件节点，则从其后（向下）/其前（向上）最近文件开始
-            if selected_node in file_nodes:
-                start_file_idx = file_nodes.index(selected_node)
-            else:
-                try:
-                    selected_pos = tree_order.index(selected_node)
-                except ValueError:
-                    selected_pos = 0
-                positions = {n: tree_order.index(n) for n in file_nodes}
-                if direction > 0:
-                    candidates = [i for i, n in enumerate(file_nodes) if positions[n] >= selected_pos]
-                    start_file_idx = candidates[0] if candidates else 0
+                ctx = self._build_csv_filter_tree_search_context(direction)
+            except _CsvFilterSearchSetupError as e:
+                if e.kind == "info":
+                    messagebox.showinfo("提示", str(e))
                 else:
-                    candidates = [i for i, n in enumerate(file_nodes) if positions[n] <= selected_pos]
-                    start_file_idx = candidates[-1] if candidates else (len(file_nodes) - 1)
-
-            # 预计算文件遍历顺序
-            if direction > 0:
-                file_iter_indices = range(start_file_idx, len(file_nodes))
-            else:
-                file_iter_indices = range(start_file_idx, -1, -1)
-
-            download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
-            base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
-            if not download_dir or not os.path.isdir(download_dir):
-                messagebox.showwarning("警告", "下载目录未设置或不存在")
-                return
-            if not base_output_dir or not os.path.isdir(base_output_dir):
-                messagebox.showwarning("警告", "输出目录未设置或不存在")
+                    messagebox.showwarning("警告", str(e))
                 return
 
-            # 逐文件搜索匹配行
-            hit = None  # (file_node, file_path, output_dir, raw_row_index, row_dict)
-            for file_i in file_iter_indices:
-                node = file_nodes[file_i]
-                values = self.directory_tree.item(node, "values")
-                if not values:
-                    continue
-                file_path = values[0]
-                output_dir = self._map_download_file_to_output_dir(file_path, download_dir, base_output_dir)
-                if not output_dir:
-                    continue
-                csv_path = self._get_nonref_candidates_csv_path(output_dir)
-                if not csv_path:
-                    continue
+            self._save_display_settings()
+            flux_min, flux_max = ctx["flux_min"], ctx["flux_max"]
+            var_mode, mpc_mode = ctx["var_mode"], ctx["mpc_mode"]
+            skip_large_csv = ctx["skip_large_csv"]
+            condition_summary = ctx["condition_summary"]
 
-                all_rows = self._load_variable_candidates_nonref_only(output_dir)
-                if not all_rows:
-                    continue
-
-                # 同一文件内，基于当前显示行继续向前/向后，确保“每次命中都跳到精确下一条/上一条”
-                current_raw_idx = -1
-                if selected_node == node:
-                    current_raw_idx = self._resolve_current_raw_csv_index(output_dir, all_rows)
-
-                if direction > 0:
-                    row_start = (current_raw_idx + 1) if current_raw_idx >= 0 else 0
-                    row_range = range(row_start, len(all_rows))
-                else:
-                    row_start = (current_raw_idx - 1) if current_raw_idx >= 0 else (len(all_rows) - 1)
-                    row_range = range(row_start, -1, -1)
-
-                for raw_idx in row_range:
-                    row = all_rows[raw_idx]
-                    if self._row_matches_csv_filter_conditions(row, flux_threshold, var_mode, mpc_mode):
-                        hit = (node, file_path, output_dir, raw_idx, row)
-                        break
-
-                if hit:
-                    break
+            stats = {"skipped_large_csv": 0}
+            hit = None
+            for h in self._iter_csv_filter_hits_from_context(
+                ctx, direction, stop_after_first=True, stats=stats
+            ):
+                hit = h
+                break
+            skipped_large_csv_count = stats.get("skipped_large_csv", 0)
 
             if not hit:
                 direction_text = "向下" if direction > 0 else "向上"
-                self._set_csv_filter_search_status(f"当前命中：未找到 / 条件摘要：{condition_summary}")
+                if skip_large_csv:
+                    self._set_csv_filter_search_status(
+                        f"当前命中：未找到 / 条件摘要：{condition_summary} / 跳过大CSV={skipped_large_csv_count}"
+                    )
+                else:
+                    self._set_csv_filter_search_status(f"当前命中：未找到 / 条件摘要：{condition_summary}")
                 messagebox.showinfo("提示", f"在整棵树内，{direction_text}未找到满足条件的 CSV 行")
                 return
 
@@ -3421,15 +3192,21 @@ class FitsImageViewer:
             # 记录当前命中在原始CSV中的行索引，供下一次“向上/向下”作为稳定起点
             self._csv_search_current_raw_row_index = int(hit_raw_idx)
             self._csv_search_current_raw_output_dir = str(hit_output_dir)
-            self._set_csv_filter_search_status(
-                f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
-            )
+            if skip_large_csv:
+                self._set_csv_filter_search_status(
+                    f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary} / 跳过大CSV={skipped_large_csv_count}"
+                )
+            else:
+                self._set_csv_filter_search_status(
+                    f"当前命中：第{hit_raw_idx + 1}行 / 条件摘要：{condition_summary}"
+                )
             self.logger.info(
-                "CSV条件命中: file=%s, raw_row=%d, display_row=%d, flux>%s, var=%s, mpc=%s",
+                "CSV条件命中: file=%s, raw_row=%d, display_row=%d, %s<flux<%s, var=%s, mpc=%s",
                 os.path.basename(hit_file_path),
                 hit_raw_idx + 1,
                 display_index + 1,
-                flux_threshold,
+                flux_min,
+                flux_max,
                 var_mode,
                 mpc_mode,
             )
@@ -3445,6 +3222,7 @@ class FitsImageViewer:
             return
 
         selected_item = selection[0]
+        restore_anchor_paths = self._build_nearest_restore_anchor_paths(selected_item)
         values = self.directory_tree.item(selected_item, "values")
         tags = self.directory_tree.item(selected_item, "tags")
         if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
@@ -3527,6 +3305,7 @@ class FitsImageViewer:
                 self.logger.error("删除输出目录失败: %s, error=%s", target_dir, e)
 
         self._refresh_directory_tree()
+        self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
 
         if failed:
             msg_lines = [f"成功删除 {deleted_count} 个目录，失败 {len(failed)} 个。", ""]
@@ -3537,6 +3316,570 @@ class FitsImageViewer:
             messagebox.showwarning("部分删除失败", "\n".join(msg_lines))
         else:
             messagebox.showinfo("完成", f"已删除 {deleted_count} 个输出目录")
+
+    def _update_mjd_in_csvs_from_selected_node(self):
+        """按当前选中节点批量更新 nonref inner_border CSV 的 mjd 列。"""
+        selection = self.directory_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择一个目录或文件节点")
+            return
+
+        selected_item = selection[0]
+        restore_anchor_paths = self._build_nearest_restore_anchor_paths(selected_item)
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
+            messagebox.showwarning("警告", "请先选择下载目录树中的目录/文件节点（望远镜/日期/天区/FITS文件）")
+            return
+
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            messagebox.showwarning("警告", "输出根目录未设置或不存在")
+            return
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            messagebox.showwarning("警告", "下载目录未设置或不存在")
+            return
+
+        target_csv_paths = self._collect_nonref_inner_border_csv_paths_from_selected_node(
+            selected_item, download_dir, base_output_dir
+        )
+        if not target_csv_paths:
+            messagebox.showinfo("提示", "当前节点下未找到 variable_candidates_nonref_only_inner_border.csv")
+            return
+
+        preview_rel = []
+        for path in target_csv_paths[:8]:
+            try:
+                preview_rel.append(os.path.relpath(path, base_output_dir))
+            except Exception:
+                preview_rel.append(path)
+        preview_text = "\n".join(f"- {p}" for p in preview_rel)
+        suffix = "\n..." if len(target_csv_paths) > 8 else ""
+        confirm_msg = (
+            f"将更新 {len(target_csv_paths)} 个 CSV 的 mjd 列。\n"
+            f"时间来源：各 CSV 上级“文件名目录”中的 UTC 时间。\n\n"
+            f"{preview_text}{suffix}\n\n是否继续？"
+        )
+        if not messagebox.askyesno("确认更新MJD", confirm_msg):
+            return
+
+        try:
+            from astropy.time import Time
+        except Exception as e:
+            messagebox.showerror("错误", f"导入 astropy.time.Time 失败，无法计算MJD：\n{e}")
+            return
+
+        updated_files = 0
+        skipped_no_utc = 0
+        failed = []
+        updated_rows = 0
+
+        for csv_path in target_csv_paths:
+            try:
+                file_dir_name = os.path.basename(os.path.dirname(csv_path))
+                utc_dt = self._extract_utc_datetime_from_name(file_dir_name)
+                if utc_dt is None:
+                    skipped_no_utc += 1
+                    continue
+
+                mjd_value = float(Time(utc_dt).mjd)
+                row_count = self._write_mjd_column_to_csv(csv_path, mjd_value)
+                updated_files += 1
+                updated_rows += max(0, int(row_count))
+            except Exception as e:
+                failed.append((csv_path, str(e)))
+                self.logger.error("更新CSV的mjd失败: %s, error=%s", csv_path, e, exc_info=True)
+
+        self._refresh_directory_tree()
+        self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
+
+        if failed:
+            lines = [
+                f"共扫描 {len(target_csv_paths)} 个CSV",
+                f"成功更新 {updated_files} 个，更新行数 {updated_rows}",
+                f"跳过(未解析到UTC) {skipped_no_utc} 个",
+                f"失败 {len(failed)} 个",
+                "",
+            ]
+            for path, err in failed[:5]:
+                lines.append(f"- {path}: {err}")
+            if len(failed) > 5:
+                lines.append("...")
+            messagebox.showwarning("更新完成（部分失败）", "\n".join(lines))
+        else:
+            messagebox.showinfo(
+                "更新完成",
+                (
+                    f"共扫描 {len(target_csv_paths)} 个CSV\n"
+                    f"成功更新 {updated_files} 个，更新行数 {updated_rows}\n"
+                    f"跳过(未解析到UTC) {skipped_no_utc} 个"
+                ),
+            )
+
+    def _rerun_crossmatch_for_selected_node_filtered_rows(self):
+        """对当前节点下命中CSV筛选条件的行，按顺序串行重跑 crossmatch。"""
+        if getattr(self, "_batch_crossmatch_running", False):
+            messagebox.showinfo("提示", "批量Crossmatch正在执行，请稍候")
+            return
+
+        selection = self.directory_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择一个目录或文件节点")
+            return
+
+        selected_item = selection[0]
+        restore_anchor_paths = self._build_nearest_restore_anchor_paths(selected_item)
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        if not values or not any(tag in tags for tag in ("region", "date", "telescope", "root_dir", "fits_file")):
+            messagebox.showwarning("警告", "请先选择下载目录树中的目录/文件节点（望远镜/日期/天区/FITS文件）")
+            return
+
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            messagebox.showwarning("警告", "输出根目录未设置或不存在")
+            return
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            messagebox.showwarning("警告", "下载目录未设置或不存在")
+            return
+
+        target_csv_paths = self._collect_nonref_inner_border_csv_paths_from_selected_node(
+            selected_item, download_dir, base_output_dir
+        )
+        if not target_csv_paths:
+            messagebox.showinfo("提示", "当前节点下未找到 variable_candidates_nonref_only_inner_border.csv")
+            return
+
+        # 复用当前CSV筛选条件
+        try:
+            flux_min, flux_max = self._parse_csv_flux_range()
+        except ValueError as e:
+            messagebox.showwarning("警告", str(e))
+            return
+        var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
+        mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
+            messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
+            return
+        try:
+            skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
+        except ValueError as e:
+            messagebox.showwarning("警告", str(e))
+            return
+        self._save_display_settings()
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
+
+        crossmatch_script = self._get_crossmatch_nonref_script_path()
+        if not crossmatch_script or not os.path.exists(crossmatch_script):
+            messagebox.showwarning("警告", f"crossmatch脚本不存在:\n{crossmatch_script}")
+            return
+
+        tasks, stats = self._collect_crossmatch_tasks_for_csv_filters(
+            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode, skip_large_csv, large_csv_max_rows
+        )
+        if not tasks:
+            messagebox.showinfo(
+                "提示",
+                (
+                    "当前节点下没有命中筛选条件且可执行的 rank。\n"
+                    f"条件：{condition_summary}\n"
+                    f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
+                    f"无效rank行: {stats.get('invalid_rank_rows', 0)}，"
+                    f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}"
+                ),
+            )
+            return
+
+        preview = []
+        for task in tasks[:8]:
+            csv_path = task["csv_path"]
+            rank_value = task["rank"]
+            try:
+                rel = os.path.relpath(csv_path, base_output_dir)
+            except Exception:
+                rel = csv_path
+            preview.append(f"- {rel} | rank={rank_value}")
+        preview_text = "\n".join(preview)
+        suffix = "\n..." if len(tasks) > 8 else ""
+        confirm_msg = (
+            f"将串行执行 {len(tasks)} 次 Crossmatch（不并行）。\n"
+            f"条件：{condition_summary}\n"
+            f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
+            f"无效rank行: {stats.get('invalid_rank_rows', 0)}，重复rank去重: {stats.get('dedup_rank_rows', 0)}，"
+            f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}\n\n"
+            f"{preview_text}{suffix}\n\n是否继续？"
+        )
+        if not messagebox.askyesno("确认批量重跑Crossmatch", confirm_msg):
+            return
+
+        self._batch_crossmatch_running = True
+        self._set_crossmatch_rerun_buttons_enabled(False)
+        if hasattr(self, "diff_progress_label"):
+            self.diff_progress_label.config(
+                text=f"批量Crossmatch准备执行: 0/{len(tasks)}",
+                foreground="blue",
+            )
+
+        thread = threading.Thread(
+            target=self._rerun_crossmatch_tasks_serial_thread,
+            args=(crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats),
+            daemon=True,
+        )
+        thread.start()
+
+    def _get_crossmatch_nonref_script_path(self):
+        """读取 crossmatch_nonref_candidates 脚本路径（含默认值回退）。"""
+        default_crossmatch = "D:/github/misaligned_fits/crossmatch_nonref_candidates.py"
+        pipeline_settings = {}
+        if self.config_manager and hasattr(self.config_manager, "get_diff_pipeline_settings"):
+            try:
+                loaded = self.config_manager.get_diff_pipeline_settings()
+                if isinstance(loaded, dict):
+                    pipeline_settings = loaded
+            except Exception as e:
+                self.logger.warning(f"读取diff流水线配置失败，使用默认crossmatch脚本路径: {e}")
+        script_paths = pipeline_settings.get("script_paths", {}) if isinstance(pipeline_settings, dict) else {}
+        return script_paths.get("crossmatch_nonref_candidates", default_crossmatch)
+
+    def _collect_crossmatch_tasks_for_csv_filters(
+        self,
+        csv_paths,
+        flux_min,
+        flux_max,
+        var_mode,
+        mpc_mode,
+        skip_large_csv: bool = False,
+        large_csv_max_rows: int = 200,
+    ):
+        """扫描CSV并收集需执行的 (csv_path, rank) 任务，按顺序串行。"""
+        tasks = []
+        matched_rows = 0
+        invalid_rank_rows = 0
+        dedup_rank_rows = 0
+        skipped_large_csv_count = 0
+
+        for csv_path in csv_paths:
+            output_dir = os.path.dirname(csv_path)
+            rows = self._load_variable_candidates_nonref_only(output_dir)
+            if skip_large_csv and len(rows) > large_csv_max_rows:
+                skipped_large_csv_count += 1
+                continue
+            seen_ranks = set()
+            for row in rows:
+                if not self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
+                    continue
+                matched_rows += 1
+                rank_value = self._try_parse_int_from_csv_value(row.get("rank"))
+                if rank_value is None or rank_value <= 0:
+                    invalid_rank_rows += 1
+                    continue
+                if rank_value in seen_ranks:
+                    dedup_rank_rows += 1
+                    continue
+                seen_ranks.add(rank_value)
+                tasks.append(
+                    {
+                        "csv_path": csv_path,
+                        "output_dir": output_dir,
+                        "rank": int(rank_value),
+                    }
+                )
+
+        stats = {
+            "matched_rows": matched_rows,
+            "invalid_rank_rows": invalid_rank_rows,
+            "dedup_rank_rows": dedup_rank_rows,
+            "skipped_large_csv_count": skipped_large_csv_count,
+            "csv_count": len(csv_paths),
+            "task_count": len(tasks),
+        }
+        return tasks, stats
+
+    def _set_crossmatch_rerun_buttons_enabled(self, enabled: bool):
+        """统一控制重跑Crossmatch相关按钮状态。"""
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "rerun_crossmatch_button"):
+            self.rerun_crossmatch_button.config(state=state)
+        if hasattr(self, "rerun_crossmatch_filtered_button"):
+            self.rerun_crossmatch_filtered_button.config(state=state)
+
+    def _rerun_crossmatch_tasks_serial_thread(self, crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats):
+        """后台串行执行批量 crossmatch 任务（单线程、按顺序）。"""
+        py = sys.executable or "python"
+        success_count = 0
+        failed = []
+        total = len(tasks)
+
+        try:
+            for index, task in enumerate(tasks, start=1):
+                csv_path = task["csv_path"]
+                output_dir = task["output_dir"]
+                rank_value = task["rank"]
+                cmd = [
+                    py,
+                    crossmatch_script,
+                    "--input-csv", csv_path,
+                    "--only-rank", str(rank_value),
+                ]
+                cmd_text = " ".join(cmd)
+                self.logger.info("批量重跑Crossmatch(%d/%d): %s", index, total, cmd_text)
+
+                if hasattr(self, "diff_progress_label"):
+                    self.parent_frame.after(
+                        0,
+                        lambda i=index, t=total, r=rank_value: self.diff_progress_label.config(
+                            text=f"批量Crossmatch执行中: {i}/{t} (rank={r})",
+                            foreground="blue",
+                        ),
+                    )
+
+                proc = _run_command_capture_text(cmd)
+                if proc.returncode != 0:
+                    err_text = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+                    failed.append((csv_path, rank_value, err_text))
+                    if proc.stdout:
+                        self.logger.error("crossmatch stdout:\n%s", proc.stdout)
+                    if proc.stderr:
+                        self.logger.error("crossmatch stderr:\n%s", proc.stderr)
+                    continue
+
+                if proc.stdout:
+                    self.logger.info("crossmatch stdout:\n%s", proc.stdout)
+                if proc.stderr:
+                    self.logger.warning("crossmatch stderr:\n%s", proc.stderr)
+
+                success_count += 1
+                # 仅在当前正在浏览同一输出目录时刷新缓存，避免跳屏
+                if os.path.normpath(str(getattr(self, "_current_csv_output_dir", ""))) == os.path.normpath(output_dir):
+                    self.parent_frame.after(
+                        0,
+                        lambda od=output_dir: self._reload_csv_candidates_for_display(od, keep_current_index=True),
+                    )
+
+        except Exception as e:
+            self.logger.error("批量重跑Crossmatch异常: %s", e, exc_info=True)
+            failed.append(("<thread>", -1, str(e)))
+        finally:
+            self.parent_frame.after(
+                0,
+                lambda: self._on_crossmatch_tasks_serial_done(
+                    success_count=success_count,
+                    failed=failed,
+                    restore_anchor_paths=restore_anchor_paths,
+                    condition_summary=condition_summary,
+                    stats=stats,
+                ),
+            )
+
+    def _on_crossmatch_tasks_serial_done(self, success_count, failed, restore_anchor_paths, condition_summary, stats):
+        """批量 crossmatch 串行任务结束后的UI收尾。"""
+        try:
+            self._refresh_directory_tree()
+            self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
+        except Exception as e:
+            self.logger.warning(f"批量Crossmatch完成后刷新目录失败: {e}")
+
+        self._batch_crossmatch_running = False
+        self._set_crossmatch_rerun_buttons_enabled(True)
+
+        failed_count = len(failed)
+        total = int(stats.get("task_count", success_count + failed_count))
+        if hasattr(self, "diff_progress_label"):
+            if failed_count == 0:
+                self.diff_progress_label.config(
+                    text=f"✓ 批量Crossmatch完成: {success_count}/{total}",
+                    foreground="green",
+                )
+            else:
+                self.diff_progress_label.config(
+                    text=f"✗ 批量Crossmatch部分失败: 成功{success_count} 失败{failed_count}",
+                    foreground="red",
+                )
+
+        summary_lines = [
+            f"条件: {condition_summary}",
+            f"扫描CSV: {stats.get('csv_count', 0)}",
+            f"命中行: {stats.get('matched_rows', 0)}",
+            f"无效rank行: {stats.get('invalid_rank_rows', 0)}",
+            f"重复rank去重: {stats.get('dedup_rank_rows', 0)}",
+            f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}",
+            f"执行任务: {total}",
+            f"成功: {success_count}",
+            f"失败: {failed_count}",
+        ]
+
+        if failed_count > 0:
+            summary_lines.append("")
+            for csv_path, rank_value, err in failed[:5]:
+                summary_lines.append(f"- rank={rank_value} | {csv_path}: {err}")
+            if failed_count > 5:
+                summary_lines.append("...")
+            messagebox.showwarning("批量重跑Crossmatch完成（部分失败）", "\n".join(summary_lines))
+        else:
+            messagebox.showinfo("批量重跑Crossmatch完成", "\n".join(summary_lines))
+
+    def _collect_nonref_inner_border_csv_paths_from_selected_node(self, selected_item, download_dir, base_output_dir):
+        """收集当前节点映射输出目录下所有目标CSV路径。"""
+        csv_name = "variable_candidates_nonref_only_inner_border.csv"
+        values = self.directory_tree.item(selected_item, "values")
+        tags = self.directory_tree.item(selected_item, "tags")
+        collected = set()
+
+        if values and "fits_file" in tags:
+            mapped_file_output_dir = self._map_download_file_to_output_dir(values[0], download_dir, base_output_dir)
+            if mapped_file_output_dir:
+                csv_path = os.path.join(mapped_file_output_dir, csv_name)
+                if os.path.isfile(csv_path):
+                    collected.add(os.path.normpath(csv_path))
+            return sorted(collected)
+
+        source_dirs = self._collect_download_directory_nodes(selected_item, download_dir)
+        mapped_output_dirs = []
+        for source_dir in source_dirs:
+            mapped = self._map_download_dir_to_output_dir(source_dir, download_dir, base_output_dir)
+            if mapped and os.path.isdir(mapped):
+                mapped_output_dirs.append(mapped)
+
+        mapped_output_dirs = self._compress_parent_paths(mapped_output_dirs)
+        for output_dir in mapped_output_dirs:
+            for root, _dirs, files in os.walk(output_dir):
+                if csv_name in files:
+                    collected.add(os.path.normpath(os.path.join(root, csv_name)))
+
+        return sorted(collected)
+
+    def _extract_utc_datetime_from_name(self, name: str):
+        """从名称中提取 UTC 时间（UTCYYYYMMDD_HHMMSS）并返回 datetime。"""
+        try:
+            if not name:
+                return None
+            match = re.search(r"UTC(\d{8})_(\d{6})", str(name))
+            if not match:
+                return None
+            date_str = match.group(1)
+            time_str = match.group(2)
+            return datetime.strptime(f"{date_str}{time_str}", "%Y%m%d%H%M%S")
+        except Exception:
+            return None
+
+    def _write_mjd_column_to_csv(self, csv_path: str, mjd_value: float) -> int:
+        """将CSV中每行的mjd写为给定值；若无mjd列则新增。返回写入行数。"""
+        rows = []
+        fieldnames = []
+
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            for row in reader:
+                if row is None:
+                    continue
+                rows.append(dict(row))
+
+        if not fieldnames:
+            raise ValueError("CSV缺少表头，无法写入mjd")
+
+        if "mjd" not in fieldnames:
+            fieldnames.append("mjd")
+
+        mjd_text = f"{float(mjd_value):.8f}"
+        for row in rows:
+            row["mjd"] = mjd_text
+
+        backup_path = f"{csv_path}.bak"
+        try:
+            shutil.copy2(csv_path, backup_path)
+        except Exception as e:
+            self.logger.warning("创建CSV备份失败，将继续写入: %s, error=%s", csv_path, e)
+
+        temp_path = f"{csv_path}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            os.replace(temp_path, csv_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+        return len(rows)
+
+    def _build_nearest_restore_anchor_paths(self, selected_item) -> list:
+        """按“当前节点->相邻同级->父级祖先”顺序构建刷新后恢复选择的路径候选。"""
+        anchors = []
+        parent_item = self.directory_tree.parent(selected_item)
+        siblings = list(self.directory_tree.get_children(parent_item))
+
+        if selected_item in siblings:
+            selected_idx = siblings.index(selected_item)
+            max_offset = max(selected_idx, len(siblings) - 1 - selected_idx)
+            for offset in range(max_offset + 1):
+                if offset == 0:
+                    probe_indices = [selected_idx]
+                else:
+                    probe_indices = [selected_idx + offset, selected_idx - offset]
+                for idx in probe_indices:
+                    if idx < 0 or idx >= len(siblings):
+                        continue
+                    vals = self.directory_tree.item(siblings[idx], "values")
+                    if vals and vals[0]:
+                        anchors.append(os.path.normpath(vals[0]))
+
+        current = parent_item
+        while current:
+            vals = self.directory_tree.item(current, "values")
+            if vals and vals[0]:
+                anchors.append(os.path.normpath(vals[0]))
+            current = self.directory_tree.parent(current)
+
+        unique = []
+        seen = set()
+        for path in anchors:
+            if path in seen:
+                continue
+            seen.add(path)
+            unique.append(path)
+        return unique
+
+    def _find_tree_node_by_value_path(self, target_path):
+        """按节点 values[0] 精确匹配路径并返回节点 ID。"""
+        if not target_path:
+            return None
+        target_norm = os.path.normpath(str(target_path))
+
+        def walk(parent):
+            for child in self.directory_tree.get_children(parent):
+                vals = self.directory_tree.item(child, "values")
+                if vals and vals[0] and os.path.normpath(str(vals[0])) == target_norm:
+                    return child
+                found = walk(child)
+                if found:
+                    return found
+            return None
+
+        return walk("")
+
+    def _restore_tree_selection_by_anchor_paths(self, anchor_paths):
+        """刷新后根据候选路径恢复到最近节点。"""
+        if not anchor_paths:
+            return
+        for path in anchor_paths:
+            node = self._find_tree_node_by_value_path(path)
+            if not node:
+                continue
+            self._auto_selecting = True
+            self.directory_tree.selection_set(node)
+            self.directory_tree.focus(node)
+            self.directory_tree.see(node)
+            self.parent_frame.after(10, lambda: setattr(self, "_auto_selecting", False))
+            return
 
     def _get_same_level_items_from_selected(self, selected_item):
         """获取从当前选中节点开始到末尾的同级节点列表。"""
@@ -5001,7 +5344,7 @@ class FitsImageViewer:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
-                "enable_export_nonref_candidate_ab_cutouts": True,
+                "enable_export_nonref_candidate_ab_cutouts": False,
                 "nonref_candidate_cutout_size": 128,
             }
             pipeline_settings = default_pipeline
@@ -5167,54 +5510,106 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            skipped_commands = []
+            render_command = (
+                "渲染对齐结果",
+                [
+                    py, render_script,
+                    "--a", template_file,
+                    "--b", rp_fit,
+                    "--align", align_npz,
+                    "--outdir", output_dir,
+                ],
+            )
             if not fast_mode_enabled:
-                commands.insert(
-                    4,
-                    (
-                        "渲染对齐结果",
-                        [
-                            py, render_script,
-                            "--a", template_file,
-                            "--b", rp_fit,
-                            "--align", align_npz,
-                            "--outdir", output_dir,
-                        ],
-                    ),
-                )
+                commands.insert(4, render_command)
             else:
                 self.logger.info("快速模式已启用：跳过步骤[渲染对齐结果]")
-            if enable_crossmatch_nonref_candidates:
-                commands.append(
-                    (
-                        "交叉匹配非参考候选",
-                        [
-                            py, crossmatch_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--find-mpc-csv", out_find_mpc_csv,
-                            "--ref-fits", template_file,
-                        ],
-                    )
+                skipped_commands.append(
+                    (render_command[0], render_command[1], "快速模式已启用")
                 )
+            crossmatch_command = (
+                "交叉匹配非参考候选",
+                [
+                    py, crossmatch_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--find-mpc-csv", out_find_mpc_csv,
+                    "--ref-fits", template_file,
+                ],
+            )
+            if enable_crossmatch_nonref_candidates:
+                commands.append(crossmatch_command)
+            else:
+                skipped_commands.append(
+                    (crossmatch_command[0], crossmatch_command[1], "配置已禁用 enable_crossmatch_nonref_candidates")
+                )
+            export_nonref_cutouts_command = (
+                "导出非参考候选AB切图",
+                [
+                    py, export_nonref_cutouts_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--a-fits", template_file,
+                    "--b-fits", rp_fit,
+                    "--a-stars-all", template_stars_all,
+                    "--b-stars-all", rp_stars_all,
+                    "--align-npz", align_npz,
+                    "--cutout-size", nonref_candidate_cutout_size,
+                ],
+            )
             if enable_export_nonref_candidate_ab_cutouts:
-                commands.append(
+                commands.append(export_nonref_cutouts_command)
+            else:
+                skipped_commands.append(
                     (
-                        "导出非参考候选AB切图",
-                        [
-                            py, export_nonref_cutouts_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--a-fits", template_file,
-                            "--b-fits", rp_fit,
-                            "--a-stars-all", template_stars_all,
-                            "--b-stars-all", rp_stars_all,
-                            "--align-npz", align_npz,
-                            "--cutout-size", nonref_candidate_cutout_size,
-                        ],
+                        export_nonref_cutouts_command[0],
+                        export_nonref_cutouts_command[1],
+                        "配置已禁用 enable_export_nonref_candidate_ab_cutouts",
                     )
                 )
 
             timing_records = []
+            commands_manifest_path = os.path.join(output_dir, "pipeline_commands.txt")
+            try:
+                manifest_lines = [
+                    "# Diff pipeline commands",
+                    f"# Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"# Template FITS: {template_file}",
+                    f"# Source FITS: {source_file_for_pipeline}",
+                    f"# Output directory: {output_dir}",
+                    f"# Fast mode: {'on' if fast_mode_enabled else 'off'}",
+                    "",
+                    "## Will Execute",
+                    "",
+                ]
+                for index, (step_name, cmd) in enumerate(commands, start=1):
+                    manifest_lines.extend(
+                        [
+                            f"[{index}] {step_name}",
+                            subprocess.list2cmdline(cmd),
+                            "",
+                        ]
+                    )
+                manifest_lines.extend(["## Skipped", ""])
+                if skipped_commands:
+                    for index, (step_name, cmd, reason) in enumerate(skipped_commands, start=1):
+                        manifest_lines.extend(
+                            [
+                                f"[{index}] {step_name}",
+                                f"Reason: {reason}",
+                                subprocess.list2cmdline(cmd),
+                                "",
+                            ]
+                        )
+                else:
+                    manifest_lines.extend(["(none)", ""])
+
+                with open(commands_manifest_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(manifest_lines))
+                self.logger.info("已写入命令清单: %s", commands_manifest_path)
+            except Exception as e:
+                self.logger.warning("写入命令清单失败: %s", e)
             for step_name, cmd in commands:
-                cmd_text = " ".join(cmd)
+                cmd_text = subprocess.list2cmdline(cmd)
                 self.parent_frame.after(
                     0,
                     lambda n=step_name: self.diff_progress_label.config(
@@ -5223,7 +5618,7 @@ class FitsImageViewer:
                 )
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
                 step_start_ts = time.time()
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                proc = _run_command_capture_text(cmd)
                 step_end_ts = time.time()
                 timing_records.append(
                     {
@@ -5681,7 +6076,7 @@ class FitsImageViewer:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
-                "enable_export_nonref_candidate_ab_cutouts": True,
+                "enable_export_nonref_candidate_ab_cutouts": False,
                 "nonref_candidate_cutout_size": 128,
             }
             pipeline_settings = default_pipeline
@@ -5847,58 +6242,110 @@ class FitsImageViewer:
                     ],
                 ),
             ]
+            skipped_commands = []
+            render_command = (
+                "渲染对齐结果",
+                [
+                    py, render_script,
+                    "--a", template_file,
+                    "--b", rp_fit,
+                    "--align", align_npz,
+                    "--outdir", output_dir,
+                ],
+            )
             if not fast_mode_enabled:
-                commands.insert(
-                    4,
-                    (
-                        "渲染对齐结果",
-                        [
-                            py, render_script,
-                            "--a", template_file,
-                            "--b", rp_fit,
-                            "--align", align_npz,
-                            "--outdir", output_dir,
-                        ],
-                    ),
-                )
+                commands.insert(4, render_command)
             else:
                 self.logger.info("快速模式已启用：跳过步骤[渲染对齐结果]")
-            if enable_crossmatch_nonref_candidates:
-                commands.append(
-                    (
-                        "交叉匹配非参考候选",
-                        [
-                            py, crossmatch_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--find-mpc-csv", out_find_mpc_csv,
-                            "--ref-fits", template_file,
-                        ],
-                    )
+                skipped_commands.append(
+                    (render_command[0], render_command[1], "快速模式已启用")
                 )
+            crossmatch_command = (
+                "交叉匹配非参考候选",
+                [
+                    py, crossmatch_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--find-mpc-csv", out_find_mpc_csv,
+                    "--ref-fits", template_file,
+                ],
+            )
+            if enable_crossmatch_nonref_candidates:
+                commands.append(crossmatch_command)
+            else:
+                skipped_commands.append(
+                    (crossmatch_command[0], crossmatch_command[1], "配置已禁用 enable_crossmatch_nonref_candidates")
+                )
+            export_nonref_cutouts_command = (
+                "导出非参考候选AB切图",
+                [
+                    py, export_nonref_cutouts_script,
+                    "--input-csv", out_csv_nonref_inner_border,
+                    "--a-fits", template_file,
+                    "--b-fits", rp_fit,
+                    "--a-stars-all", template_stars_all,
+                    "--b-stars-all", rp_stars_all,
+                    "--align-npz", align_npz,
+                    "--cutout-size", nonref_candidate_cutout_size,
+                ],
+            )
             if enable_export_nonref_candidate_ab_cutouts:
-                commands.append(
+                commands.append(export_nonref_cutouts_command)
+            else:
+                skipped_commands.append(
                     (
-                        "导出非参考候选AB切图",
-                        [
-                            py, export_nonref_cutouts_script,
-                            "--input-csv", out_csv_nonref_inner_border,
-                            "--a-fits", template_file,
-                            "--b-fits", rp_fit,
-                            "--a-stars-all", template_stars_all,
-                            "--b-stars-all", rp_stars_all,
-                            "--align-npz", align_npz,
-                            "--cutout-size", nonref_candidate_cutout_size,
-                        ],
+                        export_nonref_cutouts_command[0],
+                        export_nonref_cutouts_command[1],
+                        "配置已禁用 enable_export_nonref_candidate_ab_cutouts",
                     )
                 )
 
             timing_records = []
+            commands_manifest_path = os.path.join(output_dir, "pipeline_commands.txt")
+            try:
+                manifest_lines = [
+                    "# Diff pipeline commands",
+                    f"# Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"# Template FITS: {template_file}",
+                    f"# Source FITS: {source_file_for_pipeline}",
+                    f"# Output directory: {output_dir}",
+                    f"# Fast mode: {'on' if fast_mode_enabled else 'off'}",
+                    "",
+                    "## Will Execute",
+                    "",
+                ]
+                for index, (step_name, cmd) in enumerate(commands, start=1):
+                    manifest_lines.extend(
+                        [
+                            f"[{index}] {step_name}",
+                            subprocess.list2cmdline(cmd),
+                            "",
+                        ]
+                    )
+                manifest_lines.extend(["## Skipped", ""])
+                if skipped_commands:
+                    for index, (step_name, cmd, reason) in enumerate(skipped_commands, start=1):
+                        manifest_lines.extend(
+                            [
+                                f"[{index}] {step_name}",
+                                f"Reason: {reason}",
+                                subprocess.list2cmdline(cmd),
+                                "",
+                            ]
+                        )
+                else:
+                    manifest_lines.extend(["(none)", ""])
+
+                with open(commands_manifest_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(manifest_lines))
+                self.logger.info("已写入命令清单: %s", commands_manifest_path)
+            except Exception as e:
+                self.logger.warning("写入命令清单失败: %s", e)
             for step_name, cmd in commands:
                 progress_callback(f"正在执行: {step_name}")
-                cmd_text = " ".join(cmd)
+                cmd_text = subprocess.list2cmdline(cmd)
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
                 step_start_ts = time.time()
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                proc = _run_command_capture_text(cmd)
                 step_end_ts = time.time()
                 timing_records.append(
                     {
@@ -6263,11 +6710,10 @@ class FitsImageViewer:
         except Exception:
             return None
 
-    def _get_csv_mode_aligned_fits(self):
-        """CSV模式下获取aligned FITS路径（优先*.02rp.fit）。"""
-        output_dir = getattr(self, "_current_csv_output_dir", None)
+    def _find_primary_aligned_fits_in_output_dir(self, output_dir: str) -> Optional[str]:
+        """在 Diff 输出目录中查找用于 CSV 局部分显示的 aligned FITS（优先 *.02rp.fit）。"""
         if not output_dir or not os.path.exists(output_dir):
-            return self.selected_file_path if self.selected_file_path and os.path.exists(self.selected_file_path) else None
+            return None
         try:
             rp_files = sorted(Path(output_dir).glob("*.02rp.fit"))
             if rp_files:
@@ -6276,7 +6722,15 @@ class FitsImageViewer:
             if fallback:
                 return str(fallback[0])
         except Exception:
-            pass
+            return None
+        return None
+
+    def _get_csv_mode_aligned_fits(self):
+        """CSV模式下获取aligned FITS路径（优先*.02rp.fit）。"""
+        output_dir = getattr(self, "_current_csv_output_dir", None)
+        found = self._find_primary_aligned_fits_in_output_dir(output_dir) if output_dir else None
+        if found:
+            return found
         return self.selected_file_path if self.selected_file_path and os.path.exists(self.selected_file_path) else None
 
     def _get_csv_mode_rank_aligned_png(self):
@@ -6291,6 +6745,150 @@ class FitsImageViewer:
         if os.path.exists(fallback):
             return fallback
         return None
+
+    def _get_configured_diff_output_root_dir(self) -> Optional[str]:
+        """配置的 diff 输出根目录（gui 中 diff_output_directory）。"""
+        if not self.get_diff_output_dir_callback:
+            return None
+        root = self.get_diff_output_dir_callback()
+        if not root or not os.path.isdir(root):
+            return None
+        return os.path.normpath(root)
+
+    def _export_filtered_aligned_csv_patches(self):
+        """主线程按「向下搜」相同规则枚举全部命中，后台逐条导出 Aligned 局部 PNG（无星标）。
+
+        保存目录：配置的 diff_output_directory 的**父目录**下新建 ai_{YYYYMMDD}。
+        """
+        btn = getattr(self, "_export_aligned_filtered_button", None)
+
+        try:
+            ctx = self._build_csv_filter_tree_search_context(direction=1)
+        except _CsvFilterSearchSetupError as e:
+            if e.kind == "info":
+                messagebox.showinfo("提示", str(e))
+            else:
+                messagebox.showwarning("警告", str(e))
+            return
+
+        self._save_display_settings()
+        stats: Dict[str, int] = {"skipped_large_csv": 0}
+        hits = list(
+            self._iter_csv_filter_hits_from_context(ctx, 1, stop_after_first=False, stats=stats)
+        )
+        if not hits:
+            msg = "在整棵树内，向下未找到满足条件的 CSV 行。"
+            if ctx["skip_large_csv"]:
+                msg += f"\n（跳过大 CSV 的文件数：{stats.get('skipped_large_csv', 0)}）"
+            messagebox.showinfo("提示", msg)
+            return
+
+        condition_summary = ctx["condition_summary"]
+
+        def worker():
+            try:
+                n, dest = self._export_filtered_aligned_csv_patches_worker(hits, condition_summary)
+                self.parent_frame.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "导出完成",
+                        f"已导出 {n} 张 PNG。\n目录：\n{dest}",
+                    ),
+                )
+            except ValueError as e:
+                self.parent_frame.after(0, lambda msg=str(e): messagebox.showwarning("无法导出", msg))
+            except Exception as e:
+                self.logger.exception("导出 Aligned(筛选) 失败")
+                self.parent_frame.after(
+                    0,
+                    lambda msg=str(e): messagebox.showerror("导出失败", msg),
+                )
+            finally:
+                if btn is not None:
+                    self.parent_frame.after(0, lambda: btn.config(state="normal"))
+
+        if btn is not None:
+            btn.config(state="disabled")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_filtered_aligned_csv_patches_worker(
+        self, hits: List[Tuple[Any, str, str, int, dict]], condition_summary: str
+    ) -> Tuple[int, str]:
+        """执行导出，返回 (导出数量, 目标目录路径)。可能抛出 ValueError。"""
+        root = self._get_configured_diff_output_root_dir()
+        if not root:
+            raise ValueError("请先在配置中设置 diff 输出目录（且路径存在）。")
+
+        root_path = Path(os.path.normpath(root)).resolve()
+        parent_dir = root_path.parent
+        if parent_dir == root_path:
+            raise ValueError(
+                "配置的 diff 输出目录没有可用的父目录（例如盘符根），无法在侧级创建 ai_* 目录；请使用更深的路径。"
+            )
+        dest_dir = str(parent_dir / f"ai_{datetime.now().strftime('%Y%m%d')}")
+        os.makedirs(dest_dir, exist_ok=True)
+
+        patch_size_px = self._get_csv_patch_size_px()
+        half = max(1, int(round(patch_size_px / 2.0)))
+        hist_level = (
+            str(self.csv_local_hist_level_var.get()).strip().lower()
+            if hasattr(self, "csv_local_hist_level_var")
+            else "high"
+        )
+
+        cached_output_dir: Optional[str] = None
+        aligned_data = None
+        aligned_header = None
+        n_ok = 0
+        for seq_idx, (_node, _file_path, output_dir, raw_idx, row) in enumerate(hits):
+            if output_dir != cached_output_dir:
+                aligned_fits = self._find_primary_aligned_fits_in_output_dir(output_dir)
+                if not aligned_fits:
+                    self.logger.warning("跳过：输出目录中未找到 aligned FITS：%s", output_dir)
+                    cached_output_dir = None
+                    aligned_data = None
+                    aligned_header = None
+                    continue
+                aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
+                if aligned_data is None:
+                    self.logger.warning("跳过：无法读取 aligned FITS：%s", aligned_fits)
+                    cached_output_dir = None
+                    aligned_data = None
+                    aligned_header = None
+                    continue
+                cached_output_dir = output_dir
+
+            if aligned_data is None or aligned_header is None:
+                continue
+
+            x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
+            if x is None or y is None:
+                self.logger.warning(
+                    "跳过一行：无法解析像素坐标 output_dir=%s raw_idx=%s", output_dir, raw_idx
+                )
+                continue
+            patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=half)
+            u8 = self._stretch_patch_to_uint8(patch, level=hist_level)
+            rank_raw = str(row.get("rank", "") or "").strip() or str(seq_idx + 1)
+            rank_safe = self._sanitize_output_name(rank_raw)
+            frame_tag = self._sanitize_output_name(os.path.basename(output_dir.rstrip("/\\")))
+            fname = f"{frame_tag}_rank{rank_safe}_{n_ok:04d}_aligned.png"
+            out_path = os.path.join(dest_dir, fname)
+            if not cv2.imwrite(out_path, u8):
+                self.logger.warning("写入失败: %s", out_path)
+                continue
+            n_ok += 1
+
+        self.logger.info(
+            "导出 Aligned(向下搜全量): %d 张 -> %s (条件: %s, 枚举命中=%d)",
+            n_ok,
+            dest_dir,
+            condition_summary,
+            len(hits),
+        )
+        if n_ok == 0:
+            raise ValueError("没有可导出的候选（缺少 aligned FITS、坐标解析失败或写入失败）。")
+        return n_ok, os.path.abspath(dest_dir)
 
     def _display_csv_candidate_by_index(self, index: int):
         """在主图中显示 CSV 候选，并支持上一条/下一条浏览。"""
@@ -6357,7 +6955,7 @@ class FitsImageViewer:
             ref_data, ref_x, ref_y, half_size=patch_half_size
         )
 
-        # Reference/Aligned 在局部裁剪后先做 low/medium/high 拉伸，再进入显示变换
+        # Reference/Aligned 在局部裁剪后先做 low/medium/high 拉伸
         aligned_patch_u8 = self._stretch_patch_to_uint8(aligned_patch, level=hist_level)
         ref_patch_u8 = self._stretch_patch_to_uint8(ref_patch, level=hist_level)
 
@@ -6384,8 +6982,8 @@ class FitsImageViewer:
         self.figure.clear()
         axes = self.figure.subplots(1, 3)
 
-        ref_show = self._apply_display_transform(ref_patch_u8.astype(np.float64))
-        axes[0].imshow(ref_show, cmap=self.colormap.get(), origin="lower")
+        ref_show = ref_patch_u8.astype(np.float64)
+        axes[0].imshow(ref_show, cmap="gray", origin="lower")
         axes[0].set_title("Reference 局部", fontsize=10, fontweight="bold")
         axes[0].axis("off")
         # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
@@ -6394,8 +6992,8 @@ class FitsImageViewer:
                 axes[0], ref_lx, ref_ly, color="orange", linewidth=1.2, size=12, gap=5
             )
 
-        aligned_show = self._apply_display_transform(aligned_patch_u8.astype(np.float64))
-        axes[1].imshow(aligned_show, cmap=self.colormap.get(), origin="lower")
+        aligned_show = aligned_patch_u8.astype(np.float64)
+        axes[1].imshow(aligned_show, cmap="gray", origin="lower")
         axes[1].set_title("Aligned 局部", fontsize=10, fontweight="bold")
         axes[1].axis("off")
         # CSV候选模式下不再绘制绿色中心十字，避免干扰目标观察
@@ -12298,13 +12896,8 @@ class FitsImageViewer:
                 if self.config_manager:
                     batch_settings = self.config_manager.get_batch_process_settings()
                     f.write("Diff处理参数:\n")
-                    f.write(f"  降噪方法: {batch_settings.get('noise_method', 'N/A')}\n")
-                    f.write(f"  对齐方法: {batch_settings.get('alignment_method', 'N/A')}\n")
-                    f.write(f"  去除亮线: {batch_settings.get('remove_bright_lines', 'N/A')}\n")
                     f.write(f"  快速模式: {batch_settings.get('fast_mode', 'N/A')}\n")
-                    f.write(f"  拉伸方法: {batch_settings.get('stretch_method', 'N/A')}\n")
-                    f.write(f"  百分位参数: {batch_settings.get('percentile_low', 'N/A')}\n")
-                    f.write(f"  最大锯齿比率: {batch_settings.get('max_jaggedness_ratio', 'N/A')}\n\n")
+                    f.write(f"  下载线程数: {batch_settings.get('thread_count', 'N/A')}\n\n")
 
                 # Skybot查询结果
                 skybot_result = self.skybot_result_label.cget("text")

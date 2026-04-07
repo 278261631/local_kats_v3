@@ -67,8 +67,6 @@ class ConfigManager:
             "batch_process_settings": {
                 "thread_count": 4,  # 批量处理线程数（GUI默认值：4）
                 "fast_mode": True,  # 快速模式（GUI默认值：True）
-                "stretch_method": "percentile",  # 拉伸方法: percentile, minmax, asinh（GUI默认值：percentile）
-                "percentile_low": 99.95,  # 百分位参数（GUI默认值：99.95）
             },
             "diff_pipeline_settings": {
                 "script_paths": {
@@ -96,7 +94,7 @@ class ConfigManager:
                 "solve_radii": [24, 32, 40],
                 "rank_min_observations": 2,
                 "enable_crossmatch_nonref_candidates": True,
-                "enable_export_nonref_candidate_ab_cutouts": True,
+                "enable_export_nonref_candidate_ab_cutouts": False,
                 "nonref_candidate_cutout_size": 128
             },
             "dss_flip_settings": {
@@ -124,13 +122,18 @@ class ConfigManager:
                 "confidence_threshold": 0.5  # AI GOOD/BAD 自动标记置信度阈值（默认：0.7）
             },
             "display_settings": {
-                "default_display_mode": "linear",
-                "default_colormap": "gray",
                 "auto_select_from_download_dir": True,
                 # CSV候选浏览默认尺寸（像素）
                 "csv_candidate_patch_size": "512",
                 # CSV候选局部拉伸档位
                 "csv_local_hist_level": "high",
+                # CSV条件搜索默认参数
+                "csv_search_median_flux_min": "30",
+                "csv_search_median_flux_max": "800",
+                "csv_search_variable_count_mode": "=0",
+                "csv_search_mpc_count_mode": "=0",
+                "csv_filter_skip_large_rows_enabled": False,
+                "csv_filter_max_rows": "200",
             },
             "local_catalog_settings": {
                 "asteroid_catalog_path": self._default_asteroid_catalog_path,

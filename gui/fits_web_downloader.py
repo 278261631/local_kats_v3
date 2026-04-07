@@ -4583,10 +4583,10 @@ Diff统计:
             self.root.after(0, lambda: self.url_builder.set_stop_batch_button_state("disabled"))
 
             # 若为“仅 --date” 自动模式，则在全天全系统 diff 完成后，继续执行自动后处理链
-            # 步骤：刷新目录树并选择下载根目录 → AI 标记 GOOD/BAD → 批量查询 → 更新 pympc 轨道目录
+            # 步骤：刷新目录树并选择下载根目录 → AI 标记 GOOD/BAD → 批量查询
             try:
                 if getattr(self, "_auto_date_only_mode", False):
-                    self._log("[自动模式] 全天全系统diff已完成，开始执行后续: AI标记GOOD/BAD → 批量查询 → 更新pympc轨道目录")
+                    self._log("[自动模式] 全天全系统diff已完成，开始执行后续: AI标记GOOD/BAD → 批量查询")
                     # 在主线程中调度执行自动后处理链
                     self.root.after(500, self._auto_postprocess_for_date_only_mode)
                 else:
@@ -4661,58 +4661,16 @@ Diff统计:
             self._auto_silent_mode = True
 
             def _step1_alignment():
-                # 已移除批量检测对齐；刷新目录树后直接进行 AI 标记
+                # 仅保留目录树刷新/定位，用于收尾前同步界面状态
                 self._auto_select_download_root_in_viewer()
-                self.root.after(500, _step2_ai_mark)
+                self.root.after(500, _step4_finish)
 
-            def _step2_ai_mark():
-                if self._auto_select_download_root_in_viewer():
-                    try:
-                        self._log("[自动模式] 开始 AI 标记 GOOD/BAD……")
-                        self.fits_viewer._ai_mark_detections()
-                    except Exception as e:
-                        self._log(f"[自动模式] AI 标记 GOOD/BAD 时出错: {e}")
-
-                # 下一步：批量查询
-                self.root.after(500, _step3_batch_query)
-
-            def _step3_batch_query():
-                if self._auto_select_download_root_in_viewer():
-                    def _run_vsx_after_pympc():
-                        try:
-                            self._log("[自动模式] 开始执行变星server批量查询...")
-                            self.fits_viewer._batch_vsx_server_query(on_complete=lambda: self.root.after(500, _step4_update_pympc))
-                        except TypeError:
-                            # 兼容旧版变星查询（无回调参数）
-                            self.fits_viewer._batch_vsx_server_query()
-                            self.root.after(500, _step4_update_pympc)
-                        except Exception as e:
-                            self._log(f"[自动模式] 变星server批量查询时出错: {e}")
-                            self.root.after(500, _step4_update_pympc)
-
-                    try:
-                        # 先执行pympc server批量查询，完成后再启动变星server查询
-                        self._log("[自动模式] 开始执行pympc server批量查询...")
-                        self.fits_viewer._batch_pympc_server_query(on_complete=_run_vsx_after_pympc)
-                        return
-                    except TypeError:
-                        # 兼容旧版FitsImageViewer（无回调参数）
-                        self.fits_viewer._batch_pympc_server_query()
-                        _run_vsx_after_pympc()
-                    except Exception as e:
-                        self._log(f"[自动模式] 批量查询时出错: {e}")
-                        self.root.after(500, _step4_update_pympc)
-                else:
-                    self.root.after(500, _step4_update_pympc)
-
-            def _step4_update_pympc():
+            def _step4_finish():
                 try:
-                    self._log("[自动模式] 开始更新 pympc 轨道目录……")
-                    # 使用静默包装，避免缺少依赖时弹窗中断流程
-                    self._run_without_messageboxes(self._update_pympc_catalogue)
+                    self._log("[自动模式] 自动后处理链步骤完成，不执行 pympc 轨道目录自动更新。")
                 except Exception as e:
                     try:
-                        self._log(f"[自动模式] 更新 pympc 轨道目录时出错: {e}")
+                        self._log(f"[自动模式] 自动后处理链收尾步骤出错: {e}")
                     except Exception:
                         pass
                 finally:
@@ -4862,10 +4820,10 @@ Diff统计:
                 # 延迟执行，确保UI完全初始化
                 self.root.after(2000, self._auto_full_day_all_systems_batch)
 
-                # 仅日期模式下，提前记录日志，提示后续会自动执行图像后处理与pympc更新
+                # 仅日期模式下，提前记录日志，提示后续会自动执行图像后处理
                 try:
                     if getattr(self, "_auto_date_only_mode", False):
-                        self._log("[自动模式] 全天全系统diff结束后，将自动执行: AI标记GOOD/BAD → 批量查询 → 更新pympc轨道目录")
+                        self._log("[自动模式] 全天全系统diff结束后，将自动执行: AI标记GOOD/BAD → 批量查询")
                 except Exception:
                     pass
 
