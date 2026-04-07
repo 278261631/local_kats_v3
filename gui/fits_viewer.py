@@ -685,6 +685,21 @@ class FitsImageViewer:
             command=self._rerun_crossmatch_for_current_csv_row,
         )
         self.rerun_crossmatch_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.ai_classify_current_row_button = ttk.Button(
+            control_frame2,
+            text="AI分类(当前行)",
+            command=self._run_ai_classification_for_current_row,
+        )
+        self.ai_classify_current_row_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.ai_set_class_var = tk.StringVar(value="0")
+        self.ai_set_class_entry = ttk.Entry(control_frame2, textvariable=self.ai_set_class_var, width=6)
+        self.ai_set_class_entry.pack(side=tk.LEFT, padx=(0, 3))
+        self.ai_set_class_button = ttk.Button(
+            control_frame2,
+            text="写ai_class(当前行)",
+            command=self._set_ai_class_for_current_csv_row,
+        )
+        self.ai_set_class_button.pack(side=tk.LEFT, padx=(0, 5))
 
         # 打开输出目录按钮
         self.last_output_dir = None  # 保存最后一次的输出目录
@@ -3474,35 +3489,182 @@ class FitsImageViewer:
             return -(neg_labels.index(label) + 1), pred
         return -99, pred
 
+    def _emit_ai_classification_log(self, message: str, level: str = "INFO"):
+        lv = str(level or "INFO").upper()
+        if lv == "ERROR":
+            self.logger.error(message)
+        elif lv == "WARNING":
+            self.logger.warning(message)
+        else:
+            self.logger.info(message)
+        if self.log_callback:
+            self.log_callback(message, lv)
+
+    def _get_current_csv_row_with_raw_index(self):
+        """返回当前CSV显示行及其在原始CSV中的索引。失败返回 (None, None, -1)。"""
+        if not getattr(self, "_csv_candidate_mode", False):
+            return None, None, -1
+        if not getattr(self, "_csv_candidates", None):
+            return None, None, -1
+        current_idx = int(getattr(self, "_current_csv_candidate_index", -1))
+        if current_idx < 0 or current_idx >= len(self._csv_candidates):
+            return None, None, -1
+        output_dir = getattr(self, "_current_csv_output_dir", None)
+        if not output_dir:
+            return None, None, -1
+        rows = self._load_variable_candidates_nonref_only(output_dir)
+        if not rows:
+            return None, None, -1
+        raw_idx = self._resolve_current_raw_csv_index(output_dir, rows)
+        if raw_idx < 0 or raw_idx >= len(rows):
+            return output_dir, rows, -1
+        return output_dir, rows, int(raw_idx)
+
+    def _write_single_csv_row_ai_class(self, output_dir: str, rows: List[dict], raw_idx: int, ai_class: int, ai_label: str) -> bool:
+        """将单行 ai_class/ai_label 写回 CSV。"""
+        csv_path = self._get_nonref_candidates_csv_path(output_dir)
+        if not csv_path:
+            return False
+        if raw_idx < 0 or raw_idx >= len(rows):
+            return False
+        rows[raw_idx]["ai_class"] = str(int(ai_class))
+        rows[raw_idx]["ai_label"] = str(ai_label)
+        fieldnames = list(rows[0].keys()) if rows else ["ai_class", "ai_label"]
+        if "ai_class" not in fieldnames:
+            fieldnames.append("ai_class")
+        if "ai_label" not in fieldnames:
+            fieldnames.append("ai_label")
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        return True
+
+    def _run_ai_classification_for_current_row(self):
+        """仅对当前CSV行执行一次AI分类并写回。"""
+        output_dir, rows, raw_idx = self._get_current_csv_row_with_raw_index()
+        if not output_dir or rows is None:
+            self._emit_ai_classification_log("[AI分类-当前行] 当前不在CSV候选模式或无可用候选", "WARNING")
+            return
+        if raw_idx < 0:
+            self._emit_ai_classification_log("[AI分类-当前行] 无法定位当前行到原始CSV", "WARNING")
+            return
+
+        model_path = self._get_ai_classifier_model_path()
+        if not os.path.exists(model_path):
+            self._emit_ai_classification_log(f"[AI分类-当前行] 模型文件不存在: {model_path}", "ERROR")
+            return
+
+        row = rows[raw_idx]
+        try:
+            aligned_fits = self._find_primary_aligned_fits_in_output_dir(output_dir)
+            if not aligned_fits:
+                ai_class, ai_label = 0, "error_no_aligned_fits"
+            else:
+                aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
+                if aligned_data is None:
+                    ai_class, ai_label = 0, "error_no_aligned_fits"
+                else:
+                    x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
+                    if x is None or y is None:
+                        ai_class, ai_label = 0, "error_xy"
+                    else:
+                        patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=50)
+                        if patch is None or patch.size == 0:
+                            ai_class, ai_label = 0, "error_patch"
+                        else:
+                            saved = joblib.load(model_path)
+                            model = saved.get("model")
+                            classes = saved.get("classes", [])
+                            if model is None:
+                                raise RuntimeError("模型文件缺少 model")
+                            feature_backend = self._build_resnet18_feature_backend()
+                            patch_u8 = self._stretch_patch_to_uint8(patch, level="high")
+                            ai_class, ai_label = self._compute_ai_class_for_patch(
+                                patch_u8, model, classes, feature_backend
+                            )
+        except Exception as e:
+            self.logger.exception("当前行AI分类失败")
+            ai_class, ai_label = 0, "error_predict"
+            self._emit_ai_classification_log(f"[AI分类-当前行] 发生异常，已回写0: {e}", "ERROR")
+
+        if self._write_single_csv_row_ai_class(output_dir, rows, raw_idx, ai_class, ai_label):
+            self._emit_ai_classification_log(
+                f"[AI分类-当前行] 写回成功: raw_idx={raw_idx}, ai_class={ai_class}, ai_label={ai_label}",
+                "INFO",
+            )
+            self._reload_csv_candidates_for_display(output_dir, keep_current_index=True)
+        else:
+            self._emit_ai_classification_log("[AI分类-当前行] 写回失败", "ERROR")
+
+    def _set_ai_class_for_current_csv_row(self):
+        """手动将当前CSV行 ai_class 写为指定值（含 0）。"""
+        output_dir, rows, raw_idx = self._get_current_csv_row_with_raw_index()
+        if not output_dir or rows is None:
+            self._emit_ai_classification_log("[AI手动修正] 当前不在CSV候选模式或无可用候选", "WARNING")
+            return
+        if raw_idx < 0:
+            self._emit_ai_classification_log("[AI手动修正] 无法定位当前行到原始CSV", "WARNING")
+            return
+        try:
+            manual_class = int(float(str(self.ai_set_class_var.get()).strip()))
+        except Exception:
+            self._emit_ai_classification_log("[AI手动修正] 输入无效，请输入整数（如 0/1/-1）", "WARNING")
+            return
+
+        manual_label = "manual_override"
+        if manual_class == 0:
+            manual_label = "manual_unset"
+        elif manual_class == 1:
+            manual_label = "manual_good"
+        elif manual_class < 0:
+            manual_label = "manual_negative"
+
+        if self._write_single_csv_row_ai_class(output_dir, rows, raw_idx, manual_class, manual_label):
+            self._emit_ai_classification_log(
+                f"[AI手动修正] 写回成功: raw_idx={raw_idx}, ai_class={manual_class}",
+                "INFO",
+            )
+            self._reload_csv_candidates_for_display(output_dir, keep_current_index=True)
+        else:
+            self._emit_ai_classification_log("[AI手动修正] 写回失败", "ERROR")
+
     def _run_ai_classification_for_filtered_rows(self):
         btn = getattr(self, "_ai_classify_filtered_button", None)
         try:
             ctx = self._build_csv_filter_tree_search_context(direction=1)
         except _CsvFilterSearchSetupError as e:
-            if e.kind == "info":
-                messagebox.showinfo("提示", str(e))
-            else:
-                messagebox.showwarning("警告", str(e))
+            level = "INFO" if e.kind == "info" else "WARNING"
+            self._emit_ai_classification_log(f"[AI分类] {e}", level=level)
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(text=f"[AI分类] {e}", foreground="orange")
             return
 
         self._save_display_settings()
         stats: Dict[str, int] = {"skipped_large_csv": 0}
         hits = list(self._iter_csv_filter_hits_from_context(ctx, 1, stop_after_first=False, stats=stats))
         if not hits:
-            messagebox.showinfo("提示", "当前筛选条件下没有可分类的CSV行。")
+            msg = "[AI分类] 当前筛选条件下没有可分类的CSV行。"
+            self._emit_ai_classification_log(msg, level="INFO")
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(text=msg, foreground="blue")
             return
 
         model_path = self._get_ai_classifier_model_path()
         if not os.path.exists(model_path):
-            messagebox.showwarning("警告", f"AI模型文件不存在:\n{model_path}")
+            msg = f"[AI分类] 模型文件不存在: {model_path}"
+            self._emit_ai_classification_log(msg, level="ERROR")
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(text=msg, foreground="red")
             return
 
-        if not messagebox.askyesno(
-            "确认AI分类",
-            f"将对筛选命中的 {len(hits)} 行执行AI分类并回写 ai_class。\n"
-            f"条件：{ctx['condition_summary']}\n\n是否继续？",
-        ):
-            return
+        start_msg = (
+            f"[AI分类] 开始处理筛选命中 {len(hits)} 行，"
+            f"条件: {ctx['condition_summary']}，模型: {model_path}"
+        )
+        self._emit_ai_classification_log(start_msg, level="INFO")
+        if hasattr(self, "diff_progress_label"):
+            self.diff_progress_label.config(text=f"[AI分类] 处理中 0/{len(hits)}", foreground="blue")
 
         def worker():
             try:
@@ -3512,14 +3674,39 @@ class FitsImageViewer:
                 if model is None:
                     raise RuntimeError("模型文件缺少 model")
                 feature_backend = self._build_resnet18_feature_backend()
-                updated_count = self._ai_classify_hits_and_write_csv(hits, model, classes, feature_backend)
+                result = self._ai_classify_hits_and_write_csv(hits, model, classes, feature_backend)
+                updated_count = int(result.get("processed_rows", 0))
+                predicted_count = int(result.get("predicted_rows", 0))
+                fallback_zero_count = int(result.get("fallback_zero_rows", 0))
+                written_files = int(result.get("written_files", 0))
                 self.parent_frame.after(
                     0,
-                    lambda: messagebox.showinfo("AI分类完成", f"已更新 ai_class: {updated_count} 行"),
+                    lambda: (
+                        self._emit_ai_classification_log(
+                            "[AI分类] 完成: "
+                            f"写回行={updated_count}, 模型成功分类={predicted_count}, "
+                            f"失败回写0={fallback_zero_count}, 写回CSV={written_files}",
+                            level="INFO",
+                        ),
+                        self.diff_progress_label.config(
+                            text=(
+                                f"[AI分类] 完成: 行={updated_count}, "
+                                f"分类={predicted_count}, 回写0={fallback_zero_count}"
+                            ),
+                            foreground="green",
+                        ) if hasattr(self, "diff_progress_label") else None,
+                    ),
                 )
             except Exception as e:
                 self.logger.exception("筛选命中AI分类失败")
-                self.parent_frame.after(0, lambda msg=str(e): messagebox.showerror("AI分类失败", msg))
+                self.parent_frame.after(
+                    0,
+                    lambda msg=str(e): (
+                        self._emit_ai_classification_log(f"[AI分类] 失败: {msg}", level="ERROR"),
+                        self.diff_progress_label.config(text=f"[AI分类] 失败: {msg}", foreground="red")
+                        if hasattr(self, "diff_progress_label") else None,
+                    ),
+                )
             finally:
                 if btn is not None:
                     self.parent_frame.after(0, lambda: btn.config(state="normal"))
@@ -3531,47 +3718,76 @@ class FitsImageViewer:
             btn.config(state="disabled")
         threading.Thread(target=worker, daemon=True).start()
 
-    def _ai_classify_hits_and_write_csv(self, hits, model, classes, feature_backend) -> int:
+    def _ai_classify_hits_and_write_csv(self, hits, model, classes, feature_backend) -> Dict[str, int]:
         by_output: Dict[str, List[int]] = {}
         for _node, _file_path, output_dir, raw_idx, _row in hits:
             by_output.setdefault(output_dir, []).append(int(raw_idx))
 
-        total_updated = 0
+        stats = {
+            "processed_rows": 0,
+            "predicted_rows": 0,
+            "fallback_zero_rows": 0,
+            "written_files": 0,
+        }
         for output_dir, raw_indices in by_output.items():
             csv_path = self._get_nonref_candidates_csv_path(output_dir)
             if not csv_path:
+                self._emit_ai_classification_log(
+                    f"[AI分类] 跳过输出目录(无CSV): {output_dir}",
+                    level="WARNING",
+                )
                 continue
             rows = self._load_variable_candidates_nonref_only(output_dir)
             if not rows:
+                self._emit_ai_classification_log(
+                    f"[AI分类] 跳过输出目录(CSV为空): {output_dir}",
+                    level="WARNING",
+                )
                 continue
 
             aligned_fits = self._find_primary_aligned_fits_in_output_dir(output_dir)
-            if not aligned_fits:
-                continue
-            aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
-            if aligned_data is None:
-                continue
+            aligned_data = None
+            aligned_header = None
+            if aligned_fits:
+                aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
 
-            changed = 0
+            touched = 0
             for ridx in sorted(set(raw_indices)):
                 if ridx < 0 or ridx >= len(rows):
                     continue
                 row = rows[ridx]
+                stats["processed_rows"] += 1
+                touched += 1
+                row["ai_class"] = "0"
+
+                if aligned_data is None:
+                    row["ai_label"] = "error_no_aligned_fits"
+                    stats["fallback_zero_rows"] += 1
+                    continue
+
                 x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
                 if x is None or y is None:
-                    row["ai_class"] = "0"
+                    row["ai_label"] = "error_xy"
+                    stats["fallback_zero_rows"] += 1
                     continue
                 patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=50)
                 if patch is None or patch.size == 0:
-                    row["ai_class"] = "0"
+                    row["ai_label"] = "error_patch"
+                    stats["fallback_zero_rows"] += 1
                     continue
-                patch_u8 = self._stretch_patch_to_uint8(patch, level="high")
-                ai_class, ai_label = self._compute_ai_class_for_patch(patch_u8, model, classes, feature_backend)
-                row["ai_class"] = str(ai_class)
-                row["ai_label"] = str(ai_label)
-                changed += 1
+                try:
+                    patch_u8 = self._stretch_patch_to_uint8(patch, level="high")
+                    ai_class, ai_label = self._compute_ai_class_for_patch(
+                        patch_u8, model, classes, feature_backend
+                    )
+                    row["ai_class"] = str(ai_class)
+                    row["ai_label"] = str(ai_label)
+                    stats["predicted_rows"] += 1
+                except Exception:
+                    row["ai_label"] = "error_predict"
+                    stats["fallback_zero_rows"] += 1
 
-            if changed > 0:
+            if touched > 0:
                 fieldnames = list(rows[0].keys())
                 if "ai_class" not in fieldnames:
                     fieldnames.append("ai_class")
@@ -3581,9 +3797,9 @@ class FitsImageViewer:
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
                     writer.writerows(rows)
-                total_updated += changed
+                stats["written_files"] += 1
 
-        return total_updated
+        return stats
 
     def _set_crossmatch_rerun_buttons_enabled(self, enabled: bool):
         """统一控制重跑Crossmatch相关按钮状态。"""
