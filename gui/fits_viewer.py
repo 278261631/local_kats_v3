@@ -17,6 +17,7 @@ import shutil
 import threading
 import queue
 import json
+import joblib
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -512,6 +513,7 @@ class FitsImageViewer:
         self.csv_search_median_flux_max_var = tk.StringVar(value="800")
         self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
+        self.csv_search_ai_class_mode_var = tk.StringVar(value="=0")
         self.csv_filter_skip_large_rows_var = tk.BooleanVar(value=False)
         self.csv_filter_max_rows_var = tk.StringVar(value="200")
 
@@ -540,6 +542,14 @@ class FitsImageViewer:
             state="readonly",
             width=4,
         ).pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text="ai").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Combobox(
+            csv_row_filters,
+            textvariable=self.csv_search_ai_class_mode_var,
+            values=["=0", "=1", "<0", "all"],
+            state="readonly",
+            width=5,
+        ).pack(side=tk.LEFT)
 
         csv_row_actions = ttk.Frame(csv_search_frame)
         csv_row_actions.pack(fill=tk.X, anchor=tk.W, pady=(3, 0))
@@ -562,6 +572,12 @@ class FitsImageViewer:
             command=self._export_filtered_aligned_csv_patches,
         )
         self._export_aligned_filtered_button.pack(side=tk.LEFT)
+        self._ai_classify_filtered_button = ttk.Button(
+            csv_row_actions,
+            text="AI分类(筛选命中)",
+            command=self._run_ai_classification_for_filtered_rows,
+        )
+        self._ai_classify_filtered_button.pack(side=tk.LEFT, padx=(6, 0))
 
         self.csv_filter_search_status_var = tk.StringVar(value="当前命中：-- / 条件摘要：--")
         ttk.Label(
@@ -1140,6 +1156,10 @@ class FitsImageViewer:
             if csv_search_mpc_mode not in {"=0", "=-1", ">0"}:
                 csv_search_mpc_mode = "=0"
             self.csv_search_mpc_count_mode_var.set(csv_search_mpc_mode)
+            csv_search_ai_class_mode = str(display_settings.get("csv_search_ai_class_mode", "=0")).strip().lower()
+            if csv_search_ai_class_mode not in {"=0", "=1", "<0", "all"}:
+                csv_search_ai_class_mode = "=0"
+            self.csv_search_ai_class_mode_var.set(csv_search_ai_class_mode)
         except Exception as e:
             self.logger.error(f"加载显示设置失败: {str(e)}")
 
@@ -1155,6 +1175,7 @@ class FitsImageViewer:
                 csv_search_median_flux_max=str(self.csv_search_median_flux_max_var.get()).strip(),
                 csv_search_variable_count_mode=str(self.csv_search_variable_count_mode_var.get()).strip(),
                 csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
+                csv_search_ai_class_mode=str(self.csv_search_ai_class_mode_var.get()).strip().lower(),
                 csv_filter_skip_large_rows_enabled=bool(self.csv_filter_skip_large_rows_var.get()),
                 csv_filter_max_rows=str(self.csv_filter_max_rows_var.get()).strip(),
             )
@@ -2462,6 +2483,21 @@ class FitsImageViewer:
             return iv > 0
         return False
 
+    def _csv_ai_class_mode_match(self, value, mode: str) -> bool:
+        """判断 ai_class 是否满足 =0/=1/<0/all 条件。"""
+        if mode == "all":
+            return True
+        iv = self._try_parse_int_from_csv_value(value)
+        if iv is None:
+            iv = 0
+        if mode == "=0":
+            return iv == 0
+        if mode == "=1":
+            return iv == 1
+        if mode == "<0":
+            return iv < 0
+        return False
+
     def _parse_csv_flux_range(self) -> Tuple[float, float]:
         """解析 CSV flux 区间筛选条件，返回 (min, max)。"""
         try:
@@ -2484,7 +2520,15 @@ class FitsImageViewer:
             raise ValueError("大CSV行数阈值无效，必须大于0")
         return enabled, max_rows
 
-    def _row_matches_csv_filter_conditions(self, row: dict, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> bool:
+    def _row_matches_csv_filter_conditions(
+        self,
+        row: dict,
+        flux_min: float,
+        flux_max: float,
+        var_mode: str,
+        mpc_mode: str,
+        ai_mode: str = "=0",
+    ) -> bool:
         """按 AND 逻辑判断一行是否满足搜索条件。"""
         if not isinstance(row, dict):
             return False
@@ -2494,6 +2538,8 @@ class FitsImageViewer:
         if not self._csv_count_mode_match(row.get("variable_count"), var_mode):
             return False
         if not self._csv_count_mode_match(row.get("mpc_count"), mpc_mode):
+            return False
+        if not self._csv_ai_class_mode_match(row.get("ai_class"), ai_mode):
             return False
         return True
 
@@ -2550,9 +2596,14 @@ class FitsImageViewer:
                 return i
         return -1
 
-    def _get_csv_filter_condition_summary(self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str) -> str:
+    def _get_csv_filter_condition_summary(
+        self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str, ai_mode: str
+    ) -> str:
         """返回 CSV 条件摘要文本。"""
-        return f"{flux_min:g}<median_flux_norm<{flux_max:g} AND variable_count{var_mode} AND mpc_count{mpc_mode}"
+        return (
+            f"{flux_min:g}<median_flux_norm<{flux_max:g} AND variable_count{var_mode} "
+            f"AND mpc_count{mpc_mode} AND ai_class{ai_mode}"
+        )
 
     def _set_csv_filter_search_status(self, text: str):
         """更新 CSV 条件搜索状态栏。"""
@@ -2728,13 +2779,14 @@ class FitsImageViewer:
             raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
         var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
         mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
-        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
-            raise _CsvFilterSearchSetupError("variable_count / mpc_count 条件无效", kind="warning")
+        ai_mode = str(self.csv_search_ai_class_mode_var.get()).strip().lower() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"} or ai_mode not in {"=0", "=1", "<0", "all"}:
+            raise _CsvFilterSearchSetupError("variable_count / mpc_count / ai_class 条件无效", kind="warning")
         try:
             skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
         except ValueError as e:
             raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
-        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode)
 
         selection = self.directory_tree.selection()
         if selection:
@@ -2797,6 +2849,7 @@ class FitsImageViewer:
             "flux_max": flux_max,
             "var_mode": var_mode,
             "mpc_mode": mpc_mode,
+            "ai_mode": ai_mode,
             "skip_large_csv": skip_large_csv,
             "large_csv_max_rows": large_csv_max_rows,
             "condition_summary": condition_summary,
@@ -2820,6 +2873,7 @@ class FitsImageViewer:
         flux_max = ctx["flux_max"]
         var_mode = ctx["var_mode"]
         mpc_mode = ctx["mpc_mode"]
+        ai_mode = ctx["ai_mode"]
         skip_large_csv = ctx["skip_large_csv"]
         large_csv_max_rows = ctx["large_csv_max_rows"]
         file_nodes = ctx["file_nodes"]
@@ -2861,7 +2915,7 @@ class FitsImageViewer:
 
             for raw_idx in row_range:
                 row = all_rows[raw_idx]
-                if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
+                if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode, ai_mode):
                     yield (node, file_path, output_dir, raw_idx, row)
                     if stop_after_first:
                         return
@@ -3223,8 +3277,9 @@ class FitsImageViewer:
             return
         var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
         mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
-        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"}:
-            messagebox.showwarning("警告", "variable_count / mpc_count 条件无效")
+        ai_mode = str(self.csv_search_ai_class_mode_var.get()).strip().lower() or "=0"
+        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"} or ai_mode not in {"=0", "=1", "<0", "all"}:
+            messagebox.showwarning("警告", "variable_count / mpc_count / ai_class 条件无效")
             return
         try:
             skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
@@ -3232,7 +3287,7 @@ class FitsImageViewer:
             messagebox.showwarning("警告", str(e))
             return
         self._save_display_settings()
-        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode)
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode)
 
         crossmatch_script = self._get_crossmatch_nonref_script_path()
         if not crossmatch_script or not os.path.exists(crossmatch_script):
@@ -3240,7 +3295,7 @@ class FitsImageViewer:
             return
 
         tasks, stats = self._collect_crossmatch_tasks_for_csv_filters(
-            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode, skip_large_csv, large_csv_max_rows
+            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_large_csv, large_csv_max_rows
         )
         if not tasks:
             messagebox.showinfo(
@@ -3313,6 +3368,7 @@ class FitsImageViewer:
         flux_max,
         var_mode,
         mpc_mode,
+        ai_mode,
         skip_large_csv: bool = False,
         large_csv_max_rows: int = 200,
     ):
@@ -3331,7 +3387,7 @@ class FitsImageViewer:
                 continue
             seen_ranks = set()
             for row in rows:
-                if not self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode):
+                if not self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode, ai_mode):
                     continue
                 matched_rows += 1
                 rank_value = self._try_parse_int_from_csv_value(row.get("rank"))
@@ -3359,6 +3415,175 @@ class FitsImageViewer:
             "task_count": len(tasks),
         }
         return tasks, stats
+
+    def _get_ai_classifier_model_path(self) -> str:
+        default_model = "gui/classifier_model.joblib"
+
+        def _resolve_model_path(raw_path: str) -> str:
+            p = str(raw_path or "").strip()
+            if not p:
+                p = default_model
+            if os.path.isabs(p):
+                return p
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return os.path.normpath(os.path.join(repo_root, p))
+
+        if self.config_manager and hasattr(self.config_manager, "get_display_settings"):
+            try:
+                ds = self.config_manager.get_display_settings()
+                p = str(ds.get("ai_classifier_model_path", "")).strip()
+                if p:
+                    return _resolve_model_path(p)
+            except Exception:
+                pass
+        return _resolve_model_path(default_model)
+
+    def _build_resnet18_feature_backend(self):
+        import torch
+        from torchvision.models import ResNet18_Weights, resnet18
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        weights = ResNet18_Weights.IMAGENET1K_V1
+        backbone = resnet18(weights=weights)
+        backbone.fc = torch.nn.Identity()
+        backbone.eval()
+        backbone.to(device)
+        preprocess = weights.transforms()
+        return {"device": device, "backbone": backbone, "preprocess": preprocess}
+
+    def _compute_ai_class_for_patch(self, patch_u8: np.ndarray, model, classes, feature_backend) -> Tuple[int, str]:
+        from PIL import Image
+        import torch
+
+        img = Image.fromarray(patch_u8.astype(np.uint8), mode="L").convert("RGB")
+        preprocess = feature_backend["preprocess"]
+        backbone = feature_backend["backbone"]
+        device = feature_backend["device"]
+        x = preprocess(img).unsqueeze(0).to(device)
+        with torch.inference_mode():
+            feat = backbone(x).cpu().numpy().astype(np.float32)
+        if hasattr(model, "predict"):
+            pred = str(model.predict(feat)[0])
+        else:
+            raise RuntimeError("模型不支持 predict")
+        label = pred.strip().lower()
+        if label == "good":
+            return 1, pred
+        neg_labels = [str(c).strip().lower() for c in list(classes or []) if str(c).strip().lower() != "good"]
+        if label in neg_labels:
+            return -(neg_labels.index(label) + 1), pred
+        return -99, pred
+
+    def _run_ai_classification_for_filtered_rows(self):
+        btn = getattr(self, "_ai_classify_filtered_button", None)
+        try:
+            ctx = self._build_csv_filter_tree_search_context(direction=1)
+        except _CsvFilterSearchSetupError as e:
+            if e.kind == "info":
+                messagebox.showinfo("提示", str(e))
+            else:
+                messagebox.showwarning("警告", str(e))
+            return
+
+        self._save_display_settings()
+        stats: Dict[str, int] = {"skipped_large_csv": 0}
+        hits = list(self._iter_csv_filter_hits_from_context(ctx, 1, stop_after_first=False, stats=stats))
+        if not hits:
+            messagebox.showinfo("提示", "当前筛选条件下没有可分类的CSV行。")
+            return
+
+        model_path = self._get_ai_classifier_model_path()
+        if not os.path.exists(model_path):
+            messagebox.showwarning("警告", f"AI模型文件不存在:\n{model_path}")
+            return
+
+        if not messagebox.askyesno(
+            "确认AI分类",
+            f"将对筛选命中的 {len(hits)} 行执行AI分类并回写 ai_class。\n"
+            f"条件：{ctx['condition_summary']}\n\n是否继续？",
+        ):
+            return
+
+        def worker():
+            try:
+                saved = joblib.load(model_path)
+                model = saved.get("model")
+                classes = saved.get("classes", [])
+                if model is None:
+                    raise RuntimeError("模型文件缺少 model")
+                feature_backend = self._build_resnet18_feature_backend()
+                updated_count = self._ai_classify_hits_and_write_csv(hits, model, classes, feature_backend)
+                self.parent_frame.after(
+                    0,
+                    lambda: messagebox.showinfo("AI分类完成", f"已更新 ai_class: {updated_count} 行"),
+                )
+            except Exception as e:
+                self.logger.exception("筛选命中AI分类失败")
+                self.parent_frame.after(0, lambda msg=str(e): messagebox.showerror("AI分类失败", msg))
+            finally:
+                if btn is not None:
+                    self.parent_frame.after(0, lambda: btn.config(state="normal"))
+                out_dir = getattr(self, "_current_csv_output_dir", None)
+                if out_dir:
+                    self.parent_frame.after(0, lambda: self._reload_csv_candidates_for_display(out_dir, keep_current_index=True))
+
+        if btn is not None:
+            btn.config(state="disabled")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ai_classify_hits_and_write_csv(self, hits, model, classes, feature_backend) -> int:
+        by_output: Dict[str, List[int]] = {}
+        for _node, _file_path, output_dir, raw_idx, _row in hits:
+            by_output.setdefault(output_dir, []).append(int(raw_idx))
+
+        total_updated = 0
+        for output_dir, raw_indices in by_output.items():
+            csv_path = self._get_nonref_candidates_csv_path(output_dir)
+            if not csv_path:
+                continue
+            rows = self._load_variable_candidates_nonref_only(output_dir)
+            if not rows:
+                continue
+
+            aligned_fits = self._find_primary_aligned_fits_in_output_dir(output_dir)
+            if not aligned_fits:
+                continue
+            aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
+            if aligned_data is None:
+                continue
+
+            changed = 0
+            for ridx in sorted(set(raw_indices)):
+                if ridx < 0 or ridx >= len(rows):
+                    continue
+                row = rows[ridx]
+                x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
+                if x is None or y is None:
+                    row["ai_class"] = "0"
+                    continue
+                patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=50)
+                if patch is None or patch.size == 0:
+                    row["ai_class"] = "0"
+                    continue
+                patch_u8 = self._stretch_patch_to_uint8(patch, level="high")
+                ai_class, ai_label = self._compute_ai_class_for_patch(patch_u8, model, classes, feature_backend)
+                row["ai_class"] = str(ai_class)
+                row["ai_label"] = str(ai_label)
+                changed += 1
+
+            if changed > 0:
+                fieldnames = list(rows[0].keys())
+                if "ai_class" not in fieldnames:
+                    fieldnames.append("ai_class")
+                if "ai_label" not in fieldnames:
+                    fieldnames.append("ai_label")
+                with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+                total_updated += changed
+
+        return total_updated
 
     def _set_crossmatch_rerun_buttons_enabled(self, enabled: bool):
         """统一控制重跑Crossmatch相关按钮状态。"""
