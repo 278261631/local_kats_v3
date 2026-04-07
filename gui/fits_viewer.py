@@ -288,12 +288,6 @@ class FitsImageViewer:
                                     command=self._execute_diff, state="disabled")
         self.diff_button.pack(side=tk.LEFT, padx=(0, 0))
 
-        # 保存检测结果按钮
-        self.save_detection_button = ttk.Button(toolbar_frame2, text="保存检测结果",
-                                               command=self._save_detection_result, state="disabled")
-        self.save_detection_button.pack(side=tk.LEFT, padx=(10, 0))
-
-
         # diff进度标签（放在第二行右侧）
         self.diff_progress_label = ttk.Label(toolbar_frame2, text="", foreground="blue", font=("Arial", 9))
         self.diff_progress_label.pack(side=tk.RIGHT, padx=(10, 0))
@@ -395,17 +389,6 @@ class FitsImageViewer:
         self.timezone_label = ttk.Label(toolbar_frame5, text="UTC+6", foreground="blue")
         self.timezone_label.pack(side=tk.LEFT, padx=(0, 5))
 
-        # 卫星查询按钮 (使用tk.Button以支持背景色)
-        self.satellite_button = tk.Button(toolbar_frame5, text="查询卫星",
-                                         command=self._query_satellite, state="disabled",
-                                         bg="#FFA500", relief=tk.RAISED, padx=5, pady=2)  # 默认橙黄色(未查询)
-        self.satellite_button.pack(side=tk.LEFT, padx=(10, 5))
-
-        # 卫星查询结果显示
-        ttk.Label(toolbar_frame5, text="卫星:").pack(side=tk.LEFT, padx=(5, 2))
-        self.satellite_result_label = ttk.Label(toolbar_frame5, text="未查询", foreground="gray")
-        self.satellite_result_label.pack(side=tk.LEFT, padx=(0, 5))
-
         # 查询设置和结果显示（第六行工具栏）
         toolbar_frame6 = ttk.Frame(toolbar_container)
         toolbar_frame6.pack(fill=tk.X, pady=2)
@@ -421,20 +404,8 @@ class FitsImageViewer:
         # 变星server批量查询线程数，在高级设置中配置
         self.batch_vsx_server_threads_var = tk.StringVar(value="3")
 
-        # 批量删除查询结果按钮
-        self.batch_delete_query_button = ttk.Button(toolbar_frame6, text="删除查询结果",
-                                                    command=self._batch_delete_query_results,
-                                                    state="disabled")
-        self.batch_delete_query_button.pack(side=tk.LEFT, padx=(0, 5))
-
-        # 小行星查询按钮（仅 server 版本）
-        self.skybot_button = tk.Button(toolbar_frame6, text="查询小行星(server)",
-                                       command=self._query_skybot, state="disabled",
-                                       bg="#FFA500", relief=tk.RAISED, padx=5, pady=2)  # 默认橙黄色(未查询)
-        self.skybot_button.pack(side=tk.LEFT, padx=(5, 5))
-
         # Skybot查询结果显示
-        ttk.Label(toolbar_frame6, text="查询结果:").pack(side=tk.LEFT, padx=(5, 2))
+        ttk.Label(toolbar_frame6, text="小行星:").pack(side=tk.LEFT, padx=(5, 2))
         self.skybot_result_label = ttk.Label(toolbar_frame6, text="未查询", foreground="gray")
         self.skybot_result_label.pack(side=tk.LEFT, padx=(0, 5))
 
@@ -473,10 +444,6 @@ class FitsImageViewer:
         # 获取顶层窗口
         top = self.parent_frame.winfo_toplevel()
 
-        # g/b - 标记 GOOD/BAD
-        top.bind('g', lambda e: self._mark_detection_good())
-        top.bind('b', lambda e: self._mark_detection_bad())
-
         # - / [ / k - 上一组
         top.bind('-', lambda e: self._show_previous_cutout())
         top.bind('[', lambda e: self._show_previous_cutout())
@@ -487,19 +454,11 @@ class FitsImageViewer:
         top.bind(']', lambda e: self._show_next_cutout())
         top.bind('l', lambda e: self._show_next_cutout())
 
-        # n/N - 下一个 GOOD
-        top.bind('n', lambda e: self._jump_to_next_good())
-        top.bind('N', lambda e: self._jump_to_next_good())
-
-        # i - 查询小行星
-        top.bind('i', lambda e: self._query_skybot())
-
         # o - 查询变星
         top.bind('o', lambda e: self._query_vsx())
 
         self.logger.info(
-            "已绑定全局快捷键: g(标记GOOD), b(标记BAD), "
-            "-/[ /k(上一组), =/]/l(下一组), n/N(下一个GOOD), i(查询小行星), o(查询变星)"
+            "已绑定全局快捷键: -/[ /k(上一组), =/]/l(下一组), o(查询变星)"
         )
 
     def _create_directory_tree(self, parent):
@@ -632,7 +591,7 @@ class FitsImageViewer:
         right_frame = ttk.Frame(parent)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        # 创建图像显示区域 - 进一步减小高度，给下方 GOOD/BAD 按钮留出更多空间
+        # 创建图像显示区域
         self.figure = Figure(figsize=(8, 3), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.figure, right_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(0, 5))
@@ -731,7 +690,7 @@ class FitsImageViewer:
                                               state="disabled")
         self.open_output_dir_btn.pack(side=tk.LEFT, padx=(0, 0))
 
-        # 第三行控制面板：检测结果状态与人工标记
+        # 第三行控制面板：检测结果状态
         control_frame3 = ttk.Frame(control_container)
         control_frame3.pack(fill=tk.X, pady=(2, 0))
 
@@ -740,33 +699,9 @@ class FitsImageViewer:
         self.cutout_label = ttk.Label(control_frame3, textvariable=self.cutout_label_var, foreground="purple")
         self.cutout_label.pack(side=tk.LEFT, padx=(0, 5))
 
-        # 标记 GOOD/BAD 按钮 (支持 g/b 快捷键)
-        self.mark_good_button = ttk.Button(
-            control_frame3, text="标记 GOOD (g)",
-            command=self._mark_detection_good, state="disabled"
-        )
-        self.mark_good_button.pack(side=tk.LEFT, padx=(5, 5))
-
-        self.mark_bad_button = ttk.Button(
-            control_frame3, text="标记 BAD (b)",
-            command=self._mark_detection_bad, state="disabled"
-        )
-        self.mark_bad_button.pack(side=tk.LEFT, padx=(0, 10))
-
-        # 下一个 GOOD/BAD 按钮行（始终保持可点击，不随cutout加载状态禁用）
+        # 跳转按钮行
         next_line1_frame = ttk.Frame(control_container)
         next_line1_frame.pack(fill=tk.X, pady=(0, 0))
-        self.next_good_button = ttk.Button(
-            next_line1_frame, text="下一个 GOOD (3)",
-            command=self._jump_to_next_good
-        )
-        self.next_good_button.pack(side=tk.LEFT, padx=(0, 5))
-
-        self.next_bad_button = ttk.Button(
-            next_line1_frame, text="下一个 BAD (4)",
-            command=self._jump_to_next_bad
-        )
-        self.next_bad_button.pack(side=tk.LEFT, padx=(0, 5))
 
         # 仅使用 Skybot 查询当前检测结果的小行星（忽略高级设置中的查询方式）
         self.skybot_force_current_button = ttk.Button(
@@ -1828,7 +1763,7 @@ class FitsImageViewer:
 
             # 如果是下载目录的文件，自动检查并加载diff结果
             if is_download_file:
-                # 若当前是通过“下一个 GOOD/BAD/SUSPECT/FALSE/ERROR”自动跳转，则已经手动加载了diff结果，
+                # 若当前是通过“下一个标签”自动跳转，则已经手动加载了diff结果，
                 # 这里不再调用 _auto_load_diff_results，避免覆盖目标cutout的位置。
                 if not getattr(self, '_jumping_to_labeled_next', False) and not getattr(
                     self, "_jumping_to_csv_filter_search", False
@@ -1841,8 +1776,6 @@ class FitsImageViewer:
                 except Exception:
                     pass
 
-            # 启用批量删除查询结果按钮
-            self.batch_delete_query_button.config(state="normal")
         else:
             # 选中的不是FITS文件（可能是目录），清空右侧显示
             try:
@@ -1858,13 +1791,11 @@ class FitsImageViewer:
             if self.wcs_checker:
                 self.wcs_check_button.config(state="disabled")
 
-            # 检查是否选中了目录，如果是则启用批量删除查询结果按钮
+            # 检查是否选中了目录
             # 包括：天区(region)、日期(date)、望远镜(telescope) 以及根目录(root_dir，例如“下载目录”根节点)
             if values and any(tag in tags for tag in ["region", "date", "telescope", "root_dir"]):
-                self.batch_delete_query_button.config(state="normal")
-                self.file_info_label.config(text="已选择目录 [可删除查询结果]")
+                self.file_info_label.config(text="已选择目录")
             else:
-                self.batch_delete_query_button.config(state="disabled")
                 self.file_info_label.config(text="未选择FITS文件")
 
     def _on_tree_double_click(self, event):
@@ -6960,14 +6891,8 @@ class FitsImageViewer:
         # CSV模式下禁用依赖cutout上下文的操作
         if hasattr(self, "check_dss_button"):
             self.check_dss_button.config(state="disabled")
-        if hasattr(self, "skybot_button"):
-            self.skybot_button.config(state="disabled")
         if hasattr(self, "vsx_button"):
             self.vsx_button.config(state="disabled")
-        if hasattr(self, "satellite_button"):
-            self.satellite_button.config(state="disabled")
-        if hasattr(self, "save_detection_button"):
-            self.save_detection_button.config(state="disabled")
 
     def _auto_load_diff_results(self, file_path):
         """自动检查并加载diff结果"""
@@ -7084,28 +7009,19 @@ class FitsImageViewer:
         if hasattr(self, 'check_dss_button'):
             self.check_dss_button.config(state="disabled")
         if hasattr(self, 'skybot_button'):
-            self.skybot_button.config(state="disabled", bg="#FFA500")  # 重置为橙黄色(未查询)
+            self.skybot_button.config(state="disabled", bg="#FFA500")  # 兼容旧属性
+        if hasattr(self, 'skybot_result_label'):
             self.skybot_result_label.config(text="未查询", foreground="gray")
             self._skybot_query_results = None  # 清空查询结果
             self._skybot_queried = False  # 清空查询标记
         if hasattr(self, 'vsx_button'):
             self.vsx_button.config(state="disabled", bg="#FFA500")  # 重置为橙黄色(未查询)
+        if hasattr(self, 'vsx_result_label'):
             self.vsx_result_label.config(text="未查询", foreground="gray")
             self._vsx_query_results = None  # 清空查询结果
             self._vsx_queried = False  # 清空查询标记
-        if hasattr(self, 'satellite_button'):
-            self.satellite_button.config(state="disabled", bg="#FFA500")  # 重置为橙黄色(未查询)
-            self.satellite_result_label.config(text="未查询", foreground="gray")
-            self._satellite_query_results = None  # 清空查询结果
-            self._satellite_queried = False  # 清空查询标记
-        if hasattr(self, 'save_detection_button'):
-            self.save_detection_button.config(state="disabled")
 
-        # 禁用人工标记按钮，并重置状态显示；"下一个 GOOD/BAD" 始终保持可点击
-        if hasattr(self, 'mark_good_button'):
-            self.mark_good_button.config(state="disabled")
-        if hasattr(self, 'mark_bad_button'):
-            self.mark_bad_button.config(state="disabled")
+        # 重置状态显示
         if hasattr(self, 'cutout_label_var'):
             self.cutout_label_var.set("状态: 未标记")
 
@@ -7676,38 +7592,14 @@ class FitsImageViewer:
         if hasattr(self, 'check_dss_button'):
             self.check_dss_button.config(state="normal")
 
-        # 启用Skybot查询按钮（只要有cutout就可以启用）
-        if hasattr(self, 'skybot_button'):
-            self.skybot_button.config(state="normal")
-            # 更新按钮颜色以反映查询状态
-            self._update_query_button_color('skybot')
+        # 更新查询状态显示
+        self._update_query_button_color('skybot')
 
         # 启用变星查询按钮（只要有cutout就可以启用）
         if hasattr(self, 'vsx_button'):
             self.vsx_button.config(state="normal")
             # 更新按钮颜色以反映查询状态
             self._update_query_button_color('vsx')
-
-        # 启用卫星查询按钮（只要有cutout就可以启用）
-        if hasattr(self, 'satellite_button'):
-            self.satellite_button.config(state="normal")
-            # 更新按钮颜色以反映查询状态
-            self._update_query_button_color('satellite')
-
-        # 启用保存检测结果按钮（只要有cutout就可以启用）
-        if hasattr(self, 'save_detection_button'):
-            self.save_detection_button.config(state="normal")
-
-
-        # 启用人工标记与跳转按钮，并更新当前标记状态显示
-        if hasattr(self, 'mark_good_button'):
-            self.mark_good_button.config(state="normal")
-        if hasattr(self, 'mark_bad_button'):
-            self.mark_bad_button.config(state="normal")
-        if hasattr(self, 'next_good_button'):
-            self.next_good_button.config(state="normal")
-        if hasattr(self, 'next_bad_button'):
-            self.next_bad_button.config(state="normal")
 
         # 刷新当前cutout的状态标签（GOOD/BAD + SUSPECT/FALSE/ERROR）
         self._refresh_cutout_status_label()
@@ -8011,66 +7903,6 @@ class FitsImageViewer:
 
 
 
-    def _mark_detection_good(self):
-        """将当前检测结果标记为 GOOD；如已是 GOOD，则恢复为未标记"""
-        try:
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                messagebox.showinfo("提示", "没有可标记的检测结果")
-                return
-            if not hasattr(self, '_current_cutout_index'):
-                messagebox.showinfo("提示", "没有当前显示的检测结果")
-                return
-
-            cutout_set = self._all_cutout_sets[self._current_cutout_index]
-            current = cutout_set.get('manual_label', None)
-
-            # 再次点击同一状态 -> 取消标记
-            new_label = None if current == 'good' else 'good'
-            cutout_set['manual_label'] = new_label
-
-            # 刷新状态标签（包含GOOD/BAD及自动分类）
-            self._refresh_cutout_status_label()
-
-            self.logger.info(f"检测目标 {self._current_cutout_index + 1} 标记为: {new_label or '未标记'}")
-            # 将手动标记写入 aligned_comparison_*.txt
-            try:
-                self._save_manual_labels_to_aligned_comparison()
-            except Exception as inner_e:
-                self.logger.error(f"写入aligned_comparison手动标记失败(GOOD): {inner_e}")
-
-        except Exception as e:
-            self.logger.error(f"标记检测结果为GOOD失败: {e}")
-
-    def _mark_detection_bad(self):
-        """将当前检测结果标记为 BAD；如已是 BAD，则恢复为未标记"""
-        try:
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                messagebox.showinfo("提示", "没有可标记的检测结果")
-                return
-            if not hasattr(self, '_current_cutout_index'):
-                messagebox.showinfo("提示", "没有当前显示的检测结果")
-                return
-
-            cutout_set = self._all_cutout_sets[self._current_cutout_index]
-            current = cutout_set.get('manual_label', None)
-
-            # 再次点击同一状态 -> 取消标记
-            new_label = None if current == 'bad' else 'bad'
-            cutout_set['manual_label'] = new_label
-
-            # 刷新状态标签（包含GOOD/BAD及自动分类）
-            self._refresh_cutout_status_label()
-
-            self.logger.info(f"检测目标 {self._current_cutout_index + 1} 标记为: {new_label or '未标记'}")
-            # 将手动标记写入 aligned_comparison_*.txt
-            try:
-                self._save_manual_labels_to_aligned_comparison()
-            except Exception as inner_e:
-                self.logger.error(f"写入aligned_comparison手动标记失败(BAD): {inner_e}")
-
-        except Exception as e:
-            self.logger.error(f"标记检测结果为BAD失败: {e}")
-
     def _mark_auto_class_label_manual(self, label: str):
         """手动将当前检测结果的 auto_class_label 直接标记为给定值（suspect/false/error）。"""
         try:
@@ -8112,15 +7944,6 @@ class FitsImageViewer:
     def _jump_to_next_error(self):
         """从目录树当前选中节点开始，向下单向查找下一个自动标记为 ERROR 的检测结果"""
         self._jump_to_next_manual_label('error')
-
-
-    def _jump_to_next_good(self):
-        """从目录树当前选中节点开始，向下单向查找下一个标记为 GOOD 的检测结果"""
-        self._jump_to_next_manual_label('good')
-
-    def _jump_to_next_bad(self):
-        """从目录树当前选中节点开始，向下单向查找下一个标记为 BAD 的检测结果"""
-        self._jump_to_next_manual_label('bad')
 
     def _jump_to_next_manual_label(self, target_label: str, good_only_for_suspect: bool = False):
         """从左侧目录树的当前选中节点开始，按可见顺序向下单向查找下一个指定标记的检测结果。
@@ -8253,7 +8076,7 @@ class FitsImageViewer:
                     if _match_label(cutout_set):
                         # 在目录树中选中该文件节点（程序自动选择）
                         self._auto_selecting = True
-                        # 标记当前是通过“下一个 GOOD/BAD/SUSPECT/FALSE/ERROR”跳转，用于在 _on_tree_select 中抑制自动加载首个cutout
+                        # 标记当前是通过“下一个标签”跳转，用于在 _on_tree_select 中抑制自动加载首个cutout
                         self._jumping_to_labeled_next = True
                         self.directory_tree.selection_set(node)
                         self.directory_tree.focus(node)
@@ -11498,272 +11321,6 @@ class FitsImageViewer:
             return None
 
 
-    def _query_satellite(self):
-        """使用Skyfield查询卫星数据"""
-        try:
-            # 立即重置结果标签，确保用户能看到查询状态变化
-            self.satellite_result_label.config(text="准备中...", foreground="gray")
-            self.satellite_result_label.update_idletasks()  # 强制刷新界面
-
-            # 检查是否有当前显示的cutout
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                self.logger.warning("请先执行差分检测并显示检测结果")
-                return
-
-            if not hasattr(self, '_current_cutout_index'):
-                self.logger.warning("没有当前显示的检测结果")
-                return
-
-            # 获取当前cutout的信息
-            current_cutout = self._all_cutout_sets[self._current_cutout_index]
-            reference_img = current_cutout['reference']
-            aligned_img = current_cutout['aligned']
-            detection_img = current_cutout['detection']
-
-            # 提取文件信息（包含RA/DEC）
-            selected_filename = ""
-            if self.selected_file_path:
-                selected_filename = os.path.basename(self.selected_file_path)
-
-            file_info = self._extract_file_info(reference_img, aligned_img, detection_img, selected_filename)
-
-            # 检查是否有RA/DEC信息
-            if not file_info.get('ra') or not file_info.get('dec'):
-                self.logger.error("无法获取目标的RA/DEC坐标信息")
-                self.satellite_result_label.config(text="坐标缺失", foreground="red")
-                return
-
-            ra = float(file_info['ra'])
-            dec = float(file_info['dec'])
-
-            # 检查是否有UTC时间
-            # 如果_current_utc_time未设置，尝试从文件名提取
-            if not hasattr(self, '_current_utc_time') or not self._current_utc_time:
-                # 尝试从原始文件名提取时间
-                filename_for_time = file_info.get('original_filename', file_info.get('filename', ''))
-                time_info = self._extract_time_from_filename(filename_for_time)
-                if time_info:
-                    self._current_utc_time = time_info.get('utc_datetime')
-                    self.logger.info(f"从文件名提取UTC时间: {self._current_utc_time}")
-                else:
-                    self.logger.error("无法获取UTC时间信息")
-                    self.satellite_result_label.config(text="时间缺失", foreground="red")
-                    return
-
-            utc_time = self._current_utc_time
-
-            # 获取GPS位置
-            try:
-                latitude = float(self.gps_lat_var.get())
-                longitude = float(self.gps_lon_var.get())
-            except ValueError:
-                self.logger.error(f"无效的GPS坐标: 纬度={self.gps_lat_var.get()}, 经度={self.gps_lon_var.get()}")
-                self.satellite_result_label.config(text="GPS无效", foreground="red")
-                return
-
-            # 获取搜索半径
-            try:
-                search_radius = float(self.search_radius_var.get())
-            except ValueError:
-                self.logger.warning(f"无效的搜索半径: {self.search_radius_var.get()}，使用默认值0.01")
-                search_radius = 0.01
-
-            query_info = f"准备查询卫星: RA={ra}°, Dec={dec}°, UTC={utc_time}, GPS=({latitude}°N, {longitude}°E), 半径={search_radius}°"
-            self.logger.info(query_info)
-            # 输出到日志标签页
-            if self.log_callback:
-                self.log_callback(query_info, "INFO")
-
-            self.satellite_result_label.config(text="查询中...", foreground="orange")
-            self.satellite_result_label.update_idletasks()  # 强制刷新界面
-
-            # 执行卫星查询
-            results = self._perform_satellite_query(ra, dec, utc_time, latitude, longitude, search_radius)
-
-            if results is not None:
-                # 保存查询结果到当前cutout
-                current_cutout = self._all_cutout_sets[self._current_cutout_index]
-                current_cutout['satellite_queried'] = True
-                current_cutout['satellite_results'] = results
-
-                # 同时保存到成员变量（兼容旧代码）
-                self._satellite_queried = True
-                self._satellite_query_results = results
-
-                if len(results) > 0:
-                    # 查询成功且有结果
-                    self.satellite_result_label.config(text=f"找到 {len(results)} 个", foreground="green")
-                    success_msg = f"卫星查询完成，找到 {len(results)} 个卫星"
-                    self.logger.info(success_msg)
-                    if self.log_callback:
-                        self.log_callback(success_msg, "INFO")
-
-                    # 输出详细结果
-                    for i, sat in enumerate(results, 1):
-                        sat_detail = f"  卫星 {i}: {sat.get('name', 'Unknown')} - 距离={sat.get('separation', 0):.4f}°"
-                        self.logger.info(sat_detail)
-                        if self.log_callback:
-                            self.log_callback(sat_detail, "INFO")
-
-                    # 更新txt文件中的查询结果
-                    self._update_detection_txt_with_query_results()
-
-                    # 更新按钮颜色 - 紫红色(有结果)
-                    self._update_query_button_color('satellite')
-
-                    # 重新绘制图像以显示卫星标记
-                    self._refresh_current_cutout_display()
-                else:
-                    # 查询结果为空（未找到）
-                    self._satellite_query_results = None  # 兼容旧代码
-
-                    self.satellite_result_label.config(text="未找到", foreground="blue")
-                    not_found_msg = "卫星查询完成，未找到卫星"
-                    self.logger.info(not_found_msg)
-                    if self.log_callback:
-                        self.log_callback(not_found_msg, "INFO")
-
-                    # 更新txt文件，标记为"已查询，未找到"
-                    self._update_detection_txt_with_query_results()
-
-                    # 更新按钮颜色 - 绿色(无结果)
-                    self._update_query_button_color('satellite')
-
-                    # 重新绘制图像（虽然没有结果，但确保界面一致性）
-                    self._refresh_current_cutout_display()
-            else:
-                # 查询失败，不保存到cutout（保持未查询状态）
-                self._satellite_query_results = None  # 兼容旧代码
-
-                self.satellite_result_label.config(text="查询失败", foreground="red")
-                error_msg = "卫星查询失败"
-                self.logger.error(error_msg)
-                if self.log_callback:
-                    self.log_callback(error_msg, "ERROR")
-
-        except Exception as e:
-            exception_msg = f"卫星查询失败: {str(e)}"
-            self.logger.error(exception_msg, exc_info=True)
-            if self.log_callback:
-                self.log_callback(exception_msg, "ERROR")
-            self.satellite_result_label.config(text="查询出错", foreground="red")
-
-    def _perform_satellite_query(self, ra, dec, utc_time, latitude, longitude, search_radius=0.01):
-        """
-        执行卫星查询
-
-        Args:
-            ra: 赤经（度）
-            dec: 赤纬（度）
-            utc_time: UTC时间（datetime对象）
-            latitude: 纬度（度）
-            longitude: 经度（度）
-            search_radius: 搜索半径（度，默认0.01）
-
-        Returns:
-            查询结果列表，如果失败返回None
-        """
-        try:
-            from skyfield.api import load, wgs84, EarthSatellite
-            from skyfield.toposlib import GeographicPosition
-            import numpy as np
-
-            param_header = f"卫星查询参数:"
-            param_coord = f"  坐标: RA={ra}°, Dec={dec}°"
-            param_time = f"  时间: {utc_time}"
-            param_gps = f"  观测位置: 纬度={latitude}°N, 经度={longitude}°E"
-            param_radius = f"  搜索半径: {search_radius}°"
-
-            self.logger.info(param_header)
-            self.logger.info(param_coord)
-            self.logger.info(param_time)
-            self.logger.info(param_gps)
-            self.logger.info(param_radius)
-            if self.log_callback:
-                self.log_callback(param_header, "INFO")
-                self.log_callback(param_coord, "INFO")
-                self.log_callback(param_time, "INFO")
-                self.log_callback(param_gps, "INFO")
-                self.log_callback(param_radius, "INFO")
-
-            # 加载时间尺度
-            ts = load.timescale()
-            t = ts.utc(utc_time.year, utc_time.month, utc_time.day,
-                      utc_time.hour, utc_time.minute, utc_time.second)
-
-            # 创建观测位置
-            observer = wgs84.latlon(latitude, longitude)
-
-            # 加载TLE数据（使用最新的活跃卫星数据）
-            # 这里使用Celestrak的活跃卫星TLE数据
-            try:
-                satellites = load.tle_file('https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle')
-                self.logger.info(f"成功加载 {len(satellites)} 个卫星的TLE数据")
-                if self.log_callback:
-                    self.log_callback(f"成功加载 {len(satellites)} 个卫星的TLE数据", "INFO")
-            except Exception as e:
-                error_msg = f"加载TLE数据失败: {str(e)}"
-                self.logger.error(error_msg)
-                if self.log_callback:
-                    self.log_callback(error_msg, "ERROR")
-                return None
-
-            # 查找在搜索半径内的卫星
-            results = []
-            for satellite in satellites:
-                try:
-                    # 计算卫星在观测时间和位置的位置
-                    geocentric = satellite.at(t)
-                    topocentric = (geocentric - observer.at(t))
-                    sat_ra, sat_dec, distance = topocentric.radec()
-
-                    # 计算角距离
-                    sat_ra_deg = sat_ra._degrees
-                    sat_dec_deg = sat_dec.degrees
-
-                    # 简单的角距离计算（球面三角）
-                    delta_ra = np.radians(sat_ra_deg - ra)
-                    delta_dec = np.radians(sat_dec_deg - dec)
-                    ra_rad = np.radians(ra)
-                    dec_rad = np.radians(dec)
-                    sat_dec_rad = np.radians(sat_dec_deg)
-
-                    separation = np.degrees(np.arccos(
-                        np.sin(dec_rad) * np.sin(sat_dec_rad) +
-                        np.cos(dec_rad) * np.cos(sat_dec_rad) * np.cos(delta_ra)
-                    ))
-
-                    # 如果在搜索半径内，添加到结果
-                    if separation <= search_radius:
-                        results.append({
-                            'name': satellite.name,
-                            'ra': sat_ra_deg,
-                            'dec': sat_dec_deg,
-                            'separation': separation,
-                            'distance_km': distance.km
-                        })
-                except Exception as e:
-                    # 跳过有问题的卫星
-                    continue
-
-            return results
-
-        except ImportError as e:
-            import_error_msg = "skyfield未安装或导入失败，请安装: pip install skyfield"
-            detail_error_msg = f"详细错误: {e}"
-            self.logger.error(import_error_msg)
-            self.logger.error(detail_error_msg)
-            if self.log_callback:
-                self.log_callback(import_error_msg, "ERROR")
-                self.log_callback(detail_error_msg, "ERROR")
-            return None
-        except Exception as e:
-            exec_error_msg = f"卫星查询执行失败: {str(e)}"
-            self.logger.error(exec_error_msg, exc_info=True)
-            if self.log_callback:
-                self.log_callback(exec_error_msg, "ERROR")
-            return None
-
     def _get_fits_rotation_angle(self, fits_path):
         """
         从FITS文件的WCS信息中提取旋转角度
@@ -11927,145 +11484,6 @@ class FitsImageViewer:
             self.logger.error(f"获取旋转角度失败: {str(e)}")
             return 0.0
 
-    def _save_detection_result(self):
-        """保存当前显示的检测结果到output文件夹"""
-        try:
-            # 检查是否有当前显示的cutout
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                messagebox.showwarning("警告", "请先执行差分检测并显示检测结果")
-                return
-
-            if not hasattr(self, '_current_cutout_index'):
-                messagebox.showwarning("警告", "没有当前显示的检测结果")
-                return
-
-            # 获取当前cutout的信息
-            current_cutout = self._all_cutout_sets[self._current_cutout_index]
-            reference_img = current_cutout['reference']
-            aligned_img = current_cutout['aligned']
-            detection_img = current_cutout['detection']
-
-            # 获取输出目录（last_output_dir）
-            if not self.last_output_dir or not os.path.exists(self.last_output_dir):
-                messagebox.showwarning("警告", "无法找到输出目录")
-                return
-
-            # 从cutout文件名提取检测目标编号
-            # 文件名格式: 001_RA285.123456_DEC43.567890_GY5_K096_1_reference.png
-            # 或: 001_X1234_Y5678_GY5_K096_1_reference.png
-            reference_basename = os.path.basename(reference_img)
-            import re
-
-            # 提取序号（前3位数字）
-            match = re.match(r'(\d{3})_', reference_basename)
-            if not match:
-                messagebox.showerror("错误", f"无法解析检测结果文件名: {reference_basename}")
-                self.logger.error(f"文件名格式不匹配: {reference_basename}")
-                return
-
-            detection_num = match.group(1)
-
-            # 生成时间戳
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # 获取detected根目录
-            detected_root = None
-
-            # 优先从配置管理器获取detected目录
-            if self.config_manager:
-                last_selected = self.config_manager.get_last_selected()
-                detected_dir = last_selected.get("detected_directory", "")
-                if detected_dir and os.path.exists(os.path.dirname(detected_dir)):
-                    # 配置的detected目录直接作为根目录
-                    detected_root = Path(detected_dir)
-                    self.logger.info(f"使用配置的detected目录: {detected_root}")
-
-            # 如果配置中没有或目录不存在，尝试从diff_output目录推断
-            if not detected_root:
-                self.logger.info("配置中没有detected目录，从diff_output目录推断")
-                # 路径结构: diff_output/系统名/日期/天区/文件名/detection_xxx
-                # 需要找到diff_output目录
-                current_path = Path(self.last_output_dir)
-                diff_output_root = None
-
-                # 向上查找，直到找到包含多个系统目录的根目录
-                for parent in current_path.parents:
-                    # 检查是否是diff_output根目录（通常名为diff_output或包含系统名子目录）
-                    if parent.name == 'diff_output' or (parent.parent and parent.parent.name == 'diff_output'):
-                        diff_output_root = parent if parent.name == 'diff_output' else parent.parent
-                        break
-
-                # 如果没找到，使用last_output_dir的上5级目录
-                if not diff_output_root:
-                    diff_output_root = current_path.parents[4] if len(list(current_path.parents)) > 4 else current_path.parent
-
-                # 在diff_output根目录下创建detected目录
-                detected_root = diff_output_root / "detected"
-                self.logger.info(f"推断的detected目录: {detected_root}")
-
-            # 创建带日期的子目录：detected/YYYYMMDD/
-            date_str = datetime.now().strftime("%Y%m%d")
-            detected_date_dir = detected_root / date_str
-
-            # 创建保存目录：detected/YYYYMMDD/saved_HHMMSS_NNN/
-            save_dir = detected_date_dir / f"saved_{timestamp[9:]}_{detection_num}"
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            self.logger.info(f"最终保存目录: {save_dir}")
-
-            self.logger.info(f"开始保存检测结果 #{detection_num} 到: {save_dir}")
-
-            # 1. 收集并保存参数信息
-            params_file = save_dir / "detection_parameters.txt"
-            self._save_detection_parameters(str(params_file), detection_num, timestamp)
-
-            # 2. 复制cutout图片
-            import shutil
-            shutil.copy2(reference_img, str(save_dir / os.path.basename(reference_img)))
-            shutil.copy2(aligned_img, str(save_dir / os.path.basename(aligned_img)))
-            shutil.copy2(detection_img, str(save_dir / os.path.basename(detection_img)))
-            self.logger.info("已复制cutout图片")
-
-            # 3. 查找并复制noise_cleaned_aligned.fits文件
-            parent_dir = Path(self.last_output_dir)
-            noise_cleaned_files = list(parent_dir.glob("*noise_cleaned_aligned.fits"))
-            for fits_file in noise_cleaned_files:
-                shutil.copy2(str(fits_file), str(save_dir / fits_file.name))
-            self.logger.info(f"已复制 {len(noise_cleaned_files)} 个noise_cleaned_aligned.fits文件")
-
-            # 4. 查找并复制aligned_comparison文件
-            aligned_comparison_files = list(parent_dir.glob("aligned_comparison_*"))
-            for comp_file in aligned_comparison_files:
-                if comp_file.is_file():
-                    shutil.copy2(str(comp_file), str(save_dir / comp_file.name))
-            self.logger.info(f"已复制 {len(aligned_comparison_files)} 个aligned_comparison文件")
-
-            # 5. 复制整个cutouts目录
-            cutouts_src = parent_dir / "cutouts"
-            if cutouts_src.exists():
-                cutouts_dst = save_dir / "cutouts"
-                if cutouts_dst.exists():
-                    shutil.rmtree(str(cutouts_dst))
-                shutil.copytree(str(cutouts_src), str(cutouts_dst))
-                self.logger.info("已复制cutouts目录")
-
-            # 合并成一个弹窗：显示成功消息并询问是否打开
-            result = messagebox.askquestion(
-                "保存成功",
-                f"检测结果 #{detection_num} 已保存到:\n{save_dir}\n\n是否打开保存目录？",
-                icon='info'
-            )
-
-            self.logger.info(f"检测结果保存完成: {save_dir}")
-
-            if result == 'yes':
-                self._open_directory_in_explorer(str(save_dir))
-
-        except Exception as e:
-            error_msg = f"保存检测结果失败: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            messagebox.showerror("错误", error_msg)
-
     def _update_query_button_color(self, query_type='skybot'):
         """
         更新查询按钮的颜色以反映查询状态（从当前cutout读取）
@@ -12084,34 +11502,43 @@ class FitsImageViewer:
             current_cutout = self._all_cutout_sets[self._current_cutout_index]
 
             if query_type == 'skybot':
-                button = self.skybot_button
-                label = self.skybot_result_label
+                button = getattr(self, 'skybot_button', None)
+                label = getattr(self, 'skybot_result_label', None)
                 queried = current_cutout.get('skybot_queried', False)
                 results = current_cutout.get('skybot_results', None)
             elif query_type == 'vsx':
-                button = self.vsx_button
-                label = self.vsx_result_label
+                button = getattr(self, 'vsx_button', None)
+                label = getattr(self, 'vsx_result_label', None)
                 queried = current_cutout.get('vsx_queried', False)
                 results = current_cutout.get('vsx_results', None)
             else:  # satellite
-                button = self.satellite_button
-                label = self.satellite_result_label
+                button = getattr(self, 'satellite_button', None)
+                label = getattr(self, 'satellite_result_label', None)
                 queried = current_cutout.get('satellite_queried', False)
                 results = current_cutout.get('satellite_results', None)
 
+            if button is None and label is None:
+                return
+
             if not queried:
                 # 未查询 - 橙黄色
-                button.config(bg="#FFA500")
-                label.config(text="未查询", foreground="gray")
+                if button is not None:
+                    button.config(bg="#FFA500")
+                if label is not None:
+                    label.config(text="未查询", foreground="gray")
             elif results is None or len(results) == 0:
                 # 已查询但无结果 - 绿色
-                button.config(bg="#00C853")
-                label.config(text="未找到", foreground="blue")
+                if button is not None:
+                    button.config(bg="#00C853")
+                if label is not None:
+                    label.config(text="未找到", foreground="blue")
             else:
                 # 有结果 - 紫红色
-                button.config(bg="#C2185B")
+                if button is not None:
+                    button.config(bg="#C2185B")
                 count = len(results)
-                label.config(text=f"找到 {count} 个", foreground="green")
+                if label is not None:
+                    label.config(text=f"找到 {count} 个", foreground="green")
 
         except Exception as e:
             self.logger.error(f"更新查询按钮颜色失败: {str(e)}")
@@ -12610,246 +12037,6 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"更新自动分类(auto_class_label)失败: {e}")
 
-    def _save_detection_parameters(self, params_file, detection_num, timestamp):
-        """保存检测参数到文本文件"""
-        try:
-            with open(params_file, 'w', encoding='utf-8') as f:
-                f.write("=" * 60 + "\n")
-                f.write(f"检测结果参数信息 - 检测目标 #{detection_num}\n")
-                f.write("=" * 60 + "\n\n")
-
-                # 基本信息
-                f.write(f"检测时间: {timestamp[:8]}-{timestamp[9:]}\n")
-                f.write(f"检测编号: {detection_num}\n")
-                f.write(f"保存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-
-                # 文件信息
-                if self.selected_file_path:
-                    f.write(f"选中文件: {os.path.basename(self.selected_file_path)}\n")
-                    f.write(f"文件路径: {self.selected_file_path}\n\n")
-
-                # 坐标信息（从显示框读取）
-                f.write("坐标信息:\n")
-                f.write(f"  度格式: {self.coord_deg_entry.get()}\n")
-                f.write(f"  时分秒: {self.coord_hms_entry.get()}\n")
-                f.write(f"  紧凑格式: {self.coord_compact_entry.get()}\n\n")
-
-                # 时间信息
-                f.write("时间信息:\n")
-                f.write(f"  UTC: {self.time_utc_entry.get()}\n")
-                f.write(f"  北京时间: {self.time_beijing_entry.get()}\n")
-                f.write(f"  本地时间: {self.time_local_entry.get()}\n\n")
-
-                # GPS信息
-                if self.config_manager:
-                    gps_settings = self.config_manager.get_gps_settings()
-                    f.write("GPS信息:\n")
-                    f.write(f"  纬度: {gps_settings.get('latitude', 'N/A')}°\n")
-                    f.write(f"  经度: {gps_settings.get('longitude', 'N/A')}°\n\n")
-
-                # MPC信息
-                if self.config_manager:
-                    mpc_settings = self.config_manager.get_mpc_settings()
-                    f.write("MPC信息:\n")
-                    f.write(f"  观测站代码: {mpc_settings.get('mpc_code', 'N/A')}\n\n")
-
-                # Diff处理参数
-                if self.config_manager:
-                    batch_settings = self.config_manager.get_batch_process_settings()
-                    f.write("Diff处理参数:\n")
-                    f.write(f"  快速模式: {batch_settings.get('fast_mode', 'N/A')}\n")
-                    f.write(f"  下载线程数: {batch_settings.get('thread_count', 'N/A')}\n\n")
-
-                # Skybot查询结果
-                skybot_result = self.skybot_result_label.cget("text")
-                f.write(f"Skybot查询结果: {skybot_result}\n")
-
-                # VSX查询结果
-                vsx_result = self.vsx_result_label.cget("text")
-                f.write(f"VSX查询结果: {vsx_result}\n\n")
-
-                f.write("=" * 60 + "\n")
-                f.write("参数文件结束\n")
-                f.write("=" * 60 + "\n")
-
-            self.logger.info(f"参数文件已保存: {params_file}")
-
-        except Exception as e:
-            self.logger.error(f"保存参数文件失败: {str(e)}")
-
-    def _batch_delete_query_results(self):
-        """批量删除查询结果文件"""
-        try:
-            # 获取当前选中的节点
-            selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showwarning("警告", "请先选择一个目录或文件")
-                return
-
-            item = selection[0]
-            values = self.directory_tree.item(item, "values")
-            tags = self.directory_tree.item(item, "tags")
-
-            if not values:
-                messagebox.showwarning("警告", "请选择一个目录或文件")
-                return
-
-            # 判断是文件还是目录
-            is_file = "fits_file" in tags
-
-            if is_file:
-                # 选中的是单个文件
-                file_path = values[0]
-
-                # 检查文件是否有diff结果
-                if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                    messagebox.showinfo("提示", "该文件没有检测结果")
-                    return
-
-                # 确认删除
-                result = messagebox.askyesno("确认删除",
-                                            f"确定要删除该文件的所有查询结果吗？\n\n文件: {os.path.basename(file_path)}")
-                if not result:
-                    return
-
-                # 删除当前文件的所有查询结果
-                deleted_count = self._delete_query_results_for_current_file()
-                messagebox.showinfo("完成", f"已删除 {deleted_count} 个查询结果文件")
-                self.logger.info(f"已删除 {deleted_count} 个查询结果文件")
-
-                # 刷新显示
-                if hasattr(self, '_current_cutout_index'):
-                    self._display_cutout_by_index(self._current_cutout_index)
-
-            else:
-                # 选中的是目录
-                directory = values[0]
-
-                # 确认删除
-                result = messagebox.askyesno("确认删除",
-                                            f"确定要删除该目录下所有文件的查询结果吗？\n\n目录: {directory}\n\n这将删除所有 query_results_*.txt 文件")
-                if not result:
-                    return
-
-                # 获取对应的输出目录
-                output_directory = self._get_output_directory_from_download_directory(directory)
-                if not output_directory:
-                    messagebox.showwarning("警告", "未找到对应的输出目录")
-                    return
-
-                self.logger.info(f"下载目录: {directory}")
-                self.logger.info(f"输出目录: {output_directory}")
-
-                # 删除输出目录下的所有查询结果文件
-                deleted_count = self._delete_query_results_for_directory(output_directory)
-                messagebox.showinfo("完成", f"已删除 {deleted_count} 个查询结果文件")
-                self.logger.info(f"已删除 {deleted_count} 个查询结果文件")
-
-        except Exception as e:
-            error_msg = f"批量删除查询结果失败: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            messagebox.showerror("错误", error_msg)
-
-    def _delete_query_results_for_current_file(self):
-        """删除当前文件的所有查询结果"""
-        deleted_count = 0
-        try:
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                return 0
-
-            for idx, cutout_set in enumerate(self._all_cutout_sets):
-                detection_img = cutout_set.get('detection')
-                if not detection_img or not os.path.exists(detection_img):
-                    continue
-
-                cutout_dir = os.path.dirname(detection_img)
-                query_results_file = os.path.join(cutout_dir, f"query_results_{idx + 1:03d}.txt")
-
-                if os.path.exists(query_results_file):
-                    try:
-                        os.remove(query_results_file)
-                        deleted_count += 1
-                        self.logger.info(f"已删除: {query_results_file}")
-
-                        # 重置查询状态
-                        cutout_set['skybot_queried'] = False
-                        cutout_set['vsx_queried'] = False
-                        cutout_set['skybot_results'] = None
-                        cutout_set['vsx_results'] = None
-                    except Exception as e:
-                        self.logger.error(f"删除文件失败 {query_results_file}: {str(e)}")
-
-        except Exception as e:
-            self.logger.error(f"删除当前文件查询结果失败: {str(e)}")
-
-        return deleted_count
-
-    def _get_output_directory_from_download_directory(self, download_directory):
-        """根据下载目录获取对应的输出目录"""
-        try:
-            # 获取配置的输出目录
-            base_output_dir = None
-            if self.get_diff_output_dir_callback:
-                base_output_dir = self.get_diff_output_dir_callback()
-
-            if not base_output_dir or not os.path.exists(base_output_dir):
-                self.logger.warning("输出目录不存在")
-                return None
-
-            # 获取下载目录
-            download_dir = None
-            if self.get_download_dir_callback:
-                download_dir = self.get_download_dir_callback()
-
-            if not download_dir:
-                self.logger.warning("下载目录不存在")
-                return None
-
-            # 标准化路径
-            normalized_download_directory = os.path.normpath(download_directory)
-            normalized_download_dir = os.path.normpath(download_dir)
-
-            # 获取相对路径
-            try:
-                relative_path = os.path.relpath(normalized_download_directory, normalized_download_dir)
-            except ValueError:
-                self.logger.warning(f"无法计算相对路径: {normalized_download_directory} 相对于 {normalized_download_dir}")
-                return None
-
-            # 构建输出目录路径
-            output_directory = os.path.join(base_output_dir, relative_path)
-
-            if not os.path.exists(output_directory):
-                self.logger.warning(f"输出目录不存在: {output_directory}")
-                return None
-
-            return output_directory
-
-        except Exception as e:
-            self.logger.error(f"获取输出目录失败: {str(e)}")
-            return None
-
-    def _delete_query_results_for_directory(self, directory):
-        """删除目录下所有文件的查询结果"""
-        deleted_count = 0
-        try:
-            # 递归遍历目录
-            for root, dirs, files in os.walk(directory):
-                # 查找所有 query_results_*.txt 文件
-                for filename in files:
-                    if filename.startswith('query_results_') and filename.endswith('.txt'):
-                        file_path = os.path.join(root, filename)
-                        try:
-                            os.remove(file_path)
-                            deleted_count += 1
-                            self.logger.info(f"已删除: {file_path}")
-                        except Exception as e:
-                            self.logger.error(f"删除文件失败 {file_path}: {str(e)}")
-
-        except Exception as e:
-            self.logger.error(f"删除目录查询结果失败: {str(e)}")
-
-        return deleted_count
     def _batch_query_local_asteroids_and_variables(self):
         """已移除：旧离线/混合批量查询入口；统一转到 server 版。"""
         return self._batch_query_asteroids_and_variables()
