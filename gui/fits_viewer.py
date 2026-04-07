@@ -350,7 +350,7 @@ class FitsImageViewer:
         )
         self.flip_rank_aligned_vertical_check.pack(side=tk.LEFT, padx=(6, 0))
 
-        # 检测结果人工标记与跳转控件已移动到右侧控制面板（保存图像按钮下一行）
+        # 检测结果人工标记与跳转控件已移动到右侧控制面板
 
         # 坐标显示区域（第四行工具栏）
         toolbar_frame4 = ttk.Frame(toolbar_container)
@@ -702,12 +702,6 @@ class FitsImageViewer:
         )
         skip_ref_check.pack(side=tk.LEFT, padx=(0, 10))
 
-        # 当前检测目标的中心距离显示（仅展示，不再提供筛选配置）
-        ttk.Label(control_frame1, text="当前距离:").pack(side=tk.LEFT, padx=(10, 5))
-        self.current_center_distance_label = ttk.Label(control_frame1, text="--", foreground="blue", font=("Arial", 9, "bold"))
-        self.current_center_distance_label.pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Label(control_frame1, text="像素").pack(side=tk.LEFT, padx=(0, 5))
-
         # CSV当前行状态显示：variable_count / mpc_count
         ttk.Label(control_frame1, text="Var:").pack(side=tk.LEFT, padx=(10, 2))
         self.csv_variable_count_status_label = ttk.Label(control_frame1, text="--", foreground="gray", font=("Arial", 9, "bold"))
@@ -719,14 +713,6 @@ class FitsImageViewer:
         # 第二行控制面板：操作按钮
         control_frame2 = ttk.Frame(control_container)
         control_frame2.pack(fill=tk.X)
-
-        # 刷新按钮
-        refresh_btn = ttk.Button(control_frame2, text="刷新显示", command=self._refresh_display)
-        refresh_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        # 保存按钮
-        save_btn = ttk.Button(control_frame2, text="保存图像", command=self._save_image)
-        save_btn.pack(side=tk.LEFT, padx=(0, 5))
 
         # 对当前CSV行重跑 crossmatch_nonref_candidates
         self.rerun_crossmatch_button = ttk.Button(
@@ -1759,43 +1745,6 @@ class FitsImageViewer:
             self._reload_csv_candidates_for_display(output_dir, keep_current_index=True)
         except Exception as e:
             self.logger.warning(f"刷新CSV候选过滤失败: {e}")
-
-    def _refresh_display(self):
-        """刷新显示"""
-        if getattr(self, "_csv_candidate_mode", False) and getattr(self, "_csv_candidates", None):
-            idx = int(getattr(self, "_current_csv_candidate_index", 0))
-            self._display_csv_candidate_by_index(idx)
-            return
-        self._update_image_display()
-
-    def _save_image(self):
-        """保存图像"""
-        if self.current_fits_data is None:
-            messagebox.showwarning("警告", "没有可保存的图像")
-            return
-
-        try:
-            from tkinter import filedialog
-
-            # 选择保存路径
-            filename = filedialog.asksaveasfilename(
-                title="保存图像",
-                defaultextension=".png",
-                filetypes=[
-                    ("PNG files", "*.png"),
-                    ("JPEG files", "*.jpg"),
-                    ("PDF files", "*.pdf"),
-                    ("All files", "*.*")
-                ]
-            )
-
-            if filename:
-                self.figure.savefig(filename, dpi=150, bbox_inches='tight')
-                messagebox.showinfo("成功", f"图像已保存到:\n{filename}")
-
-        except Exception as e:
-            self.logger.error(f"保存图像失败: {str(e)}")
-            messagebox.showerror("错误", f"保存图像失败:\n{str(e)}")
 
     def _on_tree_select(self, event):
         """目录树选择事件"""
@@ -7061,16 +7010,6 @@ class FitsImageViewer:
         if hasattr(self, "save_detection_button"):
             self.save_detection_button.config(state="disabled")
 
-        # 更新中心距离显示
-        if hasattr(self, "current_center_distance_label"):
-            if x is not None and y is not None:
-                h, w = aligned_data.shape[0], aligned_data.shape[1]
-                cx, cy = w / 2.0, h / 2.0
-                dist = float(np.hypot(x - cx, y - cy))
-                self.current_center_distance_label.config(text=f"{dist:.1f}")
-            else:
-                self.current_center_distance_label.config(text="--")
-
     def _auto_load_diff_results(self, file_path):
         """自动检查并加载diff结果"""
         try:
@@ -7176,9 +7115,6 @@ class FitsImageViewer:
         if hasattr(self, 'cutout_count_label'):
             self.cutout_count_label.config(text="0/0")
 
-        # 重置当前中心距离标签
-        if hasattr(self, 'current_center_distance_label'):
-            self.current_center_distance_label.config(text="--")
         self._update_csv_count_status_labels(None)
 
         # 禁用导航按钮
@@ -7772,14 +7708,6 @@ class FitsImageViewer:
         # 更新计数标签
         self.cutout_count_label.config(text=f"{index + 1}/{self._total_cutouts}")
 
-        # 更新当前检测目标的中心距离显示
-        if hasattr(self, 'current_center_distance_label'):
-            current_distance = self._get_detection_center_distance(cutout_set)
-            if current_distance > 0:
-                self.current_center_distance_label.config(text=f"{current_distance:.1f}")
-            else:
-                self.current_center_distance_label.config(text="--")
-
         # 启用导航按钮
         if self._total_cutouts > 1:
             self.prev_cutout_button.config(state="normal")
@@ -7837,132 +7765,6 @@ class FitsImageViewer:
 
         # 在主界面显示图片
         self._show_cutouts_in_main_display(reference_img, aligned_img, detection_img, file_info)
-
-    def _get_detection_center_distance(self, cutout_set):
-        """
-        计算检测结果距离图像中心的距离
-
-        Args:
-            cutout_set: cutout数据集
-
-        Returns:
-            float: 距离中心的像素距离，如果无法计算则返回0
-        """
-        try:
-            detection_img = cutout_set.get('detection')
-            if not detection_img:
-                self.logger.info("_get_detection_center_distance: detection_img为空")
-                return 0
-
-            # 从文件名提取像素坐标
-            detection_basename = os.path.basename(detection_img)
-            self.logger.info(f"_get_detection_center_distance: 检测文件名={detection_basename}")
-
-            xy_match = re.search(r'X(\d+)_Y(\d+)', detection_basename)
-
-            if not xy_match:
-                self.logger.info("_get_detection_center_distance: 未找到X/Y坐标，尝试RA/DEC格式")
-                # 如果没有X/Y坐标，尝试从RA/DEC格式的文件名中获取坐标
-                # 文件名格式: 001_RA285.123456_DEC43.567890_...
-                ra_dec_match = re.search(r'RA([\d.]+)_DEC([\d.]+)', detection_basename)
-                if ra_dec_match:
-                    self.logger.info("_get_detection_center_distance: 找到RA/DEC坐标")
-                    # 如果是RA/DEC格式，需要通过WCS转换为像素坐标
-                    # 这里先尝试从aligned文件的header获取WCS信息
-                    aligned_img = cutout_set.get('aligned')
-                    if aligned_img:
-                        cutout_dir = Path(aligned_img).parent
-                        detection_dir = cutout_dir.parent
-                        fits_dir = detection_dir.parent  # 原始FITS文件所在目录
-                        self.logger.info(f"_get_detection_center_distance: fits_dir={fits_dir}")
-
-                        # 查找aligned.fits文件
-                        aligned_fits_files = list(fits_dir.glob('*_aligned.fits'))
-                        self.logger.info(f"_get_detection_center_distance: 找到{len(aligned_fits_files)}个aligned.fits文件")
-                        if aligned_fits_files:
-                            self.logger.info(f"_get_detection_center_distance: 使用文件={aligned_fits_files[0]}")
-                            with fits.open(aligned_fits_files[0]) as hdul:
-                                header = hdul[0].header
-                                image_data = hdul[0].data
-
-                                if image_data is not None and header is not None:
-                                    try:
-                                        from astropy.wcs import WCS
-                                        wcs = WCS(header)
-
-                                        ra = float(ra_dec_match.group(1))
-                                        dec = float(ra_dec_match.group(2))
-
-                                        # 将RA/DEC转换为像素坐标
-                                        pixel_coords = wcs.all_world2pix([[ra, dec]], 0)
-                                        pixel_x = pixel_coords[0][0]
-                                        pixel_y = pixel_coords[0][1]
-
-                                        height, width = image_data.shape
-                                        center_x = width / 2.0
-                                        center_y = height / 2.0
-
-                                        # 计算距离
-                                        distance = np.sqrt((pixel_x - center_x)**2 + (pixel_y - center_y)**2)
-                                        self.logger.info(f"_get_detection_center_distance: RA/DEC格式计算距离={distance:.1f}像素")
-                                        return distance
-                                    except Exception as wcs_error:
-                                        self.logger.warning(f"_get_detection_center_distance: WCS转换失败: {wcs_error}")
-
-                self.logger.info("_get_detection_center_distance: 未找到RA/DEC坐标或无法转换")
-                return 0
-
-            pixel_x = float(xy_match.group(1))
-            pixel_y = float(xy_match.group(2))
-            self.logger.info(f"_get_detection_center_distance: 提取到X/Y坐标: X={pixel_x}, Y={pixel_y}")
-
-            # 获取图像尺寸（从detection文件的父目录中的原始FITS文件）
-            # 尝试从aligned文件获取图像尺寸
-            aligned_img = cutout_set.get('aligned')
-            if aligned_img:
-                # 从aligned cutout的父目录找到原始aligned FITS文件
-                # cutout路径: .../detection_xxx/cutouts/xxx.png
-                # detection_dir: .../detection_xxx
-                # 原始FITS文件在detection_dir的父目录
-                cutout_dir = Path(aligned_img).parent
-                detection_dir = cutout_dir.parent
-                fits_dir = detection_dir.parent  # 原始FITS文件所在目录
-                self.logger.info(f"_get_detection_center_distance: fits_dir={fits_dir}")
-
-                # 查找aligned.fits文件
-                aligned_fits_files = list(fits_dir.glob('*_aligned.fits'))
-                self.logger.info(f"_get_detection_center_distance: 找到{len(aligned_fits_files)}个aligned.fits文件")
-
-                if aligned_fits_files:
-                    self.logger.info(f"_get_detection_center_distance: 使用文件={aligned_fits_files[0]}")
-                    with fits.open(aligned_fits_files[0]) as hdul:
-                        image_data = hdul[0].data
-                        if image_data is not None:
-                            height, width = image_data.shape
-                            center_x = width / 2.0
-                            center_y = height / 2.0
-                            self.logger.info(f"_get_detection_center_distance: 图像尺寸={width}x{height}, 中心=({center_x:.1f}, {center_y:.1f})")
-
-                            # 计算距离
-                            distance = np.sqrt((pixel_x - center_x)**2 + (pixel_y - center_y)**2)
-                            self.logger.info(f"_get_detection_center_distance: X/Y格式计算距离={distance:.1f}像素")
-                            return distance
-                        else:
-                            self.logger.warning("_get_detection_center_distance: image_data为None")
-                else:
-                    self.logger.warning("_get_detection_center_distance: 未找到aligned.fits文件")
-            else:
-                self.logger.warning("_get_detection_center_distance: aligned_img为空")
-
-            # 如果无法获取图像尺寸，返回0
-            self.logger.info("_get_detection_center_distance: 无法获取图像尺寸，返回0")
-            return 0
-
-        except Exception as e:
-            self.logger.warning(f"计算检测结果中心距离失败: {str(e)}")
-            import traceback
-            self.logger.warning(traceback.format_exc())
-            return 0
 
     def _show_next_cutout(self):
         """显示下一组cutout图片"""
@@ -14640,4 +14442,3 @@ class FitsImageViewer:
     def _batch_evaluate_alignment_quality(self):
         """已移除：原批量对齐误差评估、analysis 清理与高分筛选逻辑。"""
         messagebox.showinfo("提示", "批量检测对齐功能已移除。")
-
