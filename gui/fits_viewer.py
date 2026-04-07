@@ -7084,22 +7084,42 @@ class FitsImageViewer:
         """生成筛选导出网页 HTML。"""
         import html
 
-        cards = []
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
         for item in items:
-            cards.append(
+            dir_tag = str(item.get("output_tag", "") or "").strip()
+            group_key = dir_tag[:8] if dir_tag else "UNGROUPED"
+            grouped.setdefault(group_key, []).append(item)
+
+        group_blocks = []
+        for group_key in sorted(grouped.keys()):
+            group_items = grouped[group_key]
+            cards = []
+            for item in group_items:
+                cards.append(
+                    (
+                        '<div class="card">'
+                        f'<a href="{html.escape(item["img_rel"])}" target="_blank"><img src="{html.escape(item["img_rel"])}" alt="patch"></a>'
+                        '<div class="meta">'
+                        f'<div>rank: {html.escape(str(item.get("rank", "")))}</div>'
+                        f'<div>ai_class: {html.escape(str(item.get("ai_class", "")))}</div>'
+                        f'<div>skip_flag: {html.escape(str(item.get("skip_flag", "0")))}</div>'
+                        f'<div>ra/dec: {html.escape(str(item.get("ra_dec_deg", "")))}</div>'
+                        f'<div>HMS/DMS: {html.escape(str(item.get("hms_dms", "")))}</div>'
+                        f'<div>median_flux_norm: {html.escape(str(item.get("median_flux_norm", "")))}</div>'
+                        f'<div>row: {html.escape(str(item.get("raw_idx", "")))}</div>'
+                        f'<div>dir: {html.escape(str(item.get("output_tag", "")))}</div>'
+                        "</div></div>"
+                    )
+                )
+            group_blocks.append(
                 (
-                    '<div class="card">'
-                    f'<a href="{html.escape(item["img_rel"])}" target="_blank"><img src="{html.escape(item["img_rel"])}" alt="patch"></a>'
-                    '<div class="meta">'
-                    f'<div>rank: {html.escape(str(item.get("rank", "")))}</div>'
-                    f'<div>ai_class: {html.escape(str(item.get("ai_class", "")))}</div>'
-                    f'<div>skip_flag: {html.escape(str(item.get("skip_flag", "0")))}</div>'
-                    f'<div>row: {html.escape(str(item.get("raw_idx", "")))}</div>'
-                    f'<div>dir: {html.escape(str(item.get("output_tag", "")))}</div>'
-                    "</div></div>"
+                    '<section class="group">'
+                    f'<h3>分组: {html.escape(group_key)} <span class="count">({len(group_items)})</span></h3>'
+                    f'<div class="grid">{"".join(cards)}</div>'
+                    "</section>"
                 )
             )
-        cards_html = "\n".join(cards)
+        groups_html = "\n".join(group_blocks)
 
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -7111,6 +7131,9 @@ class FitsImageViewer:
     body {{ font-family: Arial, sans-serif; margin: 16px; }}
     .summary {{ background: #f6f8fa; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }}
     .summary pre {{ white-space: pre-wrap; margin: 6px 0 0 0; }}
+    .group {{ margin-bottom: 18px; }}
+    .group h3 {{ margin: 10px 0 8px 0; }}
+    .group .count {{ color: #666; font-weight: normal; font-size: 12px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }}
     .card {{ border: 1px solid #ddd; border-radius: 8px; overflow: hidden; background: #fff; }}
     .card img {{ width: 100%; height: auto; display: block; background: #000; }}
@@ -7125,11 +7148,32 @@ class FitsImageViewer:
     <div>patch尺寸: {patch_size_px}px，拉伸: {html.escape(hist_level)}</div>
     <pre>条件: {html.escape(condition_summary)}</pre>
   </div>
-  <div class="grid">
-    {cards_html}
-  </div>
+  {groups_html}
 </body>
 </html>"""
+
+    def _format_ra_dec_hms_dms_text(self, ra_deg: Optional[float], dec_deg: Optional[float]) -> str:
+        """将 RA/DEC 度数格式化为 HMS/DMS 文本。"""
+        if ra_deg is None or dec_deg is None:
+            return ""
+        try:
+            ra_norm = float(ra_deg) % 360.0
+            ra_total_seconds = ra_norm / 15.0 * 3600.0
+            ra_h = int(ra_total_seconds // 3600)
+            ra_m = int((ra_total_seconds % 3600) // 60)
+            ra_s = ra_total_seconds % 60
+
+            dec_val = float(dec_deg)
+            dec_sign = "+" if dec_val >= 0 else "-"
+            dec_abs = abs(dec_val)
+            dec_total_seconds = dec_abs * 3600.0
+            dec_d = int(dec_total_seconds // 3600)
+            dec_m = int((dec_total_seconds % 3600) // 60)
+            dec_s = dec_total_seconds % 60
+
+            return f"{ra_h:02d}:{ra_m:02d}:{ra_s:05.2f}  {dec_sign}{dec_d:02d}:{dec_m:02d}:{dec_s:05.2f}"
+        except Exception:
+            return ""
 
     def _export_filtered_web_zip(self):
         """按当前CSV筛选导出网页（含所有目标图）并打包 ZIP。"""
@@ -7245,12 +7289,23 @@ class FitsImageViewer:
                     continue
 
                 img_rel = f"assets/{fname}"
+                ra_deg = self._try_get_float_from_row(row, ["ra", "ra_deg", "ra_degree", "target_ra"])
+                dec_deg = self._try_get_float_from_row(row, ["dec", "dec_deg", "dec_degree", "target_dec"])
+                ra_dec_deg_text = ""
+                if ra_deg is not None and dec_deg is not None:
+                    ra_dec_deg_text = f"{float(ra_deg):.8f}, {float(dec_deg):.8f}"
+                hms_dms_text = self._format_ra_dec_hms_dms_text(ra_deg, dec_deg)
+                median_flux_norm = self._try_get_float_from_row(row, ["median_flux_norm"])
+                median_flux_text = "" if median_flux_norm is None else f"{float(median_flux_norm):.6g}"
                 items.append(
                     {
                         "img_rel": img_rel,
                         "rank": rank_raw,
                         "ai_class": str(row.get("ai_class", "")).strip(),
                         "skip_flag": str(self._get_csv_row_skip_flag(row)),
+                        "ra_dec_deg": ra_dec_deg_text,
+                        "hms_dms": hms_dms_text,
+                        "median_flux_norm": median_flux_text,
                         "raw_idx": int(raw_idx),
                         "output_tag": frame_tag,
                     }
