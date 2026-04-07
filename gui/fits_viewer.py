@@ -5212,6 +5212,7 @@ class FitsImageViewer:
                     )
                 )
 
+            timing_records = []
             for step_name, cmd in commands:
                 cmd_text = " ".join(cmd)
                 self.parent_frame.after(
@@ -5221,7 +5222,21 @@ class FitsImageViewer:
                     ),
                 )
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
+                step_start_ts = time.time()
                 proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                step_end_ts = time.time()
+                timing_records.append(
+                    {
+                        "step": step_name,
+                        "script_name": os.path.basename(cmd[1]) if len(cmd) > 1 else "",
+                        "start_ts": step_start_ts,
+                        "end_ts": step_end_ts,
+                        "start_time": datetime.fromtimestamp(step_start_ts).strftime("%Y-%m-%d %H:%M:%S"),
+                        "end_time": datetime.fromtimestamp(step_end_ts).strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration_sec": step_end_ts - step_start_ts,
+                        "return_code": int(proc.returncode),
+                    }
+                )
                 if proc.returncode != 0:
                     self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
                     if proc.stdout:
@@ -5289,6 +5304,10 @@ class FitsImageViewer:
                             f"命令: {cmd_text}"
                         )
 
+            timing_png = self._save_diff_pipeline_timing_png(output_dir, timing_records)
+            if timing_png:
+                self.logger.info("Diff流水线步骤耗时图已生成: %s", timing_png)
+
             # 用非参考候选CSV作为检测结果来源（仅 inner_border）
             detected_count = self._count_variable_candidates_nonref_only(output_dir)
             result = {
@@ -5296,6 +5315,7 @@ class FitsImageViewer:
                 "alignment_success": True,
                 "new_bright_spots": detected_count,
                 "output_directory": output_dir,
+                "timing_png": timing_png,
             }
 
             if result and result.get('success'):
@@ -5337,6 +5357,12 @@ class FitsImageViewer:
                 self.parent_frame.after(0, lambda: messagebox.showerror("错误", "Diff操作失败"))
 
         except Exception as e:
+            timing_png = self._save_diff_pipeline_timing_png(
+                output_dir if "output_dir" in locals() else "",
+                timing_records if "timing_records" in locals() else [],
+            )
+            if timing_png:
+                self.logger.info("Diff流水线步骤耗时图（失败前已执行步骤）: %s", timing_png)
             self.logger.error(f"执行diff操作时出错: {str(e)}")
             error_msg = str(e)
             self.parent_frame.after(0, lambda msg=error_msg: self.diff_progress_label.config(
@@ -5493,6 +5519,87 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.warning("创建安全源文件名失败，回退原文件继续处理: %s", e)
             return source_path
+
+    def _save_diff_pipeline_timing_png(self, output_dir: str, timing_records: list) -> Optional[str]:
+        """将Diff流水线每步的开始/结束时间与耗时导出为时间轴PNG。"""
+        if not output_dir or not timing_records:
+            return None
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            png_path = os.path.join(output_dir, "diff_pipeline_step_timing.png")
+
+            records = sorted(
+                list(timing_records),
+                key=lambda item: float(item.get("start_ts", 0.0)),
+            )
+            first_start = min(float(item.get("start_ts", 0.0)) for item in records)
+            last_end = max(float(item.get("end_ts", item.get("start_ts", 0.0))) for item in records)
+            starts_rel = [max(0.0, float(item.get("start_ts", 0.0)) - first_start) for item in records]
+            durations = [max(0.0, float(item.get("duration_sec", 0.0))) for item in records]
+            total_cost = max(0.0, last_end - first_start)
+            timeline_max = max(1.0, max(s + d for s, d in zip(starts_rel, durations)))
+
+            # Y轴优先显示脚本名（ASCII），避免中文字体缺失导致乱码
+            y_labels = []
+            for i, item in enumerate(records):
+                script_name = str(item.get("script_name", "")).strip()
+                step_name = str(item.get("step", "")).strip()
+                label_core = script_name or step_name or f"step_{i + 1}"
+                y_labels.append(f"{i + 1}. {label_core}")
+
+            start_clock = datetime.fromtimestamp(first_start).strftime("%Y-%m-%d %H:%M:%S")
+            end_clock = datetime.fromtimestamp(last_end).strftime("%Y-%m-%d %H:%M:%S")
+            fig_height = max(4.0, 1.2 + len(y_labels) * 0.75)
+
+            fig, ax = plt.subplots(figsize=(14, fig_height))
+            y_pos = np.arange(len(y_labels))
+            colors = ["#4CAF50" if int(item.get("return_code", 0)) == 0 else "#E53935" for item in records]
+            bars = ax.barh(
+                y_pos,
+                durations,
+                left=starts_rel,
+                color=colors,
+                alpha=0.9,
+                edgecolor="#444444",
+                linewidth=0.5,
+            )
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(y_labels, fontsize=9)
+            ax.invert_yaxis()
+            ax.set_xlim(0.0, timeline_max * 1.08)
+            ax.set_xlabel("Elapsed Time From Pipeline Start (seconds)")
+            ax.set_title(
+                f"Diff Pipeline Timeline  |  Total: {total_cost:.2f}s\n"
+                f"Start: {start_clock}    End: {end_clock}",
+                fontsize=11,
+            )
+            ax.grid(axis="x", linestyle="--", alpha=0.28)
+
+            for i, bar in enumerate(bars):
+                rel_s = starts_rel[i]
+                rel_e = rel_s + durations[i]
+                dur = durations[i]
+                rc = int(records[i].get("return_code", 0))
+                status = "OK" if rc == 0 else f"FAIL({rc})"
+                starts = str(records[i].get("start_time", ""))
+                ends = str(records[i].get("end_time", ""))
+                label = f"{rel_s:.2f}s -> {rel_e:.2f}s | dur={dur:.2f}s | {status} | {starts} ~ {ends}"
+                ax.text(
+                    rel_e + max(0.03, timeline_max * 0.006),
+                    bar.get_y() + bar.get_height() / 2.0,
+                    label,
+                    va="center",
+                    ha="left",
+                    fontsize=8,
+                )
+
+            fig.tight_layout()
+            fig.savefig(png_path, dpi=160, bbox_inches="tight")
+            plt.close(fig)
+            return png_path
+        except Exception as e:
+            self.logger.warning("保存Diff流水线耗时PNG失败: %s", e)
+            return None
 
     def run_diff_pipeline_for_file(
         self,
@@ -5785,11 +5892,26 @@ class FitsImageViewer:
                     )
                 )
 
+            timing_records = []
             for step_name, cmd in commands:
                 progress_callback(f"正在执行: {step_name}")
                 cmd_text = " ".join(cmd)
                 self.logger.info("执行步骤[%s]: %s", step_name, cmd_text)
+                step_start_ts = time.time()
                 proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                step_end_ts = time.time()
+                timing_records.append(
+                    {
+                        "step": step_name,
+                        "script_name": os.path.basename(cmd[1]) if len(cmd) > 1 else "",
+                        "start_ts": step_start_ts,
+                        "end_ts": step_end_ts,
+                        "start_time": datetime.fromtimestamp(step_start_ts).strftime("%Y-%m-%d %H:%M:%S"),
+                        "end_time": datetime.fromtimestamp(step_end_ts).strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration_sec": step_end_ts - step_start_ts,
+                        "return_code": int(proc.returncode),
+                    }
+                )
                 if proc.returncode != 0:
                     self.logger.error("步骤失败[%s], code=%s", step_name, proc.returncode)
                     if proc.stdout:
@@ -5857,19 +5979,29 @@ class FitsImageViewer:
                             f"命令: {cmd_text}"
                         )
 
+            timing_png = self._save_diff_pipeline_timing_png(output_dir, timing_records)
+            if timing_png:
+                self.logger.info("Diff流水线步骤耗时图已生成: %s", timing_png)
+
             detected_count = self._count_variable_candidates_nonref_only(output_dir)
             return {
                 "success": True,
                 "alignment_success": True,
                 "new_bright_spots": detected_count,
                 "output_directory": output_dir,
+                "timing_png": timing_png,
             }
         except Exception as e:
+            timing_png = self._save_diff_pipeline_timing_png(
+                output_dir if "output_dir" in locals() else "",
+                timing_records if "timing_records" in locals() else [],
+            )
             self.logger.error("执行新Diff替代流程失败: %s", e)
             return {
                 "success": False,
                 "error": str(e),
                 "output_directory": output_dir,
+                "timing_png": timing_png,
             }
 
     def _get_nonref_candidates_csv_path(self, output_dir: str) -> Optional[str]:
