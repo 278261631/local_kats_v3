@@ -421,27 +421,6 @@ class FitsImageViewer:
         # 变星server批量查询线程数，在高级设置中配置
         self.batch_vsx_server_threads_var = tk.StringVar(value="3")
 
-        # pympc server批量查询按钮（多线程）
-        self.batch_pympc_server_query_button = ttk.Button(
-            toolbar_frame6,
-            text="pympc server 批量查询",
-            command=self._batch_pympc_server_query,
-            state="disabled"
-        )
-        self.batch_pympc_server_query_button.pack(side=tk.LEFT, padx=(0, 5))
-
-        # 变星server批量查询按钮（调用本地server接口）
-        self.batch_vsx_server_query_button = ttk.Button(
-            toolbar_frame6,
-            text="变星server批量查询",
-            command=self._batch_vsx_server_query,
-            state="disabled"
-        )
-        self.batch_vsx_server_query_button.pack(side=tk.LEFT, padx=(5, 5))
-        
-        # 记录按钮初始状态
-        self.logger.info(f"变星server批量查询按钮已创建，初始状态: {self.batch_vsx_server_query_button['state']}")
-
         # 批量删除查询结果按钮
         self.batch_delete_query_button = ttk.Button(toolbar_frame6, text="删除查询结果",
                                                     command=self._batch_delete_query_results,
@@ -1758,10 +1737,6 @@ class FitsImageViewer:
             self.selected_file_path = None
             self.display_button.config(state="disabled")
             self.diff_button.config(state="disabled")
-            if hasattr(self, 'batch_pympc_server_query_button'):
-                self.batch_pympc_server_query_button.config(state="disabled")
-            if hasattr(self, 'batch_vsx_server_query_button'):
-                self.batch_vsx_server_query_button.config(state="disabled")
             if self.wcs_checker:
                 self.wcs_check_button.config(state="disabled")
             self.file_info_label.config(text="未选择文件")
@@ -1866,12 +1841,6 @@ class FitsImageViewer:
                 except Exception:
                     pass
 
-            # 启用 server 批量查询按钮（单个文件也支持批量查询其所有检测目标）
-            if hasattr(self, 'batch_pympc_server_query_button'):
-                self.batch_pympc_server_query_button.config(state="normal")
-            if hasattr(self, 'batch_vsx_server_query_button'):
-                self.batch_vsx_server_query_button.config(state="normal")
-                self.logger.info("变星server批量查询按钮状态更新: 启用 (选中FITS文件)")
             # 启用批量删除查询结果按钮
             self.batch_delete_query_button.config(state="normal")
         else:
@@ -1889,22 +1858,12 @@ class FitsImageViewer:
             if self.wcs_checker:
                 self.wcs_check_button.config(state="disabled")
 
-            # 检查是否选中了目录，如果是则启用批量查询按钮
+            # 检查是否选中了目录，如果是则启用批量删除查询结果按钮
             # 包括：天区(region)、日期(date)、望远镜(telescope) 以及根目录(root_dir，例如“下载目录”根节点)
             if values and any(tag in tags for tag in ["region", "date", "telescope", "root_dir"]):
-                if hasattr(self, 'batch_pympc_server_query_button'):
-                    self.batch_pympc_server_query_button.config(state="normal")
-                if hasattr(self, 'batch_vsx_server_query_button'):
-                    self.batch_vsx_server_query_button.config(state="normal")
-                    self.logger.info("变星server批量查询按钮状态更新: 启用 (选中目录节点)")
                 self.batch_delete_query_button.config(state="normal")
-                self.file_info_label.config(text="已选择目录 [可批量查询]")
+                self.file_info_label.config(text="已选择目录 [可删除查询结果]")
             else:
-                if hasattr(self, 'batch_pympc_server_query_button'):
-                    self.batch_pympc_server_query_button.config(state="disabled")
-                if hasattr(self, 'batch_vsx_server_query_button'):
-                    self.batch_vsx_server_query_button.config(state="disabled")
-                    self.logger.info("变星server批量查询按钮状态更新: 禁用 (未选中有效文件或目录)")
                 self.batch_delete_query_button.config(state="disabled")
                 self.file_info_label.config(text="未选择FITS文件")
 
