@@ -51,12 +51,6 @@ try:
 except ImportError:
     GoodBadListExporter = None
 
-# AI GOOD/BAD 质量自动标记分类器（可选依赖）
-try:
-    from ai_filter.classifier import AIPairQualityClassifier
-except Exception:
-    AIPairQualityClassifier = None
-
 
 def _decode_subprocess_stream(data):
     """尽量按常见编码解码子进程输出，避免 Windows 本地编码导致读取线程异常。"""
@@ -133,9 +127,6 @@ class FitsImageViewer:
         self._local_vsx_cache = None  # (path, table)
         # MPCORB缓存：存储(dataframe, ts, eph)以避免重复加载
         self._mpcorb_cache = None  # (path, df, ts, eph)
-
-        # AI GOOD/BAD
-        self._ai_classifier = None
 
         # 设置日志
         self.logger = logging.getLogger(__name__)
@@ -262,9 +253,6 @@ class FitsImageViewer:
             # 如果WCS检查器不可用，禁用按钮
             if not self.wcs_checker:
                 self.wcs_check_button.config(state="disabled", text="WCS检查不可用")
-
-        # AI GOOD/BAD 自动标记置信度阈值（在高级设置中可调）
-        self.ai_confidence_threshold_var = tk.DoubleVar(value=0.5)
 
         # 初始化GPS和MPC变量（这些变量会在高级设置标签页中使用）
         self.gps_lat_var = tk.StringVar(value="43.4")
@@ -515,7 +503,6 @@ class FitsImageViewer:
             command=self._rerun_crossmatch_for_selected_node_filtered_rows
         )
         self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT)
-        ttk.Button(refresh_frame, text="AI标记 GOOD/BAD", command=self._ai_mark_detections).pack(side=tk.LEFT, padx=(5, 0))
 
         # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
         csv_search_frame = ttk.Frame(left_frame)
@@ -722,13 +709,6 @@ class FitsImageViewer:
             fast_mode = batch_settings.get('fast_mode', True)
             self.fast_mode_var.set(fast_mode)
 
-            # AI GOOD/BAD 自动标记相关设置
-            try:
-                ais = self.config_manager.get_ai_classification_settings()
-                self.ai_confidence_threshold_var.set(float(ais.get('confidence_threshold', 0.5)))
-            except Exception:
-                pass
-
             self.logger.info(f"批量处理参数已加载到控件: 快速模式={fast_mode}")
 
         except Exception as e:
@@ -742,9 +722,6 @@ class FitsImageViewer:
         try:
             # 绑定快速模式复选框
             self.fast_mode_var.trace('w', self._on_batch_settings_change)
-
-            # 绑定AI置信度阈值输入框
-            self.ai_confidence_threshold_var.trace('w', self._on_ai_confidence_threshold_change)
 
             self.logger.info("批量处理参数控件事件已绑定")
 
@@ -763,32 +740,6 @@ class FitsImageViewer:
             self.logger.info(f"批量处理参数已保存: 快速模式={self.fast_mode_var.get()}")
         except Exception as e:
             self.logger.error(f"保存批量处理参数失败: {str(e)}")
-
-    def _on_ai_confidence_threshold_change(self, *args):
-        """AI置信度阈值变化时保存到配置文件（延迟保存）"""
-        if not self.config_manager:
-            return
-
-        # 取消之前的延迟保存任务
-        if hasattr(self, '_ai_conf_save_timer'):
-            self.parent_frame.after_cancel(self._ai_conf_save_timer)
-
-        # 设置新的延迟保存任务（1秒后保存）
-        self._ai_conf_save_timer = self.parent_frame.after(1000, self._save_ai_confidence_threshold)
-
-    def _save_ai_confidence_threshold(self):
-        """保存AI置信度阈值到配置文件"""
-        if not self.config_manager:
-            return
-
-        try:
-            thr = float(self.ai_confidence_threshold_var.get())
-            self.config_manager.update_ai_classification_settings(confidence_threshold=thr)
-            self.logger.info(f"AI置信度阈值已保存: {thr}")
-        except ValueError:
-            self.logger.warning(f"无效的AI置信度阈值: {self.ai_confidence_threshold_var.get()}")
-        except Exception as e:
-            self.logger.error(f"保存AI置信度阈值失败: {str(e)}")
 
     def _load_dss_flip_settings(self):
         """从配置文件加载DSS翻转设置"""
@@ -3892,226 +3843,6 @@ class FitsImageViewer:
     def _export_good_bad_list(self):
         """已移除：原 GOOD/BAD 列表导出逻辑。"""
         messagebox.showinfo("提示", "导出 GOOD/BAD 列表功能已移除。")
-
-    def _get_ai_classifier(self):
-        """懒加载 AI GOOD/BAD 分类器实例。
-
-        如果缺少依赖（如 torch）或模型文件，将给出友好提示并返回 None。
-        """
-        try:
-            if getattr(self, "_ai_classifier", None) is not None:
-                return self._ai_classifier
-
-            if AIPairQualityClassifier is None:
-                msg = "当前环境未安装AI分类依赖（torch/torchvision 等），AI标记功能不可用。"
-                if hasattr(self, "logger"):
-                    self.logger.error(msg)
-                messagebox.showerror("AI标记不可用", msg)
-                self._ai_classifier = None
-                return None
-
-            # 实例化模型（默认使用 gui/ai_filter/pair_quality_cnn.pth）
-            self._ai_classifier = AIPairQualityClassifier()
-            if hasattr(self, "logger"):
-                self.logger.info("AI GOOD/BAD 分类模型已加载完成")
-            return self._ai_classifier
-
-        except FileNotFoundError as e:
-            msg = f"未找到AI模型文件: {e}"
-            if hasattr(self, "logger"):
-                self.logger.error(msg)
-            messagebox.showerror("AI模型缺失", msg)
-            self._ai_classifier = None
-            return None
-        except Exception as e:
-            msg = f"加载AI模型失败: {e}"
-            if hasattr(self, "logger"):
-                self.logger.error(msg, exc_info=True)
-            messagebox.showerror("AI标记不可用", msg)
-            self._ai_classifier = None
-            return None
-
-
-    def _ai_mark_detections(self):
-        """使用AI模型自动为当前目录树选中范围内的检测结果打 GOOD/BAD 标记。
-
-        只对置信度 >= 高级设置中阈值的预测结果进行标记，且不会覆盖已有的手工 GOOD/BAD 标记。
-        """
-        try:
-            classifier = self._get_ai_classifier()
-            if classifier is None:
-                return
-
-            # 读取置信度阈值
-            try:
-                threshold = float(self.ai_confidence_threshold_var.get())
-            except Exception:
-                threshold = 0.7
-
-            # 获取当前目录树选择
-            selection = self.directory_tree.selection()
-            if not selection:
-                messagebox.showwarning("警告", "请先在左侧目录树选择一个目录或文件")
-                return
-
-            root_node = selection[0]
-            root_tags = self.directory_tree.item(root_node, "tags")
-            root_values = self.directory_tree.item(root_node, "values")
-            if not root_values and "fits_file" not in root_tags:
-                messagebox.showwarning("警告", "请选择一个包含FITS文件的目录或FITS文件节点")
-                return
-
-            # 收集该节点下的所有FITS文件节点
-            file_nodes = []
-
-            def collect_file_nodes(node):
-                for child in self.directory_tree.get_children(node):
-                    tags_child = self.directory_tree.item(child, "tags")
-                    if "fits_file" in tags_child:
-                        file_nodes.append(child)
-                    else:
-                        # 仅在目录节点中递归
-                        if any(tag in tags_child for tag in [
-                            "region",
-                            "date",
-                            "telescope",
-                            "root_dir",
-                            "template_dir",
-                        ]):
-                            collect_file_nodes(child)
-
-            if "fits_file" in root_tags:
-                file_nodes.append(root_node)
-            else:
-                collect_file_nodes(root_node)
-
-            if not file_nodes:
-                messagebox.showinfo("提示", "所选目录下没有FITS文件")
-                return
-
-            total_files = len(file_nodes)
-            total_cutouts = 0
-            marked_good = 0
-            marked_bad = 0
-            skipped_labeled = 0
-            skipped_low_conf = 0
-            skipped_missing_img = 0
-
-            if hasattr(self, "logger"):
-                self.logger.info("=" * 60)
-                self.logger.info(
-                    f"开始AI自动标记 GOOD/BAD: 文件数={total_files}, 置信度阈值={threshold}"
-                )
-
-            # 记录并在结束后恢复当前cutout索引
-            original_idx = getattr(self, "_current_cutout_index", None)
-
-            for file_node in file_nodes:
-                try:
-                    values = self.directory_tree.item(file_node, "values")
-                    if not values:
-                        continue
-                    file_path = values[0]
-                    if not os.path.isfile(file_path):
-                        continue
-
-                    region_dir = os.path.dirname(file_path)
-
-                    # 为该文件加载diff结果
-                    if not self._load_diff_results_for_file(file_path, region_dir):
-                        continue
-                    if not hasattr(self, "_all_cutout_sets") or not self._all_cutout_sets:
-                        continue
-
-                    for idx, cutout_set in enumerate(self._all_cutout_sets):
-                        if not cutout_set:
-                            continue
-
-                        total_cutouts += 1
-
-                        # 跳过已有的手工 GOOD/BAD 标记
-                        existing_label = str((cutout_set or {}).get("manual_label") or "").lower()
-                        if existing_label in ("good", "bad"):
-                            skipped_labeled += 1
-                            continue
-
-                        ref_img = (cutout_set or {}).get("reference")
-                        aligned_img = (cutout_set or {}).get("aligned")
-                        if (
-                            not ref_img
-                            or not os.path.exists(ref_img)
-                            or not aligned_img
-                            or not os.path.exists(aligned_img)
-                        ):
-                            skipped_missing_img += 1
-                            continue
-
-                        try:
-                            label, prob = classifier.predict_pair(ref_img, aligned_img)
-                        except Exception as e:
-                            if hasattr(self, "logger"):
-                                self.logger.error(
-                                    f"AI标记失败，文件={file_path}, cutout_idx={idx + 1}: {e}",
-                                    exc_info=True,
-                                )
-                            continue
-
-                        if prob < threshold:
-                            skipped_low_conf += 1
-                            continue
-
-                        new_label = "good" if str(label).lower() == "good" else "bad"
-                        cutout_set["manual_label"] = new_label
-
-                        if new_label == "good":
-                            marked_good += 1
-                        else:
-                            marked_bad += 1
-
-                        # 将该标记写入 aligned_comparison_*.txt
-                        try:
-                            self._current_cutout_index = idx
-                            self._save_manual_labels_to_aligned_comparison()
-                        except Exception as e:
-                            if hasattr(self, "logger"):
-                                self.logger.error(
-                                    f"写入aligned_comparison手动标记失败(AI, {new_label}): {e}",
-                                    exc_info=True,
-                                )
-
-                except Exception as e:
-                    if hasattr(self, "logger"):
-                        self.logger.error(f"AI自动标记处理文件失败: {e}", exc_info=True)
-
-            # 恢复当前cutout索引
-            if original_idx is not None:
-                self._current_cutout_index = original_idx
-
-            # 尝试刷新当前cutout状态显示
-            try:
-                self._refresh_cutout_status_label()
-            except Exception:
-                pass
-
-            # 将弹框改为控制台日志输出
-            if hasattr(self, "logger"):
-                self.logger.info(
-                    "AI自动标记完成: "
-                    f"总目标数={total_cutouts}, 新标记GOOD={marked_good}, 新标记BAD={marked_bad}, "
-                    f"跳过(已有手工标记)={skipped_labeled}, "
-                    f"跳过(低于置信度阈值)={skipped_low_conf}, "
-                    f"跳过(缺少图像文件)={skipped_missing_img}"
-                )
-
-        except Exception as e:
-            err = f"AI自动标记失败: {e}"
-            if hasattr(self, "logger"):
-                self.logger.error(err, exc_info=True)
-            # 将错误弹框改为控制台日志输出
-            self.logger.error("AI自动标记失败: %s", str(e))
-
-
-
 
     def _has_line_through_center(self, image_path, distance_threshold=50):
         """使用 detect_center_lines 的方法和默认参数判断是否存在过中心直线。
@@ -7274,90 +7005,10 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"从query_results文件加载查询结果失败: {e}")
 
-    def _save_manual_labels_to_aligned_comparison(self):
-        """将当前cutout的 GOOD/BAD 标记写入 aligned_comparison_*.txt
-
-        约定：在 detection_*/cutouts 同级目录中，存在 aligned_comparison_*.txt；
-        对应当前cutout序号的行（含 "#编号" 或类似信息）后追加 "  [GOOD]" / "  [BAD]" 标记。
-        如果找不到文件或匹配行，则静默返回，仅写日志。
-        """
-        try:
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                return
-            if not hasattr(self, '_current_cutout_index'):
-                return
-
-            current_set = self._all_cutout_sets[self._current_cutout_index]
-            label = current_set.get('manual_label', None)
-            # 未标记则不写文件
-            if label not in ('good', 'bad'):
-                return
-
-            detection_img = current_set.get('detection')
-            if not detection_img or not os.path.exists(detection_img):
-                return
-
-            cutout_dir = os.path.dirname(detection_img)
-            detection_dir = os.path.dirname(cutout_dir)
-
-            # 在 detection_* 目录中查找 aligned_comparison_*.txt
-            candidates = [
-                f for f in os.listdir(detection_dir)
-                if f.startswith("aligned_comparison_") and f.endswith(".txt")
-            ]
-            if not candidates:
-                self.logger.info("未找到 aligned_comparison_*.txt，跳过手动标记写入")
-                return
-
-            aligned_txt_path = os.path.join(detection_dir, sorted(candidates)[0])
-
-            # 当前cutout的编号（从1开始）
-            idx = self._current_cutout_index + 1
-            mark_str = "[GOOD]" if label == 'good' else "[BAD]"
-
-            try:
-                with open(aligned_txt_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-            except Exception as e:
-                self.logger.error(f"读取 {aligned_txt_path} 失败: {e}")
-                return
-
-            # 策略：优先在同一行上更新/追加标记，匹配形式包括：
-            #   - "# idx ..."  （原始 aligned_comparison 行）
-            #   - "idx:"       （简化行号形式）
-            #   - "cutout #idx"（本工具追加的兼容行）
-            import re
-            pattern = re.compile(rf"(#+\s*{idx}\\b|\\b{idx}\s*[:：]|cutout\s*#\s*{idx}\\b)", re.IGNORECASE)
-            modified = False
-            for i, line in enumerate(lines):
-                if pattern.search(line):
-                    line_stripped = line.rstrip("\n")
-                    # 清理旧的 GOOD/BAD 标记，防止同时存在 [GOOD][BAD]
-                    for tok in ("[GOOD]", "[BAD]"):
-                        line_stripped = line_stripped.replace(tok, "")
-                    line_stripped = line_stripped.rstrip()
-                    lines[i] = f"{line_stripped}  {mark_str}\n"
-                    modified = True
-                    break
-
-            if not modified:
-                # 如果没找到匹配行，就在文件末尾追加一行简单记录
-                lines.append(f"cutout #{idx}: {mark_str}\n")
-
-            try:
-                with open(aligned_txt_path, 'w', encoding='utf-8') as f:
-                    f.writelines(lines)
-                self.logger.info(f"已将手动标记 {mark_str} 写入 {os.path.basename(aligned_txt_path)} (cutout #{idx})")
-            except Exception as e:
-                self.logger.error(f"写入 {aligned_txt_path} 失败: {e}")
-        except Exception as e:
-            self.logger.error(f"保存手动GOOD/BAD标记到 aligned_comparison 失败: {e}")
-
-
     def _save_auto_label_to_aligned_comparison(self):
         """将当前cutout的自动分类(SUSPECT/FALSE/ERROR)标记写入 aligned_comparison_*.txt。
 
-        - 不修改 GOOD/BAD 标记（仅追加/更新 SUSPECT/FALSE/ERROR）。
+        - 不修改其它标记（仅追加/更新 SUSPECT/FALSE/ERROR）。
         - 同一行上只保留一个自动分类标记，写入新标记前会移除旧的 SUSPECT/FALSE/ERROR。
         """
         try:
@@ -7438,86 +7089,6 @@ class FitsImageViewer:
         except Exception as e:
             self.logger.error(f"保存自动 SUSPECT/FALSE/ERROR 标记到 aligned_comparison 失败: {e}")
 
-    def _load_manual_labels_for_current_detection_dir(self, detection_dir):
-        """从 detection_* 目录下的 aligned_comparison_*.txt 读取 GOOD/BAD 标记填充到当前 cutout 集合。
-
-        detection_dir: detection_XXXX 目录的路径（字符串或 Path）。
-        """
-        try:
-            if not hasattr(self, '_all_cutout_sets') or not self._all_cutout_sets:
-                return
-            if not detection_dir:
-                return
-
-            detection_dir = str(detection_dir)
-            if not os.path.isdir(detection_dir):
-                return
-
-            candidates = [
-                f for f in os.listdir(detection_dir)
-                if f.startswith("aligned_comparison_") and f.endswith(".txt")
-            ]
-            if not candidates:
-                return
-
-            aligned_txt_path = os.path.join(detection_dir, sorted(candidates)[0])
-
-            try:
-                with open(aligned_txt_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-            except Exception as e:
-                self.logger.error(f"读取 {aligned_txt_path} 失败(加载GOOD/BAD): {e}")
-                return
-
-            import re
-            for line in lines:
-                # 既可能有 GOOD/BAD，也可能有 SUSPECT/FALSE/ERROR
-                has_manual = ("[GOOD]" in line) or ("[BAD]" in line)
-                has_auto = ("[SUSPECT]" in line) or ("[FALSE]" in line) or ("[ERROR]" in line)
-                if not has_manual and not has_auto:
-                    continue
-
-                manual_label = None
-                if "[GOOD]" in line:
-                    manual_label = 'good'
-                elif "[BAD]" in line:
-                    manual_label = 'bad'
-
-                auto_label = None
-                if "[SUSPECT]" in line:
-                    auto_label = 'suspect'
-                elif "[FALSE]" in line:
-                    auto_label = 'false'
-                elif "[ERROR]" in line:
-                    auto_label = 'error'
-
-                idx = None
-                m = re.search(r"cutout\s*#\s*(\d+)", line, re.IGNORECASE)
-                if m:
-                    idx = int(m.group(1))
-                else:
-                    m = re.search(r"#\s*(\d+)\b", line)
-                    if m:
-                        idx = int(m.group(1))
-                    else:
-                        m = re.search(r"\b(\d+)\s*[:：]", line)
-                        if m:
-                            idx = int(m.group(1))
-
-                if idx is None:
-                    continue
-
-                zero_based = idx - 1
-                if 0 <= zero_based < len(self._all_cutout_sets):
-                    if manual_label is not None:
-                        self._all_cutout_sets[zero_based]['manual_label'] = manual_label
-                    if auto_label is not None and not self._all_cutout_sets[zero_based].get('auto_class_label'):
-                        # 仅在尚未根据 query_results_*.txt 计算自动分类时，从文件恢复自动标记
-                        self._all_cutout_sets[zero_based]['auto_class_label'] = auto_label
-        except Exception as e:
-            self.logger.error(f"从 aligned_comparison 加载GOOD/BAD标记失败: {e}")
-
-
     def _display_cutout_by_index(self, index):
         """
         显示指定索引的cutout图片
@@ -7572,7 +7143,7 @@ class FitsImageViewer:
             # 更新按钮颜色以反映查询状态
             self._update_query_button_color('vsx')
 
-        # 刷新当前cutout的状态标签（GOOD/BAD + SUSPECT/FALSE/ERROR）
+        # 刷新当前cutout的状态标签（SUSPECT/FALSE/ERROR）
         self._refresh_cutout_status_label()
 
         # 提取文件信息（使用左侧选中的文件名）
@@ -7839,7 +7410,7 @@ class FitsImageViewer:
         self._display_cutout_by_index(prev_index)
 
     def _refresh_cutout_status_label(self):
-        """根据当前cutout的手动标记(manual_label)和自动分类(auto_class_label)更新状态标签"""
+        """根据当前cutout的自动分类(auto_class_label)更新状态标签"""
         if not hasattr(self, 'cutout_label_var'):
             return
         try:
@@ -7851,15 +7422,9 @@ class FitsImageViewer:
                 return
 
             cutout_set = self._all_cutout_sets[self._current_cutout_index]
-            manual = cutout_set.get('manual_label')
             auto = cutout_set.get('auto_class_label')
 
             parts = []
-            if manual == 'good':
-                parts.append("GOOD")
-            elif manual == 'bad':
-                parts.append("BAD")
-
             if auto in ('suspect', 'false', 'error'):
                 parts.append(auto.upper())
 
@@ -11831,24 +11396,13 @@ class FitsImageViewer:
                 self.logger.warning("没有检测结果")
                 return
 
-            # 以前这里按 high_score_count 过滤高分目标，现在取消该限制，
-            # 单文件批量查询完全由手动 GOOD 标记控制。
-            # high_score_count = self._get_high_score_count_from_current_detection()
-            # if high_score_count is None or high_score_count == 0:
-            #     self.logger.info("没有高分检测目标")
-            #     return
-
-            # 仅查询手动标记为 GOOD 的检测目标
-            good_indices = [
-                idx for idx, c in enumerate(self._all_cutout_sets)
-                if c.get('manual_label') == 'good'
-            ]
-            if not good_indices:
-                self.logger.info("当前文件没有标记为 GOOD 的检测目标，跳过批量查询")
-                messagebox.showinfo("提示", "当前文件没有标记为 GOOD 的检测目标")
+            target_indices = list(range(len(self._all_cutout_sets)))
+            if not target_indices:
+                self.logger.info("当前文件没有可查询的检测目标，跳过批量查询")
+                messagebox.showinfo("提示", "当前文件没有可查询的检测目标")
                 return
 
-            total = len(good_indices)
+            total = len(target_indices)
             success_count = 0
             skip_count = 0
 
@@ -11884,7 +11438,7 @@ class FitsImageViewer:
             interval = self._get_batch_query_interval_seconds()
 
             try:
-                for step, cutout_idx in enumerate(good_indices, start=1):
+                for step, cutout_idx in enumerate(target_indices, start=1):
                     self._current_cutout_index = cutout_idx
 
                     # 检查是否已经查询过
@@ -11949,7 +11503,7 @@ class FitsImageViewer:
 
                 # 完成
                 progress_label.config(text="批量查询完成！")
-                detail_label.config(text=f"总计: {total} 个检测目标（均为标记为 GOOD 的目标）")
+                detail_label.config(text=f"总计: {total} 个检测目标")
                 self.logger.info(f"批量查询完成！成功: {success_count}, 跳过: {skip_count}")
 
             except Exception as e:
@@ -11978,8 +11532,7 @@ class FitsImageViewer:
                         if detection_info and detection_info.get('has_result'):
                             high_score_count = detection_info.get('high_score_count', 0)
 
-                            # 以前这里限制 high_score_count < 8，现在改为：只要有diff检测结果就纳入批量查询，
-                            # 后续仅按手动 GOOD 标记筛选具体目标
+                            # 只要有diff检测结果就纳入批量查询
                             files_to_process.append({
                                 'file_path': file_path,
                                 'region_dir': root,
@@ -12431,60 +11984,20 @@ class FitsImageViewer:
                             'detection': str(det),
                         })
 
-                    # 加载GOOD/BAD标记
-                    try:
-                        comparison_files = list(Path(detection_dir_path).glob("aligned_comparison_*.txt"))
-                        if comparison_files:
-                            with open(comparison_files[0], 'r', encoding='utf-8') as f:
-                                for line in f:
-                                    line = line.strip()
-                                    # 支持两种格式：1) #1 [GOOD]  2) cutout #1: [GOOD]
-                                    if '[GOOD]' in line:
-                                        try:
-                                            # 格式1: #1 [GOOD]
-                                            if line.startswith('#'):
-                                                idx = int(line.split('#')[1].split()[0]) - 1
-                                            # 格式2: cutout #1: [GOOD]
-                                            elif 'cutout #' in line:
-                                                idx = int(line.split('cutout #')[1].split(':')[0]) - 1
-                                            else:
-                                                continue
-                                            
-                                            if 0 <= idx < len(local_cutouts):
-                                                local_cutouts[idx]['manual_label'] = 'good'
-                                        except:
-                                            pass
-                                    elif '[BAD]' in line:
-                                        try:
-                                            # 格式1: #1 [BAD]
-                                            if line.startswith('#'):
-                                                idx = int(line.split('#')[1].split()[0]) - 1
-                                            # 格式2: cutout #1: [BAD]
-                                            elif 'cutout #' in line:
-                                                idx = int(line.split('cutout #')[1].split(':')[0]) - 1
-                                            else:
-                                                continue
-                                            
-                                            if 0 <= idx < len(local_cutouts):
-                                                local_cutouts[idx]['manual_label'] = 'bad'
-                                        except:
-                                            pass
-                    except Exception as e:
-                        self.logger.warning(f"[{thread_name}] {filename}: 加载标记失败 - {e}")
+                    target_indices = list(range(len(local_cutouts)))
+                    if not target_indices:
+                        self.logger.info(f"[{thread_name}] {filename}: 跳过 - 无可查询目标")
+                        return {"status": "skipped", "reason": "无可查询目标"}
 
-                    # 获取GOOD目标
-                    good_indices = [i for i, c in enumerate(local_cutouts) if c.get('manual_label') == 'good']
-                    if not good_indices:
-                        self.logger.info(f"[{thread_name}] {filename}: 跳过 - 无GOOD标记")
-                        return {"status": "skipped", "reason": "无GOOD标记"}
-
-                    self.logger.info(f"[{thread_name}] {filename}: GOOD目标={good_indices}, 总数={len(local_cutouts)}")
+                    self.logger.info(
+                        f"[{thread_name}] {filename}: 可查询目标总数={len(target_indices)}"
+                    )
 
                     queried_count = 0
                     found_count = 0
                     skipped_count = 0
 
-                    for cutout_idx in good_indices:
+                    for cutout_idx in target_indices:
                         cutout = local_cutouts[cutout_idx]
                         detection_img = cutout['detection']
 
@@ -12755,23 +12268,19 @@ class FitsImageViewer:
                         self.logger.info(f"文件 {os.path.basename(file_path)}: 无检测结果，跳过")
                         return {"status": "skipped", "reason": "无检测结果"}
 
-                    # 仅查询手动标记为 GOOD 的检测目标
-                    good_indices = [
-                        ci for ci, c in enumerate(self._all_cutout_sets)
-                        if c.get('manual_label') == 'good'
-                    ]
-                    if not good_indices:
-                        self.logger.info(f"文件 {os.path.basename(file_path)}: 无 GOOD 标记目标，跳过")
-                        return {"status": "skipped", "reason": "无 GOOD 标记目标"}
+                    target_indices = list(range(len(self._all_cutout_sets)))
+                    if not target_indices:
+                        self.logger.info(f"文件 {os.path.basename(file_path)}: 无可查询目标，跳过")
+                        return {"status": "skipped", "reason": "无可查询目标"}
 
-                    self.logger.info(f"文件 {os.path.basename(file_path)}: 找到 {len(good_indices)} 个 GOOD 标记目标")
+                    self.logger.info(f"文件 {os.path.basename(file_path)}: 可查询目标数 {len(target_indices)}")
 
                     queried_count = 0
                     found_count = 0
                     skipped_skybot_count = 0
                     skipped_vsx_count = 0
 
-                    for cutout_idx in good_indices:
+                    for cutout_idx in target_indices:
                         self._current_cutout_index = cutout_idx
                         cutout_info = self._all_cutout_sets[cutout_idx]
 
@@ -13054,29 +12563,25 @@ class FitsImageViewer:
                         update_progress(idx, filename, "跳过（无检测结果）")
                         continue
 
-                    # 以前这里按 high_score_count 过滤，现在取消该限制，只依赖手动 GOOD 标记
+                    # 只要有检测结果就执行批量查询
                     # high_score_count = self._get_high_score_count_from_current_detection()
                     # if high_score_count is None or high_score_count == 0:
                     #     skip_count += 1
                     #     update_progress(idx, filename, "跳过（无高分目标）")
                     #     continue
 
-                    # 仅查询手动标记为 GOOD 的检测目标
-                    good_indices = [
-                        ci for ci, c in enumerate(self._all_cutout_sets)
-                        if c.get('manual_label') == 'good'
-                    ]
-                    if not good_indices:
+                    target_indices = list(range(len(self._all_cutout_sets)))
+                    if not target_indices:
                         skip_count += 1
-                        update_progress(idx, filename, "跳过（无 GOOD 标记目标）")
+                        update_progress(idx, filename, "跳过（无可查询目标）")
                         continue
 
-                    total_to_query = len(good_indices)
+                    total_to_query = len(target_indices)
                     queried_count = 0
 
                     interval = self._get_batch_query_interval_seconds()
 
-                    for local_step, cutout_idx in enumerate(good_indices, start=1):
+                    for local_step, cutout_idx in enumerate(target_indices, start=1):
                         self._current_cutout_index = cutout_idx
 
                         # 检查是否已经查询过
@@ -13120,10 +12625,10 @@ class FitsImageViewer:
 
                     if queried_count > 0:
                         success_count += 1
-                        update_progress(idx, filename, f"完成（查询了 {queried_count} 个 GOOD 目标）")
+                        update_progress(idx, filename, f"完成（查询了 {queried_count} 个目标）")
                     else:
                         skip_count += 1
-                        update_progress(idx, filename, "跳过（已全部查询过或无 GOOD 标记目标）")
+                        update_progress(idx, filename, "跳过（已全部查询过或无可查询目标）")
 
                 except Exception as e:
                     error_count += 1

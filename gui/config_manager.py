@@ -118,9 +118,6 @@ class ConfigManager:
                 "batch_pympc_server_threads": 3,        # pympc server批量查询线程数（默认值：3）
                 "batch_vsx_server_threads": 3           # 变星server批量查询线程数（默认值：3）
             },
-            "ai_classification_settings": {
-                "confidence_threshold": 0.5  # AI GOOD/BAD 自动标记置信度阈值（默认：0.7）
-            },
             "display_settings": {
                 "auto_select_from_download_dir": True,
                 # CSV候选浏览默认尺寸（像素）
@@ -474,21 +471,6 @@ class ConfigManager:
         for key, value in kwargs.items():
             # 允许更新所有已知的查询设置键（包括搜索半径和批量查询间隔）
             self.config["query_settings"][key] = value
-        self.save_config()
-
-    def get_ai_classification_settings(self) -> Dict[str, Any]:
-        """获取AI GOOD/BAD 自动标记相关设置"""
-        if "ai_classification_settings" not in self.config:
-            self.config["ai_classification_settings"] = self.default_config.get("ai_classification_settings", {}).copy()
-            self.save_config()
-        return self.config["ai_classification_settings"]
-
-    def update_ai_classification_settings(self, **kwargs):
-        """更新AI GOOD/BAD 自动标记相关设置"""
-        if "ai_classification_settings" not in self.config:
-            self.config["ai_classification_settings"] = self.default_config.get("ai_classification_settings", {}).copy()
-        for key, value in kwargs.items():
-            self.config["ai_classification_settings"][key] = value
         self.save_config()
 
     def get_url_template_type(self) -> str:

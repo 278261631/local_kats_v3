@@ -84,7 +84,7 @@ class FitsWebDownloaderGUI:
         self._ipc_listener_thread = None
         self._ipc_stop_event = threading.Event()
 
-        # 自动链：批量→AI标记→查询 控制开关
+        # 自动链：批量→查询 控制开关
         self._auto_chain_followups = False
         # pympc 是否使用观测站代码（初始化为配置中的值，默认 False）
         try:
@@ -525,22 +525,6 @@ class FitsWebDownloaderGUI:
         ttk.Button(local_catalog_frame, text="保存H上限", command=self._save_mpc_h_limit).grid(row=2, column=2, sticky=tk.W, pady=(5, 0))
         self.mpc_h_status_label = ttk.Label(local_catalog_frame, text=f"当前H上限: {current_h}")
         self.mpc_h_status_label.grid(row=2, column=3, sticky=tk.W, padx=(10, 0), pady=(5, 0))
-
-        # AI GOOD/BAD 自动标记设置
-        ai_mark_frame = ttk.LabelFrame(settings_container, text="AI自动标记(GOOD/BAD)", padding=10)
-        ai_mark_frame.pack(fill=tk.X, pady=(0, 10))
-
-        if hasattr(self, 'fits_viewer') and self.fits_viewer:
-            ttk.Label(ai_mark_frame, text="置信度阈值:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-            ai_thr_entry = ttk.Entry(ai_mark_frame, textvariable=self.fits_viewer.ai_confidence_threshold_var, width=8)
-            ai_thr_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 5))
-            ttk.Label(
-                ai_mark_frame,
-                text="取值范围 0~1，默认 0.7。仅当AI预测置信度 ≥ 该值时才自动标记为 GOOD/BAD。",
-                foreground="gray",
-            ).grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
-
-
 
         # 星历文件选择
         ttk.Button(local_catalog_frame, text="选择星历文件(.bsp)", command=self._update_ephemeris_file).grid(row=3, column=0, sticky=tk.W, pady=(5, 0))
@@ -3612,7 +3596,7 @@ Diff统计:
                 pass
 
             if getattr(self, "_auto_chain_followups", False):
-                # 启动完整的自动后处理链：AI标记GOOD/BAD → 批量查询
+                # 启动自动后处理链：批量查询
                 self.root.after(500, self._start_auto_postprocessing_chain)
 
             self.root.after(0, lambda: self.url_builder.set_scan_button_state("normal"))
@@ -4835,10 +4819,10 @@ Diff统计:
             self.root.after(0, lambda: self.url_builder.set_stop_batch_button_state("disabled"))
 
             # 若为“仅 --date” 自动模式，则在全天全系统 diff 完成后，继续执行自动后处理链
-            # 步骤：刷新目录树并选择下载根目录 → AI 标记 GOOD/BAD → 批量查询
+            # 步骤：刷新目录树并选择下载根目录 → 批量查询
             try:
                 if getattr(self, "_auto_date_only_mode", False):
-                    self._log("[自动模式] 全天全系统diff已完成，开始执行后续: AI标记GOOD/BAD → 批量查询")
+                    self._log("[自动模式] 全天全系统diff已完成，开始执行后续: 批量查询")
                     # 在主线程中调度执行自动后处理链
                     self.root.after(500, self._auto_postprocess_for_date_only_mode)
                 else:
@@ -5075,7 +5059,7 @@ Diff统计:
                 # 仅日期模式下，提前记录日志，提示后续会自动执行图像后处理
                 try:
                     if getattr(self, "_auto_date_only_mode", False):
-                        self._log("[自动模式] 全天全系统diff结束后，将自动执行: AI标记GOOD/BAD → 批量查询")
+                        self._log("[自动模式] 全天全系统diff结束后，将自动执行: 批量查询")
                 except Exception:
                     pass
 
@@ -5137,7 +5121,7 @@ Diff统计:
         try:
             self._log("开始批量下载并diff...")
 
-            # 标记后续需要自动执行后处理链：AI标记GOOD/BAD → 批量查询
+            # 标记后续需要自动执行后处理链：批量查询
             self._auto_chain_followups = True
 
             # 开启静默模式，避免任何弹窗阻塞（包含后续查询链）
@@ -5175,12 +5159,12 @@ Diff统计:
             if not getattr(self, "_auto_silent_mode", False):
                 messagebox.showerror("错误", error_msg)
 
-    # ========================= 自动链：AI标记GOOD/BAD → 批量查询 =========================
+    # ========================= 自动链：批量查询 =========================
 
     def _start_auto_postprocessing_chain(self):
-        """启动自动后处理链：AI标记GOOD/BAD → 批量查询（已移除批量检测对齐与导出）"""
+        """启动自动后处理链：批量查询（已移除批量检测对齐与导出）"""
         try:
-            self._log("[自动链] 开始后处理链：AI标记GOOD/BAD → 批量查询")
+            self._log("[自动链] 开始后处理链：批量查询")
             
             # 保存当前的静默模式状态
             prev_silent = getattr(self, "_auto_silent_mode", False)
@@ -5188,22 +5172,11 @@ Diff统计:
             self._auto_silent_mode = True
 
             def _step1_alignment():
-                # 已移除批量检测对齐；刷新目录树后直接进行 AI 标记
+                # 已移除批量检测对齐；刷新目录树后直接进行批量查询
                 self._auto_select_download_root_in_viewer()
-                self.root.after(500, _step2_ai_mark)
+                self.root.after(500, _step2_batch_query)
 
-            def _step2_ai_mark():
-                if self._auto_select_download_root_in_viewer():
-                    try:
-                        self._log("[自动链] 开始 AI 标记 GOOD/BAD……")
-                        self.fits_viewer._ai_mark_detections()
-                    except Exception as e:
-                        self._log(f"[自动链] AI 标记 GOOD/BAD 时出错: {e}")
-
-                # 下一步：批量查询
-                self.root.after(500, _step3_batch_query)
-
-            def _step3_batch_query():
+            def _step2_batch_query():
                 def _finish_after_queries():
                     self.root.after(500, _finish_chain)
 
