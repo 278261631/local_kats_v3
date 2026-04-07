@@ -51,7 +51,7 @@ class FitsWebDownloaderGUI:
         """
         self.root = tk.Tk()
         self.root.title("FITS文件网页下载器")
-        self.root.geometry("1200x900")
+        self.root.geometry("1600x900")
 
         # 设置日志
         self._setup_logging()

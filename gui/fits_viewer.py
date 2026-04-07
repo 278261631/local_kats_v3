@@ -271,9 +271,9 @@ class FitsImageViewer:
         self.gps_lon_var = tk.StringVar(value="87.1")
         self.mpc_code_var = tk.StringVar(value="N87")
 
-        # 第一行工具栏（图像统计信息）
+        # 第一行工具栏（图像统计信息，仅在有内容时显示）
         toolbar_frame1 = ttk.Frame(toolbar_container)
-        toolbar_frame1.pack(fill=tk.X, pady=(0, 2))
+        self._stats_toolbar_frame = toolbar_frame1
 
         # 图像统计信息标签
         self.stats_label = ttk.Label(toolbar_frame1, text="")
@@ -281,6 +281,7 @@ class FitsImageViewer:
 
         # 第二行工具栏（diff操作按钮）
         toolbar_frame2 = ttk.Frame(toolbar_container)
+        self._diff_toolbar_frame = toolbar_frame2
         toolbar_frame2.pack(fill=tk.X, pady=(2, 0))
 
         # diff操作按钮
@@ -438,6 +439,28 @@ class FitsImageViewer:
 
         # 绑定全局快捷键
         self._bind_global_shortcuts()
+
+    def _set_stats_text(self, text: str):
+        """更新统计信息文本，并在为空时隐藏整行工具栏。"""
+        if not hasattr(self, 'stats_label'):
+            return
+
+        text = text or ""
+        self.stats_label.config(text=text)
+
+        frame = getattr(self, '_stats_toolbar_frame', None)
+        diff_frame = getattr(self, '_diff_toolbar_frame', None)
+        if frame is None:
+            return
+
+        if text:
+            if not frame.winfo_ismapped():
+                pack_kwargs = {"fill": tk.X, "pady": (0, 2)}
+                if diff_frame is not None:
+                    pack_kwargs["before"] = diff_frame
+                frame.pack(**pack_kwargs)
+        elif frame.winfo_ismapped():
+            frame.pack_forget()
 
     def _bind_global_shortcuts(self):
         """绑定全局快捷键"""
@@ -1547,7 +1570,7 @@ class FitsImageViewer:
             max_val = np.max(self.current_fits_data)
 
             stats_text = f"均值: {mean:.2f} | 中位数: {median:.2f} | 标准差: {std:.2f} | 范围: [{min_val:.2f}, {max_val:.2f}]"
-            self.stats_label.config(text=stats_text)
+            self._set_stats_text(stats_text)
 
     def _update_image_display(self):
         """更新图像显示"""
@@ -4959,7 +4982,7 @@ class FitsImageViewer:
         self.canvas.draw()
 
         self.file_info_label.config(text="未选择文件")
-        self.stats_label.config(text="")
+        self._set_stats_text("")
         self.display_button.config(state="disabled")
         self.diff_button.config(state="disabled")
 
