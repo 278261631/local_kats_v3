@@ -18,6 +18,7 @@ import threading
 import queue
 import json
 import joblib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -504,6 +505,13 @@ class FitsImageViewer:
             command=self._rerun_crossmatch_for_selected_node_filtered_rows
         )
         self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT)
+        self.crossmatch_rerun_parallel_workers_var = tk.StringVar(value="3")
+        ttk.Label(refresh_row2, text="并行").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Entry(
+            refresh_row2,
+            textvariable=self.crossmatch_rerun_parallel_workers_var,
+            width=4,
+        ).pack(side=tk.LEFT)
 
         # CSV 条件搜索（整棵树范围，基于当前选中节点向上/向下）
         csv_search_frame = ttk.Frame(left_frame)
@@ -1194,6 +1202,17 @@ class FitsImageViewer:
             if csv_search_skip_mode not in {"=0", "=1", "all"}:
                 csv_search_skip_mode = "=0"
             self.csv_search_skip_mode_var.set(csv_search_skip_mode)
+            crossmatch_parallel_workers = str(
+                display_settings.get("crossmatch_rerun_parallel_workers", "3")
+            ).strip()
+            try:
+                parallel_workers_int = int(float(crossmatch_parallel_workers))
+                if parallel_workers_int <= 0:
+                    raise ValueError("non-positive")
+                crossmatch_parallel_workers = str(min(parallel_workers_int, 16))
+            except Exception:
+                crossmatch_parallel_workers = "3"
+            self.crossmatch_rerun_parallel_workers_var.set(crossmatch_parallel_workers)
         except Exception as e:
             self.logger.error(f"加载显示设置失败: {str(e)}")
 
@@ -1211,6 +1230,7 @@ class FitsImageViewer:
                 csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
                 csv_search_ai_class_mode=str(self.csv_search_ai_class_mode_var.get()).strip().lower(),
                 csv_search_skip_mode=str(self.csv_search_skip_mode_var.get()).strip().lower(),
+                crossmatch_rerun_parallel_workers=str(self.crossmatch_rerun_parallel_workers_var.get()).strip(),
                 csv_filter_skip_large_rows_enabled=bool(self.csv_filter_skip_large_rows_var.get()),
                 csv_filter_max_rows=str(self.csv_filter_max_rows_var.get()).strip(),
             )
@@ -3416,10 +3436,11 @@ class FitsImageViewer:
             except Exception:
                 rel = csv_path
             preview.append(f"- {rel} | rank={rank_value}")
+        parallel_workers = self._get_crossmatch_rerun_parallel_workers()
         preview_text = "\n".join(preview)
         suffix = "\n..." if len(tasks) > 8 else ""
         confirm_msg = (
-            f"将串行执行 {len(tasks)} 次 Crossmatch（不并行）。\n"
+            f"将并行执行 {len(tasks)} 次 Crossmatch（并行数={parallel_workers}，同CSV内串行）。\n"
             f"条件：{condition_summary}\n"
             f"扫描CSV: {len(target_csv_paths)}，命中行: {stats.get('matched_rows', 0)}，"
             f"无效rank行: {stats.get('invalid_rank_rows', 0)}，重复rank去重: {stats.get('dedup_rank_rows', 0)}，"
@@ -3431,15 +3452,16 @@ class FitsImageViewer:
 
         self._batch_crossmatch_running = True
         self._set_crossmatch_rerun_buttons_enabled(False)
+        stats["parallel_workers"] = int(parallel_workers)
         if hasattr(self, "diff_progress_label"):
             self.diff_progress_label.config(
-                text=f"批量Crossmatch准备执行: 0/{len(tasks)}",
+                text=f"批量Crossmatch准备执行: 0/{len(tasks)} (并行{parallel_workers})",
                 foreground="blue",
             )
 
         thread = threading.Thread(
-            target=self._rerun_crossmatch_tasks_serial_thread,
-            args=(crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats),
+            target=self._rerun_crossmatch_tasks_parallel_thread,
+            args=(crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats, int(parallel_workers)),
             daemon=True,
         )
         thread.start()
@@ -3457,6 +3479,24 @@ class FitsImageViewer:
                 self.logger.warning(f"读取diff流水线配置失败，使用默认crossmatch脚本路径: {e}")
         script_paths = pipeline_settings.get("script_paths", {}) if isinstance(pipeline_settings, dict) else {}
         return script_paths.get("crossmatch_nonref_candidates", default_crossmatch)
+
+    def _get_crossmatch_rerun_parallel_workers(self) -> int:
+        """获取批量重跑 crossmatch 的并行数，默认 3。"""
+        default_workers = 3
+        try:
+            if hasattr(self, "crossmatch_rerun_parallel_workers_var"):
+                workers = int(float(str(self.crossmatch_rerun_parallel_workers_var.get()).strip()))
+                if workers > 0:
+                    return min(workers, 16)
+            if self.config_manager and hasattr(self.config_manager, "get_display_settings"):
+                ds = self.config_manager.get_display_settings()
+                raw = ds.get("crossmatch_rerun_parallel_workers", default_workers)
+                workers = int(float(str(raw).strip()))
+                if workers > 0:
+                    return min(workers, 16)
+        except Exception:
+            pass
+        return default_workers
 
     def _collect_crossmatch_tasks_for_csv_filters(
         self,
@@ -3931,15 +3971,27 @@ class FitsImageViewer:
         if hasattr(self, "rerun_crossmatch_filtered_button"):
             self.rerun_crossmatch_filtered_button.config(state=state)
 
-    def _rerun_crossmatch_tasks_serial_thread(self, crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats):
-        """后台串行执行批量 crossmatch 任务（单线程、按顺序）。"""
+    def _rerun_crossmatch_tasks_parallel_thread(
+        self, crossmatch_script, tasks, restore_anchor_paths, condition_summary, stats, max_workers: int
+    ):
+        """后台并行执行批量 crossmatch 任务（同CSV内串行，跨CSV并行）。"""
         py = sys.executable or "python"
-        success_count = 0
-        failed = []
         total = len(tasks)
+        counters = {"success": 0, "completed": 0}
+        failed = []
+        lock = threading.Lock()
 
-        try:
-            for index, task in enumerate(tasks, start=1):
+        grouped_tasks: Dict[str, List[dict]] = {}
+        for task in tasks:
+            csv_path = str(task.get("csv_path", ""))
+            if not csv_path:
+                continue
+            grouped_tasks.setdefault(csv_path, []).append(task)
+        csv_groups = list(grouped_tasks.values())
+        workers = max(1, min(int(max_workers), len(csv_groups) if csv_groups else 1))
+
+        def _run_group(group_tasks: List[dict]):
+            for task in group_tasks:
                 csv_path = task["csv_path"]
                 output_dir = task["output_dir"]
                 rank_value = task["rank"]
@@ -3950,44 +4002,62 @@ class FitsImageViewer:
                     "--only-rank", str(rank_value),
                 ]
                 cmd_text = " ".join(cmd)
-                self.logger.info("批量重跑Crossmatch(%d/%d): %s", index, total, cmd_text)
-
-                if hasattr(self, "diff_progress_label"):
-                    self.parent_frame.after(
-                        0,
-                        lambda i=index, t=total, r=rank_value: self.diff_progress_label.config(
-                            text=f"批量Crossmatch执行中: {i}/{t} (rank={r})",
-                            foreground="blue",
-                        ),
-                    )
+                self.logger.info("批量重跑Crossmatch并行任务: %s", cmd_text)
 
                 proc = _run_command_capture_text(cmd)
-                if proc.returncode != 0:
+                err_text = ""
+                ok = proc.returncode == 0
+                if not ok:
                     err_text = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
-                    failed.append((csv_path, rank_value, err_text))
                     if proc.stdout:
                         self.logger.error("crossmatch stdout:\n%s", proc.stdout)
                     if proc.stderr:
                         self.logger.error("crossmatch stderr:\n%s", proc.stderr)
-                    continue
+                else:
+                    if proc.stdout:
+                        self.logger.info("crossmatch stdout:\n%s", proc.stdout)
+                    if proc.stderr:
+                        self.logger.warning("crossmatch stderr:\n%s", proc.stderr)
 
-                if proc.stdout:
-                    self.logger.info("crossmatch stdout:\n%s", proc.stdout)
-                if proc.stderr:
-                    self.logger.warning("crossmatch stderr:\n%s", proc.stderr)
+                with lock:
+                    counters["completed"] += 1
+                    if ok:
+                        counters["success"] += 1
+                    else:
+                        failed.append((csv_path, rank_value, err_text))
+                    completed_now = counters["completed"]
 
-                success_count += 1
-                # 仅在当前正在浏览同一输出目录时刷新缓存，避免跳屏
-                if os.path.normpath(str(getattr(self, "_current_csv_output_dir", ""))) == os.path.normpath(output_dir):
+                if hasattr(self, "diff_progress_label"):
+                    self.parent_frame.after(
+                        0,
+                        lambda done=completed_now, t=total, r=rank_value, w=workers: self.diff_progress_label.config(
+                            text=f"批量Crossmatch执行中: {done}/{t} (rank={r}, 并行{w})",
+                            foreground="blue",
+                        ),
+                    )
+
+                if ok and os.path.normpath(str(getattr(self, "_current_csv_output_dir", ""))) == os.path.normpath(output_dir):
                     self.parent_frame.after(
                         0,
                         lambda od=output_dir: self._reload_csv_candidates_for_display(od, keep_current_index=True),
                     )
 
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_run_group, group) for group in csv_groups]
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        self.logger.error("批量重跑Crossmatch并行工作线程异常: %s", e, exc_info=True)
+                        with lock:
+                            failed.append(("<worker>", -1, str(e)))
         except Exception as e:
-            self.logger.error("批量重跑Crossmatch异常: %s", e, exc_info=True)
-            failed.append(("<thread>", -1, str(e)))
+            self.logger.error("批量重跑Crossmatch并行调度异常: %s", e, exc_info=True)
+            with lock:
+                failed.append(("<thread>", -1, str(e)))
         finally:
+            success_count = int(counters.get("success", 0))
             self.parent_frame.after(
                 0,
                 lambda: self._on_crossmatch_tasks_serial_done(
@@ -4000,7 +4070,7 @@ class FitsImageViewer:
             )
 
     def _on_crossmatch_tasks_serial_done(self, success_count, failed, restore_anchor_paths, condition_summary, stats):
-        """批量 crossmatch 串行任务结束后的UI收尾。"""
+        """批量 crossmatch 任务结束后的 UI 收尾。"""
         try:
             self._refresh_directory_tree()
             self._restore_tree_selection_by_anchor_paths(restore_anchor_paths)
@@ -4012,15 +4082,16 @@ class FitsImageViewer:
 
         failed_count = len(failed)
         total = int(stats.get("task_count", success_count + failed_count))
+        workers = int(stats.get("parallel_workers", 1))
         if hasattr(self, "diff_progress_label"):
             if failed_count == 0:
                 self.diff_progress_label.config(
-                    text=f"✓ 批量Crossmatch完成: {success_count}/{total}",
+                    text=f"✓ 批量Crossmatch完成: {success_count}/{total} (并行{workers})",
                     foreground="green",
                 )
             else:
                 self.diff_progress_label.config(
-                    text=f"✗ 批量Crossmatch部分失败: 成功{success_count} 失败{failed_count}",
+                    text=f"✗ 批量Crossmatch部分失败: 成功{success_count} 失败{failed_count} (并行{workers})",
                     foreground="red",
                 )
 
@@ -4031,6 +4102,7 @@ class FitsImageViewer:
             f"无效rank行: {stats.get('invalid_rank_rows', 0)}",
             f"重复rank去重: {stats.get('dedup_rank_rows', 0)}",
             f"跳过大CSV: {stats.get('skipped_large_csv_count', 0)}",
+            f"并行数: {workers}（同CSV内串行）",
             f"执行任务: {total}",
             f"成功: {success_count}",
             f"失败: {failed_count}",
