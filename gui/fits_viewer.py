@@ -17,6 +17,7 @@ import shutil
 import threading
 import queue
 import json
+import zipfile
 import joblib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
@@ -589,6 +590,12 @@ class FitsImageViewer:
             command=self._export_filtered_aligned_csv_patches,
         )
         self._export_aligned_filtered_button.pack(side=tk.LEFT)
+        self._export_web_zip_filtered_button = ttk.Button(
+            csv_row_actions,
+            text="导出网页ZIP(筛选)",
+            command=self._export_filtered_web_zip,
+        )
+        self._export_web_zip_filtered_button.pack(side=tk.LEFT, padx=(6, 0))
         self._ai_classify_filtered_button = ttk.Button(
             csv_row_actions,
             text="AI分类(筛选命中)",
@@ -7065,6 +7072,224 @@ class FitsImageViewer:
         if n_ok == 0:
             raise ValueError("没有可导出的候选（缺少 aligned FITS、坐标解析失败或写入失败）。")
         return n_ok, os.path.abspath(dest_dir)
+
+    def _build_filtered_web_export_html(
+        self,
+        items: List[Dict[str, Any]],
+        *,
+        condition_summary: str,
+        patch_size_px: int,
+        hist_level: str,
+    ) -> str:
+        """生成筛选导出网页 HTML。"""
+        import html
+
+        cards = []
+        for item in items:
+            cards.append(
+                (
+                    '<div class="card">'
+                    f'<a href="{html.escape(item["img_rel"])}" target="_blank"><img src="{html.escape(item["img_rel"])}" alt="patch"></a>'
+                    '<div class="meta">'
+                    f'<div>rank: {html.escape(str(item.get("rank", "")))}</div>'
+                    f'<div>ai_class: {html.escape(str(item.get("ai_class", "")))}</div>'
+                    f'<div>skip_flag: {html.escape(str(item.get("skip_flag", "0")))}</div>'
+                    f'<div>row: {html.escape(str(item.get("raw_idx", "")))}</div>'
+                    f'<div>dir: {html.escape(str(item.get("output_tag", "")))}</div>'
+                    "</div></div>"
+                )
+            )
+        cards_html = "\n".join(cards)
+
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CSV筛选导出</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 16px; }}
+    .summary {{ background: #f6f8fa; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }}
+    .summary pre {{ white-space: pre-wrap; margin: 6px 0 0 0; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }}
+    .card {{ border: 1px solid #ddd; border-radius: 8px; overflow: hidden; background: #fff; }}
+    .card img {{ width: 100%; height: auto; display: block; background: #000; }}
+    .meta {{ font-size: 12px; line-height: 1.45; padding: 8px; }}
+  </style>
+</head>
+<body>
+  <h2>CSV筛选导出网页</h2>
+  <div class="summary">
+    <div>导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+    <div>命中导出: {len(items)}</div>
+    <div>patch尺寸: {patch_size_px}px，拉伸: {html.escape(hist_level)}</div>
+    <pre>条件: {html.escape(condition_summary)}</pre>
+  </div>
+  <div class="grid">
+    {cards_html}
+  </div>
+</body>
+</html>"""
+
+    def _export_filtered_web_zip(self):
+        """按当前CSV筛选导出网页（含所有目标图）并打包 ZIP。"""
+        btn = getattr(self, "_export_web_zip_filtered_button", None)
+        try:
+            ctx = self._build_csv_filter_tree_search_context(direction=1)
+        except _CsvFilterSearchSetupError as e:
+            if e.kind == "info":
+                messagebox.showinfo("提示", str(e))
+            else:
+                messagebox.showwarning("警告", str(e))
+            return
+
+        self._save_display_settings()
+        stats: Dict[str, int] = {"skipped_large_csv": 0}
+        hits = list(self._iter_csv_filter_hits_from_context(ctx, 1, stop_after_first=False, stats=stats))
+        if not hits:
+            msg = "在整棵树内，向下未找到满足条件的 CSV 行。"
+            if ctx["skip_large_csv"]:
+                msg += f"\n（跳过大 CSV 的文件数：{stats.get('skipped_large_csv', 0)}）"
+            messagebox.showinfo("提示", msg)
+            return
+
+        condition_summary = ctx["condition_summary"]
+
+        def worker():
+            try:
+                n, zip_path, out_dir = self._export_filtered_web_zip_worker(hits, condition_summary)
+                self.parent_frame.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "导出完成",
+                        f"已导出 {n} 个目标并打包为ZIP。\nZIP：\n{zip_path}\n\n目录：\n{out_dir}",
+                    ),
+                )
+            except ValueError as e:
+                self.parent_frame.after(0, lambda msg=str(e): messagebox.showwarning("无法导出", msg))
+            except Exception as e:
+                self.logger.exception("导出网页ZIP(筛选)失败")
+                self.parent_frame.after(0, lambda msg=str(e): messagebox.showerror("导出失败", msg))
+            finally:
+                if btn is not None:
+                    self.parent_frame.after(0, lambda: btn.config(state="normal"))
+
+        if btn is not None:
+            btn.config(state="disabled")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_filtered_web_zip_worker(
+        self, hits: List[Tuple[Any, str, str, int, dict]], condition_summary: str
+    ) -> Tuple[int, str, str]:
+        """执行网页+ZIP导出，返回 (导出数量, zip路径, 输出目录)。"""
+        root = self._get_configured_diff_output_root_dir()
+        if not root:
+            raise ValueError("请先在配置中设置 diff 输出目录（且路径存在）。")
+
+        root_path = Path(os.path.normpath(root)).resolve()
+        parent_dir = root_path.parent
+        if parent_dir == root_path:
+            raise ValueError("配置的 diff 输出目录没有可用父目录，无法创建 out_zip_yyyymmdd。")
+
+        out_zip_dir = parent_dir / f"out_zip_{datetime.now().strftime('%Y%m%d')}"
+        out_zip_dir.mkdir(parents=True, exist_ok=True)
+        run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stage_dir = out_zip_dir / f"web_export_{run_tag}"
+        assets_dir = stage_dir / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+
+        patch_size_px = self._get_csv_patch_size_px()
+        half = max(1, int(round(patch_size_px / 2.0)))
+        hist_level = (
+            str(self.csv_local_hist_level_var.get()).strip().lower()
+            if hasattr(self, "csv_local_hist_level_var")
+            else "high"
+        )
+        items: List[Dict[str, Any]] = []
+        cached_output_dir: Optional[str] = None
+        aligned_data = None
+        aligned_header = None
+        n_ok = 0
+
+        try:
+            for seq_idx, (_node, _file_path, output_dir, raw_idx, row) in enumerate(hits):
+                if output_dir != cached_output_dir:
+                    aligned_fits = self._find_primary_aligned_fits_in_output_dir(output_dir)
+                    if not aligned_fits:
+                        cached_output_dir = None
+                        aligned_data = None
+                        aligned_header = None
+                        continue
+                    aligned_data, aligned_header = self._load_fits_image_and_header(aligned_fits)
+                    if aligned_data is None:
+                        cached_output_dir = None
+                        aligned_data = None
+                        aligned_header = None
+                        continue
+                    cached_output_dir = output_dir
+
+                if aligned_data is None or aligned_header is None:
+                    continue
+                x, y = self._resolve_candidate_pixel_xy(row, header=aligned_header)
+                if x is None or y is None:
+                    continue
+                patch, _, _ = self._extract_local_patch(aligned_data, x, y, half_size=half)
+                u8 = self._stretch_patch_to_uint8(patch, level=hist_level)
+
+                rank_raw = str(row.get("rank", "") or "").strip() or str(seq_idx + 1)
+                rank_safe = self._sanitize_output_name(rank_raw)
+                frame_tag = self._sanitize_output_name(os.path.basename(output_dir.rstrip("/\\")))
+                fname = f"{frame_tag}_rank{rank_safe}_{n_ok:04d}.png"
+                out_path = assets_dir / fname
+                if not cv2.imwrite(str(out_path), u8):
+                    continue
+
+                img_rel = f"assets/{fname}"
+                items.append(
+                    {
+                        "img_rel": img_rel,
+                        "rank": rank_raw,
+                        "ai_class": str(row.get("ai_class", "")).strip(),
+                        "skip_flag": str(self._get_csv_row_skip_flag(row)),
+                        "raw_idx": int(raw_idx),
+                        "output_tag": frame_tag,
+                    }
+                )
+                n_ok += 1
+
+            if n_ok == 0:
+                raise ValueError("没有可导出的候选（缺少 aligned FITS、坐标解析失败或写入失败）。")
+
+            html_text = self._build_filtered_web_export_html(
+                items,
+                condition_summary=condition_summary,
+                patch_size_px=patch_size_px,
+                hist_level=hist_level,
+            )
+            (stage_dir / "index.html").write_text(html_text, encoding="utf-8")
+            (stage_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "condition_summary": condition_summary,
+                        "patch_size_px": patch_size_px,
+                        "hist_level": hist_level,
+                        "count": n_ok,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            zip_path = out_zip_dir / f"csv_filtered_web_{run_tag}.zip"
+            with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for p in sorted(stage_dir.rglob("*")):
+                    if p.is_file():
+                        zf.write(str(p), arcname=str(p.relative_to(stage_dir)))
+            return n_ok, str(zip_path.resolve()), str(out_zip_dir.resolve())
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
     def _display_csv_candidate_by_index(self, index: int):
         """在主图中显示 CSV 候选，并支持上一条/下一条浏览。"""
