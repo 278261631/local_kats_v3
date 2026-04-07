@@ -3732,6 +3732,16 @@ Diff统计:
         if not messagebox.askyesno("确认", msg):
             return
 
+        # 重置批量处理控制状态
+        self.batch_paused = False
+        self.batch_stopped = False
+        self.batch_pause_event.set()
+
+        # 启用暂停和停止按钮
+        self.url_builder.set_pause_batch_button_state("normal")
+        self.url_builder.set_pause_batch_button_text("⏸ 暂停")
+        self.url_builder.set_stop_batch_button_state("normal")
+
         self._set_batch_job_running(True)
 
         # 在新线程中执行
@@ -3762,109 +3772,82 @@ Diff统计:
             # 切换到批量处理状态标签页
             self.root.after(0, lambda: self.notebook.select(1))
 
-            # 收集所有天区的所有文件
-            all_files_to_process = []
-            total_regions = len(available_regions)
-
-            for region_idx, k_number in enumerate(available_regions, 1):
-                # 检查停止标志
-                if self.batch_stopped:
-                    self._log("\n全天批量处理已被停止")
-                    break
-
-                # 检查暂停标志
-                if self.batch_paused:
-                    self._log(f"\n全天批量处理已暂停（当前进度: 天区 {region_idx-1}/{total_regions}）")
-                    self.root.after(0, lambda r=region_idx-1, t=total_regions: self.status_label.config(
-                        text=f"全天批量处理已暂停 (天区 {r}/{t})"))
-
-                # 等待暂停解除
-                self.batch_pause_event.wait()
-
-                # 暂停解除后再次检查停止标志
-                if self.batch_stopped:
-                    self._log("\n全天批量处理已被停止")
-                    break
-
-                self._log(f"\n[{region_idx}/{total_regions}] 正在扫描天区: {k_number}")
-                self.root.after(0, lambda r=region_idx, t=total_regions, k=k_number:
-                               self.status_label.config(text=f"正在扫描天区 [{r}/{t}]: {k}"))
-
-                # 构建该天区的URL
-                url_template = self.config_manager.get_url_template()
-                format_params = {
-                    'tel_name': tel_name,
-                    'date': date,
-                    'k_number': k_number
-                }
-
-                # 如果模板需要年份，添加年份参数
-                if '{year_of_date}' in url_template:
-                    try:
-                        year_of_date = date[:4] if len(date) >= 4 else datetime.now().strftime('%Y')
-                        format_params['year_of_date'] = year_of_date
-                    except Exception:
-                        format_params['year_of_date'] = datetime.now().strftime('%Y')
-
-                region_url = url_template.format(**format_params)
-
-                # 扫描该天区的FITS文件
-                try:
-                    fits_files = self.directory_scanner.scan_directory_listing(region_url)
-                    if not fits_files:
-                        # 如果目录扫描失败，尝试通用扫描器
-                        fits_files = self.scanner.scan_fits_files(region_url)
-
-                    self._log(f"  找到 {len(fits_files)} 个文件")
-
-                    # 将文件添加到处理列表，同时记录天区信息
-                    for filename, url, size in fits_files:
-                        all_files_to_process.append((filename, url, k_number))
-
-                except Exception as e:
-                    self._log(f"  扫描失败: {str(e)}")
-                    continue
-
-            if not all_files_to_process:
-                self._log("\n未找到任何FITS文件")
-                self.root.after(0, lambda: messagebox.showwarning("警告", "未找到任何FITS文件"))
-                return
-
-            self._log(f"\n总共找到 {len(all_files_to_process)} 个文件")
-            self._log("=" * 60)
-
-            # 准备批量处理
             # 清空并初始化批量状态组件
             self.root.after(0, lambda: self.batch_status_widget.clear())
-            self.root.after(0, lambda: self.batch_progress_label.config(
-                text=f"正在准备批量处理 {len(all_files_to_process)} 个文件..."))
-
-            # 添加所有文件到状态列表
-            for filename, url, k_number in all_files_to_process:
-                self.root.after(0, lambda f=filename: self.batch_status_widget.add_file(f))
-
-            # 直接跨天区流水线处理：不按天区分批
-            self._log("\n使用跨天区流水线：下载 → Diff（不按天区分批）")
-            self.root.after(0, lambda: self.status_label.config(text=f"正在流水线处理所有天区的文件..."))
-
-            # 准备带目录的文件列表（为每个文件指定独立下载目录）
-            base_download_dir = self.download_dir_var.get().strip()
-            selected_files_with_dirs = []
-            for filename, url, k_number in all_files_to_process:
-                per_dir = os.path.join(base_download_dir, tel_name, date, k_number)
-                selected_files_with_dirs.append((filename, url, per_dir))
+            self.root.after(0, lambda: self.batch_progress_label.config(text="正在初始化流式批量处理..."))
+            self.root.after(0, lambda: self.batch_stats_label.config(text=""))
 
             # 设置输出根目录到 系统/日期
+            base_download_dir = self.download_dir_var.get().strip()
             base_output_dir = self.diff_output_dir_var.get().strip()
             self.last_batch_output_root = os.path.join(base_output_dir, tel_name, date)
             os.makedirs(self.last_batch_output_root, exist_ok=True)
 
-            # 执行流水线
             thread_count = self.url_builder.get_thread_count()
-            self._pipeline_process_files(selected_files_with_dirs, base_download_dir, thread_count)
+            total_regions = len(available_regions)
+            url_template = self.config_manager.get_url_template()
+
+            self._log("\n使用跨天区流式流水线：扫描 → 下载 → Diff（边扫边处理）")
+            self.root.after(0, lambda: self.status_label.config(text="正在流式处理所有天区的文件..."))
+
+            def _discover(enqueue_file):
+                for region_idx, k_number in enumerate(available_regions, 1):
+                    if self.batch_stopped:
+                        self._log("\n全天批量处理已被停止")
+                        break
+
+                    if self.batch_paused:
+                        self._log(f"\n全天批量处理已暂停（当前进度: 天区 {region_idx-1}/{total_regions}）")
+                        self.root.after(0, lambda r=region_idx-1, t=total_regions: self.status_label.config(
+                            text=f"全天批量处理已暂停 (天区 {r}/{t})"))
+
+                    self.batch_pause_event.wait()
+                    if self.batch_stopped:
+                        self._log("\n全天批量处理已被停止")
+                        break
+
+                    self._log(f"\n[{region_idx}/{total_regions}] 正在扫描天区: {k_number}")
+                    self.root.after(0, lambda r=region_idx, t=total_regions, k=k_number:
+                                   self.status_label.config(text=f"正在扫描天区 [{r}/{t}]: {k}"))
+
+                    format_params = {
+                        'tel_name': tel_name,
+                        'date': date,
+                        'k_number': k_number
+                    }
+                    if '{year_of_date}' in url_template:
+                        try:
+                            format_params['year_of_date'] = date[:4] if len(date) >= 4 else datetime.now().strftime('%Y')
+                        except Exception:
+                            format_params['year_of_date'] = datetime.now().strftime('%Y')
+
+                    region_url = url_template.format(**format_params)
+
+                    try:
+                        fits_files = self.directory_scanner.scan_directory_listing(region_url)
+                        if not fits_files:
+                            fits_files = self.scanner.scan_fits_files(region_url)
+
+                        self._log(f"  找到 {len(fits_files)} 个文件")
+
+                        for filename, url, _size in fits_files:
+                            per_dir = os.path.join(base_download_dir, tel_name, date, k_number)
+                            if not enqueue_file(filename, url, per_dir):
+                                return
+
+                    except Exception as e:
+                        self._log(f"  扫描失败: {str(e)}")
+                        continue
+
+            stats = self._pipeline_process_files_streaming(_discover, thread_count)
+
+            if stats.get('total_files', 0) <= 0:
+                self._log("\n未找到任何FITS文件")
+                return
 
             self._log("\n" + "=" * 60)
             self._log("全天下载diff处理完成！")
+            self._log(f"总共处理了 {stats.get('total_files', 0)} 个文件")
             self._log("=" * 60)
 
             # 显示完成消息
@@ -4211,6 +4194,304 @@ Diff统计:
         self._log(f"Diff: 成功 {stats['diff_success']}, 失败 {stats['diff_failed']}")
         self._log("=" * 60)
 
+    def _pipeline_process_files_streaming(self, discover_callback, thread_count):
+        """
+        流式流水线处理：扫描到文件后立即入队下载，下载完成后立即入队Diff。
+
+        Args:
+            discover_callback: 回调函数，签名为 callback(enqueue_file)
+            thread_count: Diff工作线程数
+
+        Returns:
+            dict: 统计信息
+        """
+        import queue
+        thread_count = max(1, int(thread_count or 1))
+
+        download_queue = queue.Queue(maxsize=max(100, thread_count * 20))
+        diff_queue = queue.Queue()
+        download_stop_token = object()
+        diff_stop_token = object()
+
+        stats_lock = threading.Lock()
+        stats = {
+            'scan_enqueued': 0,
+            'download_consumed': 0,
+            'diff_consumed': 0,
+            'download_started': 0,
+            'download_completed': 0,
+            'download_failed': 0,
+            'diff_completed': 0,
+            'diff_success': 0,
+            'diff_failed': 0,
+            'total_files': 0,
+            'current_speed_mb_s': 0.0,
+        }
+
+        template_dir = self.template_dir_var.get().strip()
+
+        def _should_log_counter(counter_value):
+            return counter_value <= 5 or (counter_value % 20 == 0)
+
+        def _log_stream_counters(event):
+            with stats_lock:
+                scan_count = stats['scan_enqueued']
+                download_count = stats['download_consumed']
+                diff_count = stats['diff_consumed']
+                total_count = stats['total_files']
+            self._log(
+                f"[流式计数] {event} | 扫描入队={scan_count} 下载消费={download_count} Diff消费={diff_count} 总发现={total_count}"
+            )
+
+        def enqueue_file(filename, url, per_download_dir):
+            if self.batch_stopped:
+                return False
+
+            self.root.after(0, lambda f=filename: self.batch_status_widget.add_file(f))
+            with stats_lock:
+                stats['scan_enqueued'] += 1
+                stats['total_files'] += 1
+                scan_count = stats['scan_enqueued']
+            download_queue.put((filename, url, per_download_dir))
+            self._update_pipeline_stats(stats)
+            if _should_log_counter(scan_count):
+                _log_stream_counters(f"扫描入队 #{scan_count}: {filename}")
+            return True
+
+        def diff_worker():
+            while True:
+                item = diff_queue.get()
+                try:
+                    if item is diff_stop_token:
+                        break
+
+                    file_path = item
+                    if self.batch_stopped:
+                        continue
+
+                    # 等待暂停解除
+                    self.batch_pause_event.wait()
+                    if self.batch_stopped:
+                        continue
+
+                    filename = os.path.basename(file_path)
+                    with stats_lock:
+                        stats['diff_consumed'] += 1
+                        diff_count = stats['diff_consumed']
+                    if _should_log_counter(diff_count):
+                        _log_stream_counters(f"Diff消费 #{diff_count}: {filename}")
+                    self._log(f"[Diff] 开始处理: {filename}")
+                    self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
+                        f, BatchStatusWidget.STATUS_DIFF_PROCESSING))
+
+                    result = self._process_single_diff(file_path, template_dir)
+
+                    with stats_lock:
+                        stats['diff_completed'] += 1
+
+                    if result and result.get('success'):
+                        with stats_lock:
+                            stats['diff_success'] += 1
+                        new_spots = result.get('new_spots', 0)
+                        self._log(f"[Diff] ✓ 成功: {filename} - {new_spots}个亮点")
+                        self.root.after(0, lambda f=filename, n=new_spots: self.batch_status_widget.update_status(
+                            f, BatchStatusWidget.STATUS_DIFF_SUCCESS, f"{n}个亮点"))
+                    else:
+                        with stats_lock:
+                            stats['diff_failed'] += 1
+                        error_msg = result.get('message', '未知错误') if result else '处理失败'
+                        self._log(f"[Diff] ✗ 失败: {filename} - {error_msg}")
+                        self.root.after(0, lambda f=filename, msg=error_msg: self.batch_status_widget.update_status(
+                            f, BatchStatusWidget.STATUS_DIFF_FAILED, msg))
+
+                    self._update_pipeline_stats(stats)
+                except Exception as e:
+                    self._log(f"[Diff] 异常: {str(e)}")
+                finally:
+                    diff_queue.task_done()
+
+        def download_worker():
+            while True:
+                item = download_queue.get()
+                try:
+                    if item is download_stop_token:
+                        break
+
+                    filename, url, per_download_dir = item
+
+                    if self.batch_stopped:
+                        continue
+
+                    if self.batch_paused:
+                        with stats_lock:
+                            started = stats['download_started']
+                            total_snapshot = max(stats['total_files'], started)
+                        self._log(f"\n批量处理已暂停（当前进度: {started}/{total_snapshot}）")
+                        self.root.after(0, lambda i=started, t=total_snapshot: self.status_label.config(
+                            text=f"批量处理已暂停 ({i}/{t})"))
+
+                    self.batch_pause_event.wait()
+                    if self.batch_stopped:
+                        continue
+
+                    with stats_lock:
+                        stats['download_started'] += 1
+                        stats['download_consumed'] += 1
+                        idx = stats['download_started']
+                        download_count = stats['download_consumed']
+                        total_snapshot = max(stats['total_files'], idx)
+
+                    if _should_log_counter(download_count):
+                        _log_stream_counters(f"下载消费 #{download_count}: {filename}")
+                    self._log(f"[下载] [{idx}/{total_snapshot}] {filename}")
+                    self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
+                        f, BatchStatusWidget.STATUS_DOWNLOADING))
+
+                    start_time = time.time()
+                    self.root.after(0, lambda i=idx, t=total_snapshot, f=filename:
+                                    self.batch_progress_label.config(text=f"下载中 ({i}/{t}): {f}"))
+
+                    progress_state = {'last_time': start_time, 'last_bytes': 0, 'last_ui': start_time}
+
+                    def progress_callback(downloaded_bytes, total_bytes, fn=filename, i=idx):
+                        now = time.time()
+                        delta_t = max(now - progress_state['last_time'], 1e-3)
+                        delta_bytes = max(downloaded_bytes - progress_state['last_bytes'], 0)
+                        inst_speed_mb_s = (delta_bytes / (1024.0 * 1024.0)) / delta_t
+                        downloaded_mb = downloaded_bytes / (1024.0 * 1024.0)
+                        total_mb = (total_bytes / (1024.0 * 1024.0)) if total_bytes else None
+                        with stats_lock:
+                            dynamic_total = max(stats['total_files'], i)
+                        if now - progress_state['last_ui'] >= 0.2:
+                            if total_mb is not None:
+                                text = f"下载中 ({i}/{dynamic_total}): {fn} | {downloaded_mb:.2f}/{total_mb:.2f} MB | 速度: {inst_speed_mb_s:.2f} MB/s"
+                            else:
+                                text = f"下载中 ({i}/{dynamic_total}): {fn} | {downloaded_mb:.2f}/未知 MB | 速度: {inst_speed_mb_s:.2f} MB/s"
+                            self.root.after(0, lambda txt=text: self.batch_progress_label.config(text=txt))
+                            with stats_lock:
+                                stats['current_speed_mb_s'] = inst_speed_mb_s
+                            progress_state['last_ui'] = now
+                        progress_state['last_time'] = now
+                        progress_state['last_bytes'] = downloaded_bytes
+
+                    os.makedirs(per_download_dir, exist_ok=True)
+                    file_path = os.path.join(per_download_dir, filename)
+
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                        self._log(f"[下载] ⊙ 文件已存在，跳过下载: {filename}")
+                        self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
+                            f, BatchStatusWidget.STATUS_DOWNLOAD_SUCCESS))
+                        diff_queue.put(file_path)
+                        self.root.after(0, lambda i=idx, t=total_snapshot, f=filename:
+                                        self.batch_progress_label.config(text=f"跳过下载(已存在) ({i}/{t}): {f}"))
+                        with stats_lock:
+                            stats['current_speed_mb_s'] = 0.0
+                            stats['download_completed'] += 1
+                        self._update_pipeline_stats(stats)
+                        continue
+
+                    try:
+                        if not self.downloader:
+                            self.downloader = FitsDownloader(
+                                max_workers=1,
+                                retry_times=self.retry_times_var.get(),
+                                timeout=self.timeout_var.get(),
+                                enable_astap=False,
+                                astap_config_path="config/url_config.json"
+                            )
+
+                        result = self.downloader.download_single_file(url, per_download_dir, progress_callback)
+
+                        if "成功" in result:
+                            with stats_lock:
+                                stats['download_completed'] += 1
+                            self._log(f"[下载] ✓ 成功: {filename}")
+                            self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
+                                f, BatchStatusWidget.STATUS_DOWNLOAD_SUCCESS))
+                            try:
+                                elapsed = max(time.time() - start_time, 1e-3)
+                                size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                                speed_mb_s = (size_bytes / (1024.0 * 1024.0)) / elapsed
+                            except Exception:
+                                speed_mb_s = 0.0
+
+                            with stats_lock:
+                                total_now = max(stats['total_files'], idx)
+                                stats['current_speed_mb_s'] = speed_mb_s
+                            self.root.after(0, lambda i=idx, t=total_now, f=filename, s=speed_mb_s:
+                                            self.batch_progress_label.config(
+                                                text=f"下载完成 ({i}/{t}): {f} | 速度: {s:.2f} MB/s"))
+                            diff_queue.put(file_path)
+                        else:
+                            with stats_lock:
+                                stats['download_failed'] += 1
+                                stats['current_speed_mb_s'] = 0.0
+                                total_now = max(stats['total_files'], idx)
+                            self._log(f"[下载] ✗ 失败: {filename}")
+                            self.root.after(0, lambda f=filename: self.batch_status_widget.update_status(
+                                f, BatchStatusWidget.STATUS_DOWNLOAD_FAILED, "下载失败"))
+                            self.root.after(0, lambda i=idx, t=total_now, f=filename:
+                                            self.batch_progress_label.config(text=f"下载失败 ({i}/{t}): {f}"))
+
+                    except Exception as e:
+                        with stats_lock:
+                            stats['download_failed'] += 1
+                            stats['current_speed_mb_s'] = 0.0
+                            total_now = max(stats['total_files'], idx)
+                        self._log(f"[下载] ✗ 异常: {filename} - {str(e)}")
+                        self.root.after(0, lambda f=filename, err=str(e): self.batch_status_widget.update_status(
+                            f, BatchStatusWidget.STATUS_DOWNLOAD_FAILED, err))
+                        self.root.after(0, lambda i=idx, t=total_now, f=filename, err=str(e):
+                                        self.batch_progress_label.config(text=f"下载异常 ({i}/{t}): {f} | {err}"))
+
+                    self._update_pipeline_stats(stats)
+                finally:
+                    download_queue.task_done()
+
+        diff_threads = []
+        for _ in range(thread_count):
+            t = threading.Thread(target=diff_worker, daemon=True)
+            t.start()
+            diff_threads.append(t)
+
+        download_thread = threading.Thread(target=download_worker, daemon=True)
+        download_thread.start()
+
+        self._log(f"启动了 1 个下载线程和 {thread_count} 个Diff工作线程（流式模式）")
+
+        discover_error = None
+        try:
+            discover_callback(enqueue_file)
+        except Exception as e:
+            discover_error = e
+            self._log(f"流式扫描阶段异常: {str(e)}")
+            import traceback
+            self._log(traceback.format_exc())
+        finally:
+            download_queue.put(download_stop_token)
+
+        download_thread.join()
+        self._log("\n所有已发现文件下载完成，等待Diff处理完成...")
+
+        diff_queue.join()
+        for _ in range(thread_count):
+            diff_queue.put(diff_stop_token)
+        for t in diff_threads:
+            t.join(timeout=5)
+
+        self._log("\n" + "=" * 60)
+        self._log("流式流水线处理完成！")
+        self._log(f"发现文件: {stats['total_files']}")
+        self._log(f"下载: 成功 {stats['download_completed']}, 失败 {stats['download_failed']}")
+        self._log(f"Diff: 成功 {stats['diff_success']}, 失败 {stats['diff_failed']}")
+        _log_stream_counters("结束汇总")
+        self._log("=" * 60)
+
+        if discover_error:
+            raise discover_error
+
+        return stats
+
     def _update_pipeline_stats(self, stats):
         """更新流水线统计信息显示"""
         speed = stats.get('current_speed_mb_s', 0.0)
@@ -4421,141 +4702,112 @@ Diff统计:
 
             # 清空批量状态组件
             self.root.after(0, lambda: self.batch_status_widget.clear())
+            self.root.after(0, lambda: self.batch_progress_label.config(text="正在初始化全系统流式批量处理..."))
+            self.root.after(0, lambda: self.batch_stats_label.config(text=""))
 
-            # 遍历所有系统
             total_systems = len(all_telescopes)
-            total_files_processed = 0
+            base_download_dir = self.download_dir_var.get().strip()
+            base_output_dir = self.diff_output_dir_var.get().strip()
+            self.last_batch_output_root = base_output_dir
+            os.makedirs(self.last_batch_output_root, exist_ok=True)
 
-            for system_idx, tel_name in enumerate(all_telescopes, 1):
-                # 检查停止标志
-                if self.batch_stopped:
-                    self._log("\n全天全系统批量处理已被停止")
-                    break
+            thread_count = self.url_builder.get_thread_count()
+            url_template = self.config_manager.get_url_template()
 
-                # 检查暂停标志
-                if self.batch_paused:
-                    self._log(f"\n全天全系统批量处理已暂停（当前进度: 系统 {system_idx-1}/{total_systems}）")
-                    self.root.after(0, lambda s=system_idx-1, t=total_systems: self.status_label.config(
-                        text=f"全天全系统批量处理已暂停 (系统 {s}/{t})"))
+            self._log("\n使用跨系统跨天区流式流水线：扫描 → 下载 → Diff（边扫边处理）")
+            self.root.after(0, lambda: self.status_label.config(text="正在流式处理全系统文件..."))
 
-                # 等待暂停解除
-                self.batch_pause_event.wait()
+            def _discover(enqueue_file):
+                for system_idx, tel_name in enumerate(all_telescopes, 1):
+                    if self.batch_stopped:
+                        self._log("\n全天全系统批量处理已被停止")
+                        break
 
-                # 暂停解除后再次检查停止标志
-                if self.batch_stopped:
-                    self._log("\n全天全系统批量处理已被停止")
-                    break
+                    if self.batch_paused:
+                        self._log(f"\n全天全系统批量处理已暂停（当前进度: 系统 {system_idx-1}/{total_systems}）")
+                        self.root.after(0, lambda s=system_idx-1, t=total_systems: self.status_label.config(
+                            text=f"全天全系统批量处理已暂停 (系统 {s}/{t})"))
 
-                self._log(f"\n{'=' * 60}")
-                self._log(f"[{system_idx}/{total_systems}] 处理系统: {tel_name}")
-                self._log(f"{'=' * 60}")
-                self.root.after(0, lambda s=system_idx, t=total_systems, n=tel_name:
-                               self.status_label.config(text=f"正在处理系统 [{s}/{t}]: {n}"))
+                    self.batch_pause_event.wait()
+                    if self.batch_stopped:
+                        self._log("\n全天全系统批量处理已被停止")
+                        break
 
-                # 构建该系统的基础URL并扫描天区
-                url_template = self.config_manager.get_url_template()
-                format_params = {
-                    'tel_name': tel_name,
-                    'date': date,
-                    'k_number': ''
-                }
+                    self._log(f"\n{'=' * 60}")
+                    self._log(f"[{system_idx}/{total_systems}] 处理系统: {tel_name}")
+                    self._log(f"{'=' * 60}")
+                    self.root.after(0, lambda s=system_idx, t=total_systems, n=tel_name:
+                                   self.status_label.config(text=f"正在处理系统 [{s}/{t}]: {n}"))
 
-                # 如果模板需要年份，添加年份参数
-                if '{year_of_date}' in url_template:
-                    try:
-                        year_of_date = date[:4] if len(date) >= 4 else datetime.now().strftime('%Y')
-                        format_params['year_of_date'] = year_of_date
-                    except Exception:
-                        format_params['year_of_date'] = datetime.now().strftime('%Y')
-
-                base_url = url_template.format(**format_params).rstrip('/')
-
-                # 扫描该系统的可用天区
-                self._log(f"扫描天区: {base_url}")
-                try:
-                    from url_builder import RegionScanner
-                    region_scanner = RegionScanner()
-                    available_regions = region_scanner.scan_available_regions(base_url)
-
-                    if not available_regions:
-                        self._log(f"  未找到可用天区，跳过系统 {tel_name}")
-                        continue
-
-                    self._log(f"  找到 {len(available_regions)} 个天区: {', '.join(available_regions)}")
-
-                    # 收集该系统所有天区的所有文件
-                    system_files_to_process = []
-
-                    for region_idx, k_number in enumerate(available_regions, 1):
-                        # 检查停止标志
-                        if self.batch_stopped:
-                            self._log("\n全天全系统批量处理已被停止")
-                            break
-
-                        # 检查暂停标志并等待
-                        self.batch_pause_event.wait()
-
-                        # 暂停解除后再次检查停止标志
-                        if self.batch_stopped:
-                            break
-
-                        self._log(f"\n  [{region_idx}/{len(available_regions)}] 扫描天区: {k_number}")
-                        self.root.after(0, lambda s=system_idx, t=total_systems, n=tel_name, r=region_idx, rt=len(available_regions), k=k_number:
-                                       self.status_label.config(text=f"系统 [{s}/{t}] {n} - 天区 [{r}/{rt}]: {k}"))
-
-                        # 构建该天区的URL
-                        format_params['k_number'] = k_number
-                        region_url = url_template.format(**format_params)
-
-                        # 扫描该天区的FITS文件
+                    format_params = {
+                        'tel_name': tel_name,
+                        'date': date,
+                        'k_number': ''
+                    }
+                    if '{year_of_date}' in url_template:
                         try:
-                            fits_files = self.directory_scanner.scan_directory_listing(region_url)
-                            if not fits_files:
-                                fits_files = self.scanner.scan_fits_files(region_url)
+                            format_params['year_of_date'] = date[:4] if len(date) >= 4 else datetime.now().strftime('%Y')
+                        except Exception:
+                            format_params['year_of_date'] = datetime.now().strftime('%Y')
 
-                            self._log(f"    找到 {len(fits_files)} 个文件")
+                    base_url = url_template.format(**format_params).rstrip('/')
+                    self._log(f"扫描天区: {base_url}")
 
-                            # 将文件添加到处理列表
-                            for filename, url, size in fits_files:
-                                system_files_to_process.append((filename, url, tel_name, k_number))
+                    try:
+                        from url_builder import RegionScanner
+                        region_scanner = RegionScanner()
+                        available_regions = region_scanner.scan_available_regions(base_url)
 
-                        except Exception as e:
-                            self._log(f"    扫描失败: {str(e)}")
+                        if not available_regions:
+                            self._log(f"  未找到可用天区，跳过系统 {tel_name}")
                             continue
 
-                    if not system_files_to_process:
-                        self._log(f"\n系统 {tel_name} 未找到任何FITS文件")
+                        self._log(f"  找到 {len(available_regions)} 个天区: {', '.join(available_regions)}")
+
+                        for region_idx, k_number in enumerate(available_regions, 1):
+                            if self.batch_stopped:
+                                self._log("\n全天全系统批量处理已被停止")
+                                return
+
+                            self.batch_pause_event.wait()
+                            if self.batch_stopped:
+                                return
+
+                            self._log(f"\n  [{region_idx}/{len(available_regions)}] 扫描天区: {k_number}")
+                            self.root.after(0, lambda s=system_idx, t=total_systems, n=tel_name, r=region_idx, rt=len(available_regions), k=k_number:
+                                           self.status_label.config(text=f"系统 [{s}/{t}] {n} - 天区 [{r}/{rt}]: {k}"))
+
+                            format_params['k_number'] = k_number
+                            region_url = url_template.format(**format_params)
+
+                            try:
+                                fits_files = self.directory_scanner.scan_directory_listing(region_url)
+                                if not fits_files:
+                                    fits_files = self.scanner.scan_fits_files(region_url)
+
+                                self._log(f"    找到 {len(fits_files)} 个文件")
+
+                                for filename, url, _size in fits_files:
+                                    per_dir = os.path.join(base_download_dir, tel_name, date, k_number)
+                                    if not enqueue_file(filename, url, per_dir):
+                                        return
+
+                            except Exception as e:
+                                self._log(f"    扫描失败: {str(e)}")
+                                continue
+
+                    except Exception as e:
+                        self._log(f"处理系统 {tel_name} 时出错: {str(e)}")
+                        import traceback
+                        self._log(traceback.format_exc())
                         continue
 
-                    self._log(f"\n系统 {tel_name} 总共找到 {len(system_files_to_process)} 个文件")
+            stats = self._pipeline_process_files_streaming(_discover, thread_count)
 
-                    # 添加所有文件到状态列表
-                    for filename, url, tel_name_item, k_number in system_files_to_process:
-                        self.root.after(0, lambda f=filename: self.batch_status_widget.add_file(f))
-
-                    # 直接跨天区流水线处理（单系统，不按天区分批）
-                    self._log(f"\n  使用跨天区流水线：系统 {tel_name}（不按天区分批）")
-                    base_download_dir = self.download_dir_var.get().strip()
-                    selected_files_with_dirs = []
-                    for filename, url, tel_name_item, k_number in system_files_to_process:
-                        per_dir = os.path.join(base_download_dir, tel_name, date, k_number)
-                        selected_files_with_dirs.append((filename, url, per_dir))
-
-                    # 设置输出根目录到 系统/日期
-                    base_output_dir = self.diff_output_dir_var.get().strip()
-                    self.last_batch_output_root = os.path.join(base_output_dir, tel_name, date)
-                    os.makedirs(self.last_batch_output_root, exist_ok=True)
-
-                    thread_count = self.url_builder.get_thread_count()
-                    self._pipeline_process_files(selected_files_with_dirs, base_download_dir, thread_count)
-
-                    total_files_processed += len(system_files_to_process)
-
-                except Exception as e:
-                    self._log(f"处理系统 {tel_name} 时出错: {str(e)}")
-                    import traceback
-                    self._log(traceback.format_exc())
-                    continue
+            total_files_processed = stats.get('total_files', 0)
+            if total_files_processed <= 0:
+                self._log("\n未找到任何FITS文件")
+                return
 
             self._log("\n" + "=" * 60)
             self._log("全天全系统下载diff处理完成！")
