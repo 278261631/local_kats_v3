@@ -130,6 +130,7 @@ class ConfigManager:
                 "csv_search_variable_count_mode": "=0",
                 "csv_search_mpc_count_mode": "=0",
                 "csv_search_ai_class_mode": "=0",
+                "csv_search_skip_mode": "=0",
                 "ai_classifier_model_path": "gui/classifier_model.joblib",
                 "csv_filter_skip_large_rows_enabled": False,
                 "csv_filter_max_rows": "200",

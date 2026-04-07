@@ -514,6 +514,7 @@ class FitsImageViewer:
         self.csv_search_variable_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_ai_class_mode_var = tk.StringVar(value="=0")
+        self.csv_search_skip_mode_var = tk.StringVar(value="=0")
         self.csv_filter_skip_large_rows_var = tk.BooleanVar(value=False)
         self.csv_filter_max_rows_var = tk.StringVar(value="200")
 
@@ -547,6 +548,14 @@ class FitsImageViewer:
             csv_row_filters,
             textvariable=self.csv_search_ai_class_mode_var,
             values=["=0", "=1", "<0", "all"],
+            state="readonly",
+            width=5,
+        ).pack(side=tk.LEFT)
+        ttk.Label(csv_row_filters, text="skip").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Combobox(
+            csv_row_filters,
+            textvariable=self.csv_search_skip_mode_var,
+            values=["=0", "=1", "all"],
             state="readonly",
             width=5,
         ).pack(side=tk.LEFT)
@@ -700,6 +709,12 @@ class FitsImageViewer:
             command=self._set_ai_class_for_current_csv_row,
         )
         self.ai_set_class_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.skip_toggle_current_row_button = ttk.Button(
+            control_frame2,
+            text="标记跳过(当前行)",
+            command=self._toggle_skip_for_current_csv_row,
+        )
+        self.skip_toggle_current_row_button.pack(side=tk.LEFT, padx=(0, 5))
 
         # 打开输出目录按钮
         self.last_output_dir = None  # 保存最后一次的输出目录
@@ -1175,6 +1190,10 @@ class FitsImageViewer:
             if csv_search_ai_class_mode not in {"=0", "=1", "<0", "all"}:
                 csv_search_ai_class_mode = "=0"
             self.csv_search_ai_class_mode_var.set(csv_search_ai_class_mode)
+            csv_search_skip_mode = str(display_settings.get("csv_search_skip_mode", "=0")).strip().lower()
+            if csv_search_skip_mode not in {"=0", "=1", "all"}:
+                csv_search_skip_mode = "=0"
+            self.csv_search_skip_mode_var.set(csv_search_skip_mode)
         except Exception as e:
             self.logger.error(f"加载显示设置失败: {str(e)}")
 
@@ -1191,6 +1210,7 @@ class FitsImageViewer:
                 csv_search_variable_count_mode=str(self.csv_search_variable_count_mode_var.get()).strip(),
                 csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
                 csv_search_ai_class_mode=str(self.csv_search_ai_class_mode_var.get()).strip().lower(),
+                csv_search_skip_mode=str(self.csv_search_skip_mode_var.get()).strip().lower(),
                 csv_filter_skip_large_rows_enabled=bool(self.csv_filter_skip_large_rows_var.get()),
                 csv_filter_max_rows=str(self.csv_filter_max_rows_var.get()).strip(),
             )
@@ -2513,6 +2533,29 @@ class FitsImageViewer:
             return iv < 0
         return False
 
+    def _csv_skip_mode_match(self, value, mode: str) -> bool:
+        """判断 skip_flag 是否满足 =0/=1/all 条件。"""
+        if mode == "all":
+            return True
+        iv = self._try_parse_int_from_csv_value(value)
+        if iv is None:
+            iv = 0
+        if mode == "=0":
+            return iv == 0
+        if mode == "=1":
+            return iv == 1
+        return False
+
+    def _get_csv_row_skip_flag(self, row: Optional[dict]) -> int:
+        """读取行 skip_flag，缺失或非法时按 0 处理。"""
+        if not isinstance(row, dict):
+            return 0
+        raw_value = row.get("skip_flag")
+        if raw_value is None and "skip" in row:
+            raw_value = row.get("skip")
+        iv = self._try_parse_int_from_csv_value(raw_value)
+        return 1 if iv == 1 else 0
+
     def _parse_csv_flux_range(self) -> Tuple[float, float]:
         """解析 CSV flux 区间筛选条件，返回 (min, max)。"""
         try:
@@ -2543,6 +2586,7 @@ class FitsImageViewer:
         var_mode: str,
         mpc_mode: str,
         ai_mode: str = "=0",
+        skip_mode: str = "=0",
     ) -> bool:
         """按 AND 逻辑判断一行是否满足搜索条件。"""
         if not isinstance(row, dict):
@@ -2555,6 +2599,8 @@ class FitsImageViewer:
         if not self._csv_count_mode_match(row.get("mpc_count"), mpc_mode):
             return False
         if not self._csv_ai_class_mode_match(row.get("ai_class"), ai_mode):
+            return False
+        if not self._csv_skip_mode_match(row.get("skip_flag", row.get("skip")), skip_mode):
             return False
         return True
 
@@ -2612,12 +2658,12 @@ class FitsImageViewer:
         return -1
 
     def _get_csv_filter_condition_summary(
-        self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str, ai_mode: str
+        self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str, ai_mode: str, skip_mode: str
     ) -> str:
         """返回 CSV 条件摘要文本。"""
         return (
             f"{flux_min:g}<median_flux_norm<{flux_max:g} AND variable_count{var_mode} "
-            f"AND mpc_count{mpc_mode} AND ai_class{ai_mode}"
+            f"AND mpc_count{mpc_mode} AND ai_class{ai_mode} AND skip_flag{skip_mode}"
         )
 
     def _set_csv_filter_search_status(self, text: str):
@@ -2760,11 +2806,23 @@ class FitsImageViewer:
         if not isinstance(row, dict):
             self.csv_variable_count_status_label.config(text="--", foreground="gray")
             self.csv_mpc_count_status_label.config(text="--", foreground="gray")
+            self._update_skip_toggle_current_row_button(None)
             return
         var_text, var_color = self._get_csv_count_status_style(row.get("variable_count"))
         mpc_text, mpc_color = self._get_csv_count_status_style(row.get("mpc_count"))
         self.csv_variable_count_status_label.config(text=var_text, foreground=var_color)
         self.csv_mpc_count_status_label.config(text=mpc_text, foreground=mpc_color)
+        self._update_skip_toggle_current_row_button(row)
+
+    def _update_skip_toggle_current_row_button(self, row: Optional[dict]):
+        """根据当前行 skip_flag 刷新按钮文案。"""
+        btn = getattr(self, "skip_toggle_current_row_button", None)
+        if btn is None:
+            return
+        if self._get_csv_row_skip_flag(row) == 1:
+            btn.config(text="取消跳过(当前行)")
+        else:
+            btn.config(text="标记跳过(当前行)")
 
     def _update_coordinate_display_from_csv_row(self, row: Optional[dict]):
         """将CSV当前行的RA/DEC同步到度数与HMS:DMS显示框。"""
@@ -2795,13 +2853,19 @@ class FitsImageViewer:
         var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
         mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
         ai_mode = str(self.csv_search_ai_class_mode_var.get()).strip().lower() or "=0"
-        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"} or ai_mode not in {"=0", "=1", "<0", "all"}:
-            raise _CsvFilterSearchSetupError("variable_count / mpc_count / ai_class 条件无效", kind="warning")
+        skip_mode = str(self.csv_search_skip_mode_var.get()).strip().lower() or "=0"
+        if (
+            var_mode not in {"=0", "=-1", ">0"}
+            or mpc_mode not in {"=0", "=-1", ">0"}
+            or ai_mode not in {"=0", "=1", "<0", "all"}
+            or skip_mode not in {"=0", "=1", "all"}
+        ):
+            raise _CsvFilterSearchSetupError("variable_count / mpc_count / ai_class / skip_flag 条件无效", kind="warning")
         try:
             skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
         except ValueError as e:
             raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
-        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode)
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode)
 
         selection = self.directory_tree.selection()
         if selection:
@@ -2865,6 +2929,7 @@ class FitsImageViewer:
             "var_mode": var_mode,
             "mpc_mode": mpc_mode,
             "ai_mode": ai_mode,
+            "skip_mode": skip_mode,
             "skip_large_csv": skip_large_csv,
             "large_csv_max_rows": large_csv_max_rows,
             "condition_summary": condition_summary,
@@ -2889,6 +2954,7 @@ class FitsImageViewer:
         var_mode = ctx["var_mode"]
         mpc_mode = ctx["mpc_mode"]
         ai_mode = ctx["ai_mode"]
+        skip_mode = ctx["skip_mode"]
         skip_large_csv = ctx["skip_large_csv"]
         large_csv_max_rows = ctx["large_csv_max_rows"]
         file_nodes = ctx["file_nodes"]
@@ -2930,7 +2996,9 @@ class FitsImageViewer:
 
             for raw_idx in row_range:
                 row = all_rows[raw_idx]
-                if self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode, ai_mode):
+                if self._row_matches_csv_filter_conditions(
+                    row, flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode
+                ):
                     yield (node, file_path, output_dir, raw_idx, row)
                     if stop_after_first:
                         return
@@ -3293,8 +3361,14 @@ class FitsImageViewer:
         var_mode = str(self.csv_search_variable_count_mode_var.get()).strip() or "=0"
         mpc_mode = str(self.csv_search_mpc_count_mode_var.get()).strip() or "=0"
         ai_mode = str(self.csv_search_ai_class_mode_var.get()).strip().lower() or "=0"
-        if var_mode not in {"=0", "=-1", ">0"} or mpc_mode not in {"=0", "=-1", ">0"} or ai_mode not in {"=0", "=1", "<0", "all"}:
-            messagebox.showwarning("警告", "variable_count / mpc_count / ai_class 条件无效")
+        skip_mode = str(self.csv_search_skip_mode_var.get()).strip().lower() or "=0"
+        if (
+            var_mode not in {"=0", "=-1", ">0"}
+            or mpc_mode not in {"=0", "=-1", ">0"}
+            or ai_mode not in {"=0", "=1", "<0", "all"}
+            or skip_mode not in {"=0", "=1", "all"}
+        ):
+            messagebox.showwarning("警告", "variable_count / mpc_count / ai_class / skip_flag 条件无效")
             return
         try:
             skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
@@ -3302,7 +3376,7 @@ class FitsImageViewer:
             messagebox.showwarning("警告", str(e))
             return
         self._save_display_settings()
-        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode)
+        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode)
 
         crossmatch_script = self._get_crossmatch_nonref_script_path()
         if not crossmatch_script or not os.path.exists(crossmatch_script):
@@ -3310,7 +3384,15 @@ class FitsImageViewer:
             return
 
         tasks, stats = self._collect_crossmatch_tasks_for_csv_filters(
-            target_csv_paths, flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_large_csv, large_csv_max_rows
+            target_csv_paths,
+            flux_min,
+            flux_max,
+            var_mode,
+            mpc_mode,
+            ai_mode,
+            skip_mode,
+            skip_large_csv,
+            large_csv_max_rows,
         )
         if not tasks:
             messagebox.showinfo(
@@ -3384,6 +3466,7 @@ class FitsImageViewer:
         var_mode,
         mpc_mode,
         ai_mode,
+        skip_mode,
         skip_large_csv: bool = False,
         large_csv_max_rows: int = 200,
     ):
@@ -3402,7 +3485,9 @@ class FitsImageViewer:
                 continue
             seen_ranks = set()
             for row in rows:
-                if not self._row_matches_csv_filter_conditions(row, flux_min, flux_max, var_mode, mpc_mode, ai_mode):
+                if not self._row_matches_csv_filter_conditions(
+                    row, flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode
+                ):
                     continue
                 matched_rows += 1
                 rank_value = self._try_parse_int_from_csv_value(row.get("rank"))
@@ -3540,6 +3625,23 @@ class FitsImageViewer:
             writer.writerows(rows)
         return True
 
+    def _write_single_csv_row_skip_flag(self, output_dir: str, rows: List[dict], raw_idx: int, skip_flag: int) -> bool:
+        """将单行 skip_flag 写回 CSV。"""
+        csv_path = self._get_nonref_candidates_csv_path(output_dir)
+        if not csv_path:
+            return False
+        if raw_idx < 0 or raw_idx >= len(rows):
+            return False
+        rows[raw_idx]["skip_flag"] = str(1 if int(skip_flag) == 1 else 0)
+        fieldnames = list(rows[0].keys()) if rows else ["skip_flag"]
+        if "skip_flag" not in fieldnames:
+            fieldnames.append("skip_flag")
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        return True
+
     def _run_ai_classification_for_current_row(self):
         """仅对当前CSV行执行一次AI分类并写回。"""
         output_dir, rows, raw_idx = self._get_current_csv_row_with_raw_index()
@@ -3628,6 +3730,26 @@ class FitsImageViewer:
             self._reload_csv_candidates_for_display(output_dir, keep_current_index=True)
         else:
             self._emit_ai_classification_log("[AI手动修正] 写回失败", "ERROR")
+
+    def _toggle_skip_for_current_csv_row(self):
+        """切换当前 CSV 行 skip_flag（0/1）。"""
+        output_dir, rows, raw_idx = self._get_current_csv_row_with_raw_index()
+        if not output_dir or rows is None:
+            self._emit_ai_classification_log("[CSV跳过] 当前不在CSV候选模式或无可用候选", "WARNING")
+            return
+        if raw_idx < 0:
+            self._emit_ai_classification_log("[CSV跳过] 无法定位当前行到原始CSV", "WARNING")
+            return
+        current_skip = self._get_csv_row_skip_flag(rows[raw_idx])
+        target_skip = 0 if current_skip == 1 else 1
+        if self._write_single_csv_row_skip_flag(output_dir, rows, raw_idx, target_skip):
+            self._emit_ai_classification_log(
+                f"[CSV跳过] 写回成功: raw_idx={raw_idx}, skip_flag={target_skip}",
+                "INFO",
+            )
+            self._reload_csv_candidates_for_display(output_dir, keep_current_index=True)
+        else:
+            self._emit_ai_classification_log("[CSV跳过] 写回失败", "ERROR")
 
     def _run_ai_classification_for_filtered_rows(self):
         btn = getattr(self, "_ai_classify_filtered_button", None)
