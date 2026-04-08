@@ -1,0 +1,53 @@
+{
+  "url_template": "https://example.com/{tel_name}/{date}/{k_number}/",
+  "telescopes": ["GY1"],
+  "paths": {
+    "download_root": "E:/fix_data/download",
+    "template_root": "E:/fix_data/template",
+    "diff_output_root": "E:/fix_data/output"
+  },
+  "download": {
+    "max_workers": 4,
+    "retry_times": 3
+  },
+  "network": {
+    "timeout": 30,
+    "verify_ssl": false,
+    "disable_proxy": true,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+  },
+  "file_filter": {
+    "include_extensions": [".fits", ".fit", ".fts"],
+    "exclude_keywords": ["calibration", "_fz", "flat", "fiel"]
+  },
+  "diff_pipeline_settings": {
+    "script_paths": {
+      "export_fits_stars": "D:/github/misaligned_fits/export_fits_stars.py",
+      "recommended_pipeline_console": "D:/github/fits_data_view_process_3d/std_process/recommended_pipeline_console.py",
+      "reproject_wcs_and_export_stars": "D:/github/misaligned_fits/reproject_wcs_and_export_stars.py",
+      "solve_alignment_from_stars": "D:/github/misaligned_fits/solve_alignment_from_stars.py",
+      "render_alignment_outputs": "D:/github/misaligned_fits/render_alignment_outputs.py",
+      "rank_variable_candidates": "D:/github/misaligned_fits/rank_variable_candidates.py",
+      "crossmatch_nonref_candidates": "D:/github/misaligned_fits/crossmatch_nonref_candidates.py",
+      "export_nonref_candidate_ab_cutouts": "D:/github/misaligned_fits/export_nonref_candidate_ab_cutouts.py"
+    },
+    "export_uniform_grid_x": 7,
+    "export_uniform_grid_y": 7,
+    "export_uniform_per_cell": 100,
+    "preprocess_box": 48,
+    "preprocess_clip_sigma": 3.0,
+    "preprocess_median_ksize": 3,
+    "preprocess_denoise_sigma": 2.0,
+    "preprocess_mix_alpha": 0.7,
+    "reproject_max_stars": 5000,
+    "reproject_uniform_grid_x": 7,
+    "reproject_uniform_grid_y": 7,
+    "reproject_uniform_per_cell": 100,
+    "solve_radii": [24, 32, 40],
+    "rank_min_observations": 2,
+    "enable_crossmatch_nonref_candidates": true,
+    "enable_export_nonref_candidate_ab_cutouts": false,
+    "nonref_candidate_cutout_size": 128,
+    "fast_mode": true
+  }
+}
