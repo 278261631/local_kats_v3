@@ -12,3 +12,4 @@
 /gui/__pycache__
 /.pycache_tmp
 /console_proc/config.json
+/console_proc/files_data
