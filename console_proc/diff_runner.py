@@ -9,6 +9,7 @@ console_proc 独立 diff pipeline 执行器
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -427,6 +429,116 @@ def write_done_marker(
         json.dump(marker, fp, ensure_ascii=False, indent=2)
 
 
+def get_diff_runner_max_workers(cfg: Dict[str, Any]) -> int:
+    runner_cfg = cfg.get("diff_runner", {})
+    value = runner_cfg.get("max_workers", 2)
+    try:
+        n = int(value)
+    except Exception:
+        n = 2
+    return max(1, n)
+
+
+def get_template_lock(
+    template_locks: Dict[str, threading.Lock],
+    template_locks_guard: threading.Lock,
+    template_file: Path,
+) -> threading.Lock:
+    key = str(template_file.resolve()).lower()
+    with template_locks_guard:
+        lock = template_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            template_locks[key] = lock
+        return lock
+
+
+def run_one_task(
+    task: Dict[str, Any],
+    pipeline_settings: Dict[str, Any],
+    force_rerun: bool,
+    dry_run: bool,
+    template_locks: Dict[str, threading.Lock],
+    template_locks_guard: threading.Lock,
+) -> Dict[str, Any]:
+    tel = str(task["telescope"])
+    region = str(task["region"])
+    date_text = str(task["date"])
+    source_file = Path(str(task["source_file"]))
+    template_file = Path(str(task["template_file"]))
+    output_dir = Path(str(task["output_dir"]))
+    log_file = output_dir / "pipeline.log"
+    done_path = output_dir / ".done.json"
+
+    commands = build_pipeline_commands(
+        source_file=source_file,
+        template_file=template_file,
+        output_dir=output_dir,
+        settings=pipeline_settings,
+    )
+    command_sig = build_last_command_signature(commands)
+
+    if not force_rerun and should_skip_by_done_marker(done_path, command_sig):
+        return {
+            "status": "skipped",
+            "reason": "already_done",
+            "date": date_text,
+            "telescope": tel,
+            "region": region,
+            "source_file": str(source_file),
+            "template_file": str(template_file),
+            "output_dir": str(output_dir),
+            "done_file": str(done_path),
+        }
+
+    ok = True
+    fail_reason = ""
+    for title, cmd in commands:
+        if title == "导出模板星点":
+            template_lock = get_template_lock(template_locks, template_locks_guard, template_file)
+            with template_lock:
+                step_ok, msg = run_command(title, cmd, log_file, dry_run)
+        else:
+            step_ok, msg = run_command(title, cmd, log_file, dry_run)
+        if not step_ok:
+            ok = False
+            fail_reason = msg
+            break
+        if title == "预处理目标图" and not dry_run:
+            move_err = relocate_preprocess_output_to_output_dir(source_file, output_dir)
+            if move_err:
+                ok = False
+                fail_reason = move_err
+                break
+
+    if ok:
+        if not dry_run:
+            write_done_marker(done_path, source_file, template_file, output_dir, command_sig)
+        return {
+            "status": "success",
+            "date": date_text,
+            "telescope": tel,
+            "region": region,
+            "source_file": str(source_file),
+            "template_file": str(template_file),
+            "output_dir": str(output_dir),
+            "log_file": str(log_file),
+            "done_file": str(done_path),
+        }
+
+    return {
+        "status": "failed",
+        "reason": fail_reason,
+        "date": date_text,
+        "telescope": tel,
+        "region": region,
+        "source_file": str(source_file),
+        "template_file": str(template_file),
+        "output_dir": str(output_dir),
+        "log_file": str(log_file),
+    }
+
+
 def discover_download_items(download_root: Path, date_text: str) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     if not download_root.exists():
@@ -485,6 +597,7 @@ def main() -> None:
         raise SystemExit(f"模板目录不存在: {template_root}")
 
     pipeline_settings = merge_dict(default_diff_pipeline_settings(), cfg.get("diff_pipeline_settings", {}))
+    max_workers = get_diff_runner_max_workers(cfg)
 
     items = discover_download_items(download_root, args.date)
 
@@ -505,6 +618,7 @@ def main() -> None:
     success = 0
     failed = 0
     skipped = 0
+    tasks: List[Dict[str, Any]] = []
 
     for item in items:
         tel = str(item.get("telescope", "")).upper()
@@ -535,87 +649,70 @@ def main() -> None:
 
             output_dir = diff_output_root / tel / date_text / region / sanitize_output_name(source_file.stem)
             output_dir.mkdir(parents=True, exist_ok=True)
-            log_file = output_dir / "pipeline.log"
-
-            commands = build_pipeline_commands(
-                source_file=source_file,
-                template_file=template_file,
-                output_dir=output_dir,
-                settings=pipeline_settings,
+            tasks.append(
+                {
+                    "date": date_text,
+                    "telescope": tel,
+                    "region": region,
+                    "source_file": str(source_file),
+                    "template_file": str(template_file),
+                    "output_dir": str(output_dir),
+                }
             )
-            command_sig = build_last_command_signature(commands)
-            done_path = output_dir / ".done.json"
 
-            if not args.force_rerun and should_skip_by_done_marker(done_path, command_sig):
-                skipped += 1
-                all_results.append(
-                    {
-                        "status": "skipped",
-                        "reason": "already_done",
-                        "date": date_text,
-                        "telescope": tel,
-                        "region": region,
-                        "source_file": str(source_file),
-                        "template_file": str(template_file),
-                        "output_dir": str(output_dir),
-                        "done_file": str(done_path),
-                    }
-                )
-                logging.info("跳过（已完成）: %s", source_file.name)
-                continue
+    template_locks: Dict[str, threading.Lock] = {}
+    template_locks_guard = threading.Lock()
+    logging.info("开始执行任务: %d, 并发线程: %d", len(tasks), max_workers)
 
-            ok = True
-            fail_reason = ""
-            for title, cmd in commands:
-                step_ok, msg = run_command(title, cmd, log_file, args.dry_run)
-                if not step_ok:
-                    ok = False
-                    fail_reason = msg
-                    break
-                if title == "预处理目标图" and not args.dry_run:
-                    move_err = relocate_preprocess_output_to_output_dir(source_file, output_dir)
-                    if move_err:
-                        ok = False
-                        fail_reason = move_err
-                        break
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(
+                run_one_task,
+                task,
+                pipeline_settings,
+                bool(args.force_rerun),
+                bool(args.dry_run),
+                template_locks,
+                template_locks_guard,
+            ): task
+            for task in tasks
+        }
+        for future in as_completed(future_map):
+            task = future_map[future]
+            try:
+                result = future.result()
+            except Exception as ex:
+                failed += 1
+                result = {
+                    "status": "failed",
+                    "reason": f"worker_exception: {ex}",
+                    "date": str(task["date"]),
+                    "telescope": str(task["telescope"]),
+                    "region": str(task["region"]),
+                    "source_file": str(task["source_file"]),
+                    "template_file": str(task["template_file"]),
+                    "output_dir": str(task["output_dir"]),
+                }
 
-            if ok:
-                if not args.dry_run:
-                    write_done_marker(done_path, source_file, template_file, output_dir, command_sig)
+            status = str(result.get("status", "failed"))
+            if status == "success":
                 success += 1
-                all_results.append(
-                    {
-                        "status": "success",
-                        "date": date_text,
-                        "telescope": tel,
-                        "region": region,
-                        "source_file": str(source_file),
-                        "template_file": str(template_file),
-                        "output_dir": str(output_dir),
-                        "log_file": str(log_file),
-                        "done_file": str(done_path),
-                    }
-                )
+            elif status == "skipped":
+                skipped += 1
+                logging.info("跳过: %s", str(result.get("source_file", "")))
             else:
                 failed += 1
-                all_results.append(
-                    {
-                        "status": "failed",
-                        "reason": fail_reason,
-                        "date": date_text,
-                        "telescope": tel,
-                        "region": region,
-                        "source_file": str(source_file),
-                        "template_file": str(template_file),
-                        "output_dir": str(output_dir),
-                        "log_file": str(log_file),
-                    }
+                logging.error(
+                    "处理失败: %s (%s)",
+                    str(result.get("source_file", "")),
+                    str(result.get("reason", "unknown")),
                 )
-                logging.error("处理失败: %s (%s)", source_file.name, fail_reason)
+            all_results.append(result)
 
     summary = {
         "date": args.date,
         "download_root": str(download_root),
+        "max_workers": max_workers,
         "item_count": len(items),
         "success": success,
         "failed": failed,

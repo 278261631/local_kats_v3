@@ -10,6 +10,9 @@
     "max_workers": 4,
     "retry_times": 3
   },
+  "diff_runner": {
+    "max_workers": 2
+  },
   "network": {
     "timeout": 30,
     "verify_ssl": false,
