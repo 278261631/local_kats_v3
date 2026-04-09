@@ -2,13 +2,14 @@
 """
 console_proc 独立 diff pipeline 执行器
 
-从 files_data/<date>/index.json 读取任务清单，定位下载后的 FITS 文件，
+从 download_root/<telescope>/<date>/<region> 发现下载后的 FITS 文件，
 匹配模板文件后按 diff_pipeline_settings 执行命令链。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -26,14 +27,14 @@ def setup_logging(verbose: bool) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="从 files_data 清单执行 diff pipeline（console 独立版）"
+        description="从 download_root 目录执行 diff pipeline（console 独立版）"
     )
     parser.add_argument("--config", default="console_proc/config.json", help="配置文件路径")
     parser.add_argument("--date", required=True, help="日期，YYYYMMDD")
-    parser.add_argument("--files-data-root", default="files_data", help="files_data 根目录")
     parser.add_argument("--telescope", help="仅处理指定系统，例如 GY1")
     parser.add_argument("--region", help="仅处理指定天区，例如 K019")
     parser.add_argument("--max-files", type=int, default=0, help="每个天区最多处理文件数，0=不限制")
+    parser.add_argument("--force-rerun", action="store_true", help="忽略完成标记，强制重跑")
     parser.add_argument("--dry-run", action="store_true", help="仅打印命令，不实际执行")
     parser.add_argument("--verbose", action="store_true", help="输出调试日志")
     return parser.parse_args()
@@ -353,26 +354,83 @@ def run_command(title: str, cmd: List[str], log_file: Path, dry_run: bool) -> Tu
     return True, "ok"
 
 
-def collect_region_files(item: Dict[str, Any]) -> List[Path]:
-    download_dir = Path(str(item.get("download_dir", "")))
+def build_last_command_signature(commands: List[Tuple[str, List[str]]]) -> Dict[str, str]:
+    if not commands:
+        return {"last_step_title": "", "last_cmd": "", "last_cmd_sha256": ""}
+    last_title, last_cmd = commands[-1]
+    last_cmd_text = subprocess.list2cmdline(last_cmd)
+    return {
+        "last_step_title": last_title,
+        "last_cmd": last_cmd_text,
+        "last_cmd_sha256": hashlib.sha256(last_cmd_text.encode("utf-8")).hexdigest(),
+    }
+
+
+def should_skip_by_done_marker(done_path: Path, expected_sig: Dict[str, str]) -> bool:
+    if not done_path.exists():
+        return False
+    try:
+        payload = load_json(done_path)
+    except Exception:
+        return False
+
+    if payload.get("status") != "success":
+        return False
+    return str(payload.get("last_cmd_sha256", "")) == expected_sig["last_cmd_sha256"]
+
+
+def write_done_marker(
+    done_path: Path,
+    source_file: Path,
+    template_file: Path,
+    output_dir: Path,
+    command_sig: Dict[str, str],
+) -> None:
+    marker = {
+        "status": "success",
+        "source_file": str(source_file),
+        "template_file": str(template_file),
+        "output_dir": str(output_dir),
+        "last_step_title": command_sig["last_step_title"],
+        "last_cmd": command_sig["last_cmd"],
+        "last_cmd_sha256": command_sig["last_cmd_sha256"],
+    }
+    with done_path.open("w", encoding="utf-8") as fp:
+        json.dump(marker, fp, ensure_ascii=False, indent=2)
+
+
+def discover_download_items(download_root: Path, date_text: str) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    if not download_root.exists():
+        return items
+
+    tel_dirs = sorted([p for p in download_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+    for tel_dir in tel_dirs:
+        date_dir = tel_dir / date_text
+        if not date_dir.exists() or not date_dir.is_dir():
+            continue
+
+        region_dirs = sorted([p for p in date_dir.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+        for region_dir in region_dirs:
+            try:
+                region = normalize_region(region_dir.name)
+            except ValueError:
+                continue
+            items.append(
+                {
+                    "date": date_text,
+                    "telescope": tel_dir.name.upper(),
+                    "region": region,
+                    "download_dir": str(region_dir),
+                }
+            )
+    return items
+
+
+def collect_region_files(download_dir: Path) -> List[Path]:
     if not download_dir.exists():
         return []
-
-    files_txt_val = item.get("files_txt")
-    if files_txt_val:
-        files_txt = Path(str(files_txt_val))
-        if files_txt.exists():
-            result: List[Path] = []
-            for line in files_txt.read_text(encoding="utf-8").splitlines():
-                name = line.strip()
-                if not name:
-                    continue
-                p = download_dir / name
-                if p.exists() and is_fits_file(p):
-                    result.append(p)
-            return result
-
-    return [p for p in download_dir.iterdir() if p.is_file() and is_fits_file(p)]
+    return sorted([p for p in download_dir.iterdir() if p.is_file() and is_fits_file(p)], key=lambda p: p.name.lower())
 
 
 def main() -> None:
@@ -388,22 +446,19 @@ def main() -> None:
     cfg = load_json(cfg_path)
 
     paths_cfg = cfg.get("paths", {})
+    download_root_val = paths_cfg.get("download_root", "")
+    download_root = Path(str(download_root_val))
     template_root = Path(str(paths_cfg.get("template_root", "")))
     diff_output_root = Path(str(paths_cfg.get("diff_output_root", "diff_output")))
     diff_output_root.mkdir(parents=True, exist_ok=True)
+    if not download_root.exists():
+        raise SystemExit(f"下载目录不存在: {download_root}")
     if not template_root.exists():
         raise SystemExit(f"模板目录不存在: {template_root}")
 
     pipeline_settings = merge_dict(default_diff_pipeline_settings(), cfg.get("diff_pipeline_settings", {}))
 
-    date_dir = Path(args.files_data_root) / args.date
-    index_path = date_dir / "index.json"
-    if not index_path.exists():
-        raise SystemExit(f"未找到 files_data 索引: {index_path}")
-    index_data = load_json(index_path)
-    items = index_data.get("items", [])
-    if not isinstance(items, list):
-        raise SystemExit("index.json 格式错误: items 不是数组")
+    items = discover_download_items(download_root, args.date)
 
     if args.telescope:
         items = [x for x in items if str(x.get("telescope", "")).upper() == args.telescope.upper()]
@@ -415,7 +470,7 @@ def main() -> None:
         logging.warning("无匹配处理项")
         raise SystemExit(0)
 
-    run_result_dir = date_dir / "diff_results"
+    run_result_dir = diff_output_root / "_meta" / args.date / "diff_results"
     run_result_dir.mkdir(parents=True, exist_ok=True)
 
     all_results: List[Dict[str, Any]] = []
@@ -427,7 +482,8 @@ def main() -> None:
         tel = str(item.get("telescope", "")).upper()
         region = str(item.get("region", "")).upper()
         date_text = str(item.get("date", args.date))
-        region_files = collect_region_files(item)
+        download_dir = Path(str(item.get("download_dir", "")))
+        region_files = collect_region_files(download_dir)
         if args.max_files and args.max_files > 0:
             region_files = region_files[: args.max_files]
 
@@ -459,6 +515,26 @@ def main() -> None:
                 output_dir=output_dir,
                 settings=pipeline_settings,
             )
+            command_sig = build_last_command_signature(commands)
+            done_path = output_dir / ".done.json"
+
+            if not args.force_rerun and should_skip_by_done_marker(done_path, command_sig):
+                skipped += 1
+                all_results.append(
+                    {
+                        "status": "skipped",
+                        "reason": "already_done",
+                        "date": date_text,
+                        "telescope": tel,
+                        "region": region,
+                        "source_file": str(source_file),
+                        "template_file": str(template_file),
+                        "output_dir": str(output_dir),
+                        "done_file": str(done_path),
+                    }
+                )
+                logging.info("跳过（已完成）: %s", source_file.name)
+                continue
 
             ok = True
             fail_reason = ""
@@ -470,6 +546,8 @@ def main() -> None:
                     break
 
             if ok:
+                if not args.dry_run:
+                    write_done_marker(done_path, source_file, template_file, output_dir, command_sig)
                 success += 1
                 all_results.append(
                     {
@@ -481,6 +559,7 @@ def main() -> None:
                         "template_file": str(template_file),
                         "output_dir": str(output_dir),
                         "log_file": str(log_file),
+                        "done_file": str(done_path),
                     }
                 )
             else:
@@ -502,6 +581,7 @@ def main() -> None:
 
     summary = {
         "date": args.date,
+        "download_root": str(download_root),
         "item_count": len(items),
         "success": success,
         "failed": failed,
