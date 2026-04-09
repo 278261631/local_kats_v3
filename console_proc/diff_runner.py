@@ -354,6 +354,34 @@ def run_command(title: str, cmd: List[str], log_file: Path, dry_run: bool) -> Tu
     return True, "ok"
 
 
+def relocate_preprocess_output_to_output_dir(source_file: Path, output_dir: Path) -> Optional[str]:
+    """
+    recommended_pipeline_console.py 实际会把 .01proc.fit 写入输入目录。
+    这里统一搬运到 output_dir，保证后续步骤与产物目录一致。
+    """
+    target_base = sanitize_output_name(source_file.stem)
+    actual_path = source_file.parent / f"{target_base}.01proc.fit"
+    expected_path = output_dir / f"{target_base}.01proc.fit"
+
+    if expected_path.exists():
+        if actual_path.exists() and actual_path != expected_path:
+            try:
+                actual_path.unlink()
+            except Exception:
+                pass
+        return None
+
+    if not actual_path.exists():
+        return f"预处理输出不存在: {actual_path}"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        actual_path.replace(expected_path)
+    except Exception as ex:
+        return f"搬运预处理输出失败: {ex}"
+    return None
+
+
 def build_last_command_signature(commands: List[Tuple[str, List[str]]]) -> Dict[str, str]:
     if not commands:
         return {"last_step_title": "", "last_cmd": "", "last_cmd_sha256": ""}
@@ -544,6 +572,12 @@ def main() -> None:
                     ok = False
                     fail_reason = msg
                     break
+                if title == "预处理目标图" and not args.dry_run:
+                    move_err = relocate_preprocess_output_to_output_dir(source_file, output_dir)
+                    if move_err:
+                        ok = False
+                        fail_reason = move_err
+                        break
 
             if ok:
                 if not args.dry_run:
