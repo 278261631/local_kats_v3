@@ -223,7 +223,12 @@ def build_session(cfg: RuntimeConfig) -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": cfg.user_agent})
     if cfg.disable_proxy:
+        # requests 默认会读取环境变量代理；关闭它以确保彻底禁用代理。
+        session.trust_env = False
         session.proxies = {"http": None, "https": None}
+        logging.info("网络配置: 已禁用代理（忽略环境变量代理设置）")
+    else:
+        logging.info("网络配置: 允许使用系统/环境代理")
     if not cfg.verify_ssl:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     return session
