@@ -5414,6 +5414,40 @@ class FitsImageViewer:
         thread.daemon = True
         thread.start()
 
+    def _run_ui_callable_sync(self, callback, default=None, timeout_sec: float = 20.0):
+        """在后台线程中同步投递 UI 回调到主线程执行，并返回结果。"""
+        if not callable(callback):
+            return default
+
+        # 已在主线程时直接执行，避免不必要的 after 调度。
+        if threading.current_thread() is threading.main_thread():
+            return callback()
+
+        result_holder = {"value": default, "error": None}
+        done_event = threading.Event()
+
+        def _invoke():
+            try:
+                result_holder["value"] = callback()
+            except Exception as e:
+                result_holder["error"] = e
+            finally:
+                done_event.set()
+
+        try:
+            self.parent_frame.after(0, _invoke)
+        except Exception as e:
+            self.logger.warning("UI调度失败，回退默认值: %s", e)
+            return default
+
+        if not done_event.wait(timeout=max(0.1, float(timeout_sec))):
+            self.logger.warning("等待主线程执行UI回调超时，回退默认值")
+            return default
+
+        if result_holder["error"] is not None:
+            raise result_holder["error"]
+        return result_holder["value"]
+
     def _execute_diff_thread(self, template_dir):
         """在后台线程中执行diff操作"""
         try:
@@ -5455,7 +5489,10 @@ class FitsImageViewer:
                 self.parent_frame.after(0, lambda: self.open_output_dir_btn.config(state="normal"))
 
                 # 直接显示CSV候选
-                csv_displayed = self._display_first_detection_cutouts(output_dir)
+                csv_displayed = self._run_ui_callable_sync(
+                    lambda od=output_dir: self._display_first_detection_cutouts(od),
+                    default=False,
+                )
                 if csv_displayed:
                     self.logger.info("已显示已有的CSV候选")
                 else:
@@ -5916,7 +5953,10 @@ class FitsImageViewer:
                 csv_displayed = False
                 output_dir = result.get('output_directory')
                 if output_dir:
-                    csv_displayed = self._display_first_detection_cutouts(output_dir)
+                    csv_displayed = self._run_ui_callable_sync(
+                        lambda od=output_dir: self._display_first_detection_cutouts(od),
+                        default=False,
+                    )
 
                 # 根据是否显示了CSV候选决定后续操作
                 if csv_displayed:
@@ -13053,6 +13093,12 @@ class FitsImageViewer:
             def update_progress():
                 nonlocal processed, success_count, skip_count, error_count, total_queried, total_found
 
+                try:
+                    if not progress_window.winfo_exists():
+                        return
+                except Exception:
+                    return
+
                 # 获取所有可用结果
                 while not result_queue.empty():
                     result = result_queue.get()
@@ -13069,13 +13115,20 @@ class FitsImageViewer:
                         self.logger.error(f"处理文件 {result.get('filename')} 失败: {result.get('error')}")
 
                 # 更新UI
-                progress_bar['value'] = processed
-                progress_label.config(text=f"处理进度: {processed}/{len(files_to_process)}")
-                stats_label.config(text=f"成功: {success_count} | 跳过: {skip_count} | 错误: {error_count}")
+                try:
+                    progress_bar['value'] = processed
+                    progress_label.config(text=f"处理进度: {processed}/{len(files_to_process)}")
+                    stats_label.config(text=f"成功: {success_count} | 跳过: {skip_count} | 错误: {error_count}")
+                except Exception:
+                    return
 
                 # 检查是否完成
                 if processed < len(files_to_process):
-                    progress_window.after(100, update_progress)
+                    try:
+                        if progress_window.winfo_exists():
+                            progress_window.after(100, update_progress)
+                    except Exception:
+                        return
                 else:
                     # 等待所有线程完成
                     for t in threads:
@@ -13093,7 +13146,11 @@ class FitsImageViewer:
                     )
                     self.logger.info(final_stats)
                     # messagebox.showinfo("查询完成", final_stats)
-                    progress_window.destroy()
+                    try:
+                        if progress_window.winfo_exists():
+                            progress_window.destroy()
+                    except Exception:
+                        pass
 
                     # 恢复之前的显示状态
                     if saved_file_path and saved_cutout_sets:
@@ -13343,6 +13400,12 @@ class FitsImageViewer:
                 nonlocal processed, success_count, skip_count, error_count, total_queried, total_found
                 nonlocal total_skipped_skybot, total_skipped_vsx
 
+                try:
+                    if not progress_window.winfo_exists():
+                        return
+                except Exception:
+                    return
+
                 # 获取所有可用结果
                 while not result_queue.empty():
                     result = result_queue.get()
@@ -13367,13 +13430,20 @@ class FitsImageViewer:
                         self.logger.error(f"处理文件 {result.get('filename')} 失败: {result.get('error')}")
 
                 # 更新UI
-                progress_bar['value'] = processed
-                progress_label.config(text=f"处理进度: {processed}/{len(files_to_process)}")
-                stats_label.config(text=f"成功: {success_count} | 跳过: {skip_count} | 错误: {error_count}")
+                try:
+                    progress_bar['value'] = processed
+                    progress_label.config(text=f"处理进度: {processed}/{len(files_to_process)}")
+                    stats_label.config(text=f"成功: {success_count} | 跳过: {skip_count} | 错误: {error_count}")
+                except Exception:
+                    return
 
                 # 检查是否完成
                 if processed < len(files_to_process):
-                    progress_window.after(100, update_progress)
+                    try:
+                        if progress_window.winfo_exists():
+                            progress_window.after(100, update_progress)
+                    except Exception:
+                        return
                 else:
                     # 等待所有线程完成
                     for t in threads:
@@ -13394,7 +13464,11 @@ class FitsImageViewer:
                     
                     self.logger.info(f"{backend_label}完成: {final_stats.replace(chr(10), ' ')}")
                     messagebox.showinfo("查询完成", final_stats)
-                    progress_window.destroy()
+                    try:
+                        if progress_window.winfo_exists():
+                            progress_window.destroy()
+                    except Exception:
+                        pass
 
                     # 恢复之前的显示状态
                     if saved_file_path and saved_cutout_sets:
