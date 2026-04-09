@@ -133,6 +133,81 @@ def setup_logging(verbose: bool) -> None:
     )
 
 
+def _is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        # 进程存在但无权限发送信号
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_lock_meta(lock_path: Path) -> Dict[str, object]:
+    try:
+        with lock_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def acquire_date_process_lock(date_text: str, date_dir: Path) -> Path:
+    """
+    基于日期目录获取进程锁，避免同一天重复启动导致并发叠加。
+    """
+    lock_path = date_dir / ".download.lock"
+    lock_meta = {
+        "date": date_text,
+        "pid": os.getpid(),
+        "created_at": int(time.time()),
+        "argv": sys.argv,
+    }
+
+    for attempt in range(2):
+        try:
+            with lock_path.open("x", encoding="utf-8") as f:
+                json.dump(lock_meta, f, ensure_ascii=False, indent=2)
+            return lock_path
+        except FileExistsError:
+            existing = _read_lock_meta(lock_path)
+            existing_pid = int(existing.get("pid", 0) or 0)
+            if attempt == 0 and existing_pid > 0 and not _is_process_alive(existing_pid):
+                logging.warning(
+                    "发现陈旧日期锁，准备清理后重试: %s (pid=%s)",
+                    str(lock_path),
+                    existing_pid,
+                )
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                except Exception:
+                    # 删除失败则走统一报错
+                    pass
+
+            created_at = existing.get("created_at", "unknown")
+            raise RuntimeError(
+                "检测到同日期任务正在运行，已阻止重复启动。"
+                f" date={date_text}, lock={lock_path}, pid={existing_pid}, created_at={created_at}"
+            )
+
+    raise RuntimeError(f"无法创建日期锁: {lock_path}")
+
+
+def release_date_process_lock(lock_path: Optional[Path]) -> None:
+    if not lock_path:
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception as ex:
+        logging.warning("清理日期锁失败: %s (%s)", str(lock_path), ex)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="console_proc 独立版 FITS 扫描下载",
@@ -385,65 +460,76 @@ def run(args: argparse.Namespace) -> int:
     cfg = load_runtime_config(args)
     session = build_session(cfg)
     files_data_date_dir = prepare_files_data_dir(args.date)
+    lock_path: Optional[Path] = None
+    try:
+        lock_path = acquire_date_process_lock(args.date, files_data_date_dir)
+        logging.info("已获取日期进程锁: %s", str(lock_path))
+    except RuntimeError as ex:
+        logging.error("%s", ex)
+        return 3
+
     files_data_items: List[Dict[str, object]] = []
 
-    if args.region and not args.telescope:
-        logging.error("使用 --region 时必须同时提供 --telescope")
-        return 2
+    try:
+        if args.region and not args.telescope:
+            logging.error("使用 --region 时必须同时提供 --telescope")
+            return 2
 
-    telescopes = [args.telescope] if args.telescope else list(cfg.telescopes)
-    if args.telescope and args.telescope not in cfg.telescopes:
-        logging.warning("配置 telescopes 中未包含 %s，仍将继续处理", args.telescope)
+        telescopes = [args.telescope] if args.telescope else list(cfg.telescopes)
+        if args.telescope and args.telescope not in cfg.telescopes:
+            logging.warning("配置 telescopes 中未包含 %s，仍将继续处理", args.telescope)
 
-    total_regions = 0
-    total_files = 0
-    for tel_name in telescopes:
-        try:
-            if args.region:
-                regions = [normalize_region(args.region)]
-            else:
-                regions = scan_regions(session, cfg, tel_name, args.date)
-                if not regions:
-                    logging.warning("[%s %s] 未扫描到天区", tel_name, args.date)
-                    continue
-        except Exception as ex:
-            logging.error("[%s %s] 扫描天区失败: %s", tel_name, args.date, ex)
-            continue
-
-        for region in regions:
-            total_regions += 1
-            region_url = render_url(cfg.url_template, tel_name, args.date, region)
-            logging.info("[%s/%s/%s] 扫描文件: %s", tel_name, args.date, region, region_url)
+        total_regions = 0
+        total_files = 0
+        for tel_name in telescopes:
             try:
-                files = scan_files_in_region(session, cfg, region_url)
+                if args.region:
+                    regions = [normalize_region(args.region)]
+                else:
+                    regions = scan_regions(session, cfg, tel_name, args.date)
+                    if not regions:
+                        logging.warning("[%s %s] 未扫描到天区", tel_name, args.date)
+                        continue
             except Exception as ex:
-                logging.error("[%s/%s/%s] 扫描失败: %s", tel_name, args.date, region, ex)
+                logging.error("[%s %s] 扫描天区失败: %s", tel_name, args.date, ex)
                 continue
 
-            logging.info("[%s/%s/%s] 找到 FITS: %d", tel_name, args.date, region, len(files))
-            total_files += len(files)
-            target_dir = Path(cfg.download_root) / tel_name / args.date / region
+            for region in regions:
+                total_regions += 1
+                region_url = render_url(cfg.url_template, tel_name, args.date, region)
+                logging.info("[%s/%s/%s] 扫描文件: %s", tel_name, args.date, region, region_url)
+                try:
+                    files = scan_files_in_region(session, cfg, region_url)
+                except Exception as ex:
+                    logging.error("[%s/%s/%s] 扫描失败: %s", tel_name, args.date, region, ex)
+                    continue
 
-            item = dump_region_files_data(
-                date_dir=files_data_date_dir,
-                tel_name=tel_name,
-                date_text=args.date,
-                region=region,
-                region_url=region_url,
-                target_dir=target_dir,
-                files=files,
-            )
-            files_data_items.append(item)
+                logging.info("[%s/%s/%s] 找到 FITS: %d", tel_name, args.date, region, len(files))
+                total_files += len(files)
+                target_dir = Path(cfg.download_root) / tel_name / args.date / region
 
-            if args.scan_only:
-                continue
+                item = dump_region_files_data(
+                    date_dir=files_data_date_dir,
+                    tel_name=tel_name,
+                    date_text=args.date,
+                    region=region,
+                    region_url=region_url,
+                    target_dir=target_dir,
+                    files=files,
+                )
+                files_data_items.append(item)
 
-            download_files(session, cfg, files, target_dir)
+                if args.scan_only:
+                    continue
 
-    dump_files_data_index(files_data_date_dir, files_data_items)
-    logging.info("files_data 索引已生成: %s", str(files_data_date_dir / "index.json"))
-    logging.info("完成: 天区=%d, 文件=%d", total_regions, total_files)
-    return 0
+                download_files(session, cfg, files, target_dir)
+
+        dump_files_data_index(files_data_date_dir, files_data_items)
+        logging.info("files_data 索引已生成: %s", str(files_data_date_dir / "index.json"))
+        logging.info("完成: 天区=%d, 文件=%d", total_regions, total_files)
+        return 0
+    finally:
+        release_date_process_lock(lock_path)
 
 
 def main() -> None:

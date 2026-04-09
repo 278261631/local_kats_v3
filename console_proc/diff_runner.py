@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,6 +26,80 @@ from typing import Any, Dict, List, Optional, Tuple
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+def _is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        # 进程存在但无权限发送信号
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_lock_meta(lock_path: Path) -> Dict[str, Any]:
+    try:
+        with lock_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def acquire_diff_runner_date_lock(date_text: str, date_meta_dir: Path) -> Path:
+    """
+    获取同日期进程锁，避免重复启动导致跨进程并发冲突。
+    """
+    lock_path = date_meta_dir / ".diff_runner.lock"
+    lock_meta: Dict[str, Any] = {
+        "date": date_text,
+        "pid": os.getpid(),
+        "created_at": int(time.time()),
+        "argv": sys.argv,
+    }
+
+    for attempt in range(2):
+        try:
+            with lock_path.open("x", encoding="utf-8") as f:
+                json.dump(lock_meta, f, ensure_ascii=False, indent=2)
+            return lock_path
+        except FileExistsError:
+            existing = _read_lock_meta(lock_path)
+            existing_pid = int(existing.get("pid", 0) or 0)
+            if attempt == 0 and existing_pid > 0 and not _is_process_alive(existing_pid):
+                logging.warning(
+                    "发现陈旧 diff_runner 日期锁，准备清理后重试: %s (pid=%s)",
+                    str(lock_path),
+                    existing_pid,
+                )
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                except Exception:
+                    pass
+
+            created_at = existing.get("created_at", "unknown")
+            raise RuntimeError(
+                "检测到同日期 diff_runner 任务正在运行，已阻止重复启动。"
+                f" date={date_text}, lock={lock_path}, pid={existing_pid}, created_at={created_at}"
+            )
+
+    raise RuntimeError(f"无法创建 diff_runner 日期锁: {lock_path}")
+
+
+def release_diff_runner_date_lock(lock_path: Optional[Path]) -> None:
+    if not lock_path:
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception as ex:
+        logging.warning("清理 diff_runner 日期锁失败: %s (%s)", str(lock_path), ex)
 
 
 def parse_args() -> argparse.Namespace:
@@ -603,138 +678,147 @@ def main() -> None:
     pipeline_settings = merge_dict(default_diff_pipeline_settings(), cfg.get("diff_pipeline_settings", {}))
     max_workers = get_diff_runner_max_workers(cfg)
 
-    items = discover_download_items(download_root, args.date)
+    date_meta_dir = diff_output_root / "_meta" / args.date
+    date_meta_dir.mkdir(parents=True, exist_ok=True)
+    lock_path: Optional[Path] = None
+    try:
+        lock_path = acquire_diff_runner_date_lock(args.date, date_meta_dir)
+        logging.info("已获取 diff_runner 日期进程锁: %s", str(lock_path))
 
-    if args.telescope:
-        items = [x for x in items if str(x.get("telescope", "")).upper() == args.telescope.upper()]
-    if args.region:
-        norm_region = normalize_region(args.region)
-        items = [x for x in items if str(x.get("region", "")).upper() == norm_region]
+        items = discover_download_items(download_root, args.date)
 
-    if not items:
-        logging.warning("无匹配处理项")
-        raise SystemExit(0)
+        if args.telescope:
+            items = [x for x in items if str(x.get("telescope", "")).upper() == args.telescope.upper()]
+        if args.region:
+            norm_region = normalize_region(args.region)
+            items = [x for x in items if str(x.get("region", "")).upper() == norm_region]
 
-    run_result_dir = diff_output_root / "_meta" / args.date / "diff_results"
-    run_result_dir.mkdir(parents=True, exist_ok=True)
+        if not items:
+            logging.warning("无匹配处理项")
+            raise SystemExit(0)
 
-    all_results: List[Dict[str, Any]] = []
-    success = 0
-    failed = 0
-    skipped = 0
-    tasks: List[Dict[str, Any]] = []
+        run_result_dir = date_meta_dir / "diff_results"
+        run_result_dir.mkdir(parents=True, exist_ok=True)
 
-    for item in items:
-        tel = str(item.get("telescope", "")).upper()
-        region = str(item.get("region", "")).upper()
-        date_text = str(item.get("date", args.date))
-        download_dir = Path(str(item.get("download_dir", "")))
-        region_files = collect_region_files(download_dir)
-        if args.max_files and args.max_files > 0:
-            region_files = region_files[: args.max_files]
+        all_results: List[Dict[str, Any]] = []
+        success = 0
+        failed = 0
+        skipped = 0
+        tasks: List[Dict[str, Any]] = []
 
-        logging.info("[%s/%s/%s] 待处理文件数: %d", tel, date_text, region, len(region_files))
-        for source_file in region_files:
-            template_file = find_template_file(template_root, tel, region, source_file)
-            if not template_file:
-                skipped += 1
-                all_results.append(
+        for item in items:
+            tel = str(item.get("telescope", "")).upper()
+            region = str(item.get("region", "")).upper()
+            date_text = str(item.get("date", args.date))
+            download_dir = Path(str(item.get("download_dir", "")))
+            region_files = collect_region_files(download_dir)
+            if args.max_files and args.max_files > 0:
+                region_files = region_files[: args.max_files]
+
+            logging.info("[%s/%s/%s] 待处理文件数: %d", tel, date_text, region, len(region_files))
+            for source_file in region_files:
+                template_file = find_template_file(template_root, tel, region, source_file)
+                if not template_file:
+                    skipped += 1
+                    all_results.append(
+                        {
+                            "status": "skipped",
+                            "reason": "template_not_found",
+                            "date": date_text,
+                            "telescope": tel,
+                            "region": region,
+                            "source_file": str(source_file),
+                        }
+                    )
+                    logging.warning("跳过（未找到模板）: %s", source_file.name)
+                    continue
+
+                output_dir = diff_output_root / tel / date_text / region / sanitize_output_name(source_file.stem)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                tasks.append(
                     {
-                        "status": "skipped",
-                        "reason": "template_not_found",
                         "date": date_text,
                         "telescope": tel,
                         "region": region,
                         "source_file": str(source_file),
+                        "template_file": str(template_file),
+                        "output_dir": str(output_dir),
                     }
                 )
-                logging.warning("跳过（未找到模板）: %s", source_file.name)
-                continue
 
-            output_dir = diff_output_root / tel / date_text / region / sanitize_output_name(source_file.stem)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            tasks.append(
-                {
-                    "date": date_text,
-                    "telescope": tel,
-                    "region": region,
-                    "source_file": str(source_file),
-                    "template_file": str(template_file),
-                    "output_dir": str(output_dir),
-                }
-            )
+        template_locks: Dict[str, threading.Lock] = {}
+        template_locks_guard = threading.Lock()
+        logging.info("开始执行任务: %d, 并发线程: %d", len(tasks), max_workers)
 
-    template_locks: Dict[str, threading.Lock] = {}
-    template_locks_guard = threading.Lock()
-    logging.info("开始执行任务: %d, 并发线程: %d", len(tasks), max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(
+                    run_one_task,
+                    task,
+                    pipeline_settings,
+                    bool(args.force_rerun),
+                    bool(args.dry_run),
+                    template_locks,
+                    template_locks_guard,
+                ): task
+                for task in tasks
+            }
+            for future in as_completed(future_map):
+                task = future_map[future]
+                try:
+                    result = future.result()
+                except Exception as ex:
+                    failed += 1
+                    result = {
+                        "status": "failed",
+                        "reason": f"worker_exception: {ex}",
+                        "date": str(task["date"]),
+                        "telescope": str(task["telescope"]),
+                        "region": str(task["region"]),
+                        "source_file": str(task["source_file"]),
+                        "template_file": str(task["template_file"]),
+                        "output_dir": str(task["output_dir"]),
+                    }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {
-            pool.submit(
-                run_one_task,
-                task,
-                pipeline_settings,
-                bool(args.force_rerun),
-                bool(args.dry_run),
-                template_locks,
-                template_locks_guard,
-            ): task
-            for task in tasks
+                status = str(result.get("status", "failed"))
+                if status == "success":
+                    success += 1
+                elif status == "skipped":
+                    skipped += 1
+                    logging.info("跳过: %s", str(result.get("source_file", "")))
+                else:
+                    failed += 1
+                    logging.error(
+                        "处理失败: %s (%s)",
+                        str(result.get("source_file", "")),
+                        str(result.get("reason", "unknown")),
+                    )
+                all_results.append(result)
+
+        summary = {
+            "date": args.date,
+            "download_root": str(download_root),
+            "max_workers": max_workers,
+            "item_count": len(items),
+            "success": success,
+            "failed": failed,
+            "skipped": skipped,
+            "dry_run": bool(args.dry_run),
+            "results": all_results,
         }
-        for future in as_completed(future_map):
-            task = future_map[future]
-            try:
-                result = future.result()
-            except Exception as ex:
-                failed += 1
-                result = {
-                    "status": "failed",
-                    "reason": f"worker_exception: {ex}",
-                    "date": str(task["date"]),
-                    "telescope": str(task["telescope"]),
-                    "region": str(task["region"]),
-                    "source_file": str(task["source_file"]),
-                    "template_file": str(task["template_file"]),
-                    "output_dir": str(task["output_dir"]),
-                }
+        summary_path = run_result_dir / "diff_summary.json"
+        with summary_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
 
-            status = str(result.get("status", "failed"))
-            if status == "success":
-                success += 1
-            elif status == "skipped":
-                skipped += 1
-                logging.info("跳过: %s", str(result.get("source_file", "")))
-            else:
-                failed += 1
-                logging.error(
-                    "处理失败: %s (%s)",
-                    str(result.get("source_file", "")),
-                    str(result.get("reason", "unknown")),
-                )
-            all_results.append(result)
-
-    summary = {
-        "date": args.date,
-        "download_root": str(download_root),
-        "max_workers": max_workers,
-        "item_count": len(items),
-        "success": success,
-        "failed": failed,
-        "skipped": skipped,
-        "dry_run": bool(args.dry_run),
-        "results": all_results,
-    }
-    summary_path = run_result_dir / "diff_summary.json"
-    with summary_path.open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-
-    logging.info(
-        "完成: success=%d, failed=%d, skipped=%d, summary=%s",
-        success,
-        failed,
-        skipped,
-        summary_path,
-    )
+        logging.info(
+            "完成: success=%d, failed=%d, skipped=%d, summary=%s",
+            success,
+            failed,
+            skipped,
+            summary_path,
+        )
+    finally:
+        release_diff_runner_date_lock(lock_path)
 
 
 if __name__ == "__main__":
