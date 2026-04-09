@@ -1513,8 +1513,10 @@ class FitsImageViewer:
 
             # 构建输出目录路径
             output_region_dir = os.path.join(base_output_dir, relative_path)
-            file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
-            potential_output_dir = os.path.join(output_region_dir, file_basename)
+            file_stem = os.path.splitext(filename)[0]
+            potential_output_dir = self._resolve_output_file_dir_with_legacy_fallback(
+                output_region_dir, file_stem
+            )
 
             # 检查输出目录是否存在
             if not os.path.exists(potential_output_dir) or not os.path.isdir(potential_output_dir):
@@ -1929,8 +1931,10 @@ class FitsImageViewer:
 
                     self.logger.info(f"  输出天区目录: {output_region_dir}")
 
-                    file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
-                    potential_output_dir = os.path.join(output_region_dir, file_basename)
+                    file_stem = os.path.splitext(filename)[0]
+                    potential_output_dir = self._resolve_output_file_dir_with_legacy_fallback(
+                        output_region_dir, file_stem
+                    )
 
                     self.logger.info(f"  检查输出目录: {potential_output_dir}")
                     self.logger.info(f"  目录是否存在: {os.path.exists(potential_output_dir)}")
@@ -4331,10 +4335,25 @@ class FitsImageViewer:
             mapped_region_dir = self._map_download_dir_to_output_dir(region_dir, download_dir, base_output_dir)
             if not mapped_region_dir:
                 return None
-            file_basename = self._sanitize_output_name(os.path.splitext(os.path.basename(file_path))[0])
-            return os.path.normpath(os.path.join(mapped_region_dir, file_basename))
+            file_stem = os.path.splitext(os.path.basename(file_path))[0]
+            return self._resolve_output_file_dir_with_legacy_fallback(mapped_region_dir, file_stem)
         except Exception:
             return None
+
+    def _resolve_output_file_dir_with_legacy_fallback(self, output_region_dir: str, file_stem: str) -> str:
+        """解析单文件输出目录；优先新规则，若不存在则回退旧规则目录名。"""
+        primary_name = self._sanitize_output_name(file_stem)
+        primary_dir = os.path.normpath(os.path.join(output_region_dir, primary_name))
+        if os.path.isdir(primary_dir):
+            return primary_dir
+
+        # 兼容历史 console diff_runner 命名（仅替换非法字符，不压缩/strip）
+        legacy_name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(file_stem))
+        legacy_dir = os.path.normpath(os.path.join(output_region_dir, legacy_name))
+        if legacy_name != primary_name and os.path.isdir(legacy_dir):
+            return legacy_dir
+
+        return primary_dir
 
     def _compress_parent_paths(self, paths):
         """去重并压缩路径列表：若父目录已在列表中，则去掉其子目录。"""
@@ -13668,8 +13687,10 @@ class FitsImageViewer:
             # 构建输出目录路径
             filename = os.path.basename(file_path)
             output_region_dir = os.path.join(base_output_dir, relative_path)
-            file_basename = self._sanitize_output_name(os.path.splitext(filename)[0])
-            potential_output_dir = os.path.join(output_region_dir, file_basename)
+            file_stem = os.path.splitext(filename)[0]
+            potential_output_dir = self._resolve_output_file_dir_with_legacy_fallback(
+                output_region_dir, file_stem
+            )
 
             # 检查输出目录是否存在
             if not os.path.exists(potential_output_dir) or not os.path.isdir(potential_output_dir):

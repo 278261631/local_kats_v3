@@ -63,8 +63,12 @@ def normalize_region(region: str) -> str:
 
 
 def sanitize_output_name(name: str) -> str:
-    # 复用 GUI 的思路：输出名仅保留安全字符
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+    # 与 GUI 保持一致：替换非法字符、压缩连续下划线、去除首尾点/下划线
+    if not name:
+        return "unnamed"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
+    safe = re.sub(r"_+", "_", safe).strip("._")
+    return safe or "unnamed"
 
 
 def is_fits_file(path: Path) -> bool:
