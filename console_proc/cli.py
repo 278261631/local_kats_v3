@@ -316,6 +316,7 @@ def download_one_file(
     output_path: Path,
 ) -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f"{output_path.name}.part")
     if output_path.exists() and output_path.stat().st_size > 0:
         return f"跳过: {output_path.name} (已存在)"
 
@@ -323,18 +324,19 @@ def download_one_file(
         try:
             with session.get(url, timeout=cfg.timeout, stream=True, verify=cfg.verify_ssl) as resp:
                 resp.raise_for_status()
-                with output_path.open("wb") as f:
+                with temp_path.open("wb") as f:
                     for chunk in resp.iter_content(chunk_size=1024 * 128):
                         if chunk:
                             f.write(chunk)
 
-            if output_path.exists() and output_path.stat().st_size > 0:
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                temp_path.replace(output_path)
                 return f"成功: {output_path.name}"
             raise RuntimeError("下载后文件为空")
         except Exception as ex:
-            if output_path.exists():
+            if temp_path.exists():
                 try:
-                    output_path.unlink()
+                    temp_path.unlink()
                 except Exception:
                     pass
             is_last = attempt >= cfg.retry_times - 1
