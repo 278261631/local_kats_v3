@@ -6997,6 +6997,19 @@ class FitsImageViewer:
             return None
         return os.path.normpath(root)
 
+    def _get_configured_zip_output_root_dir(self) -> Optional[str]:
+        """配置的 ZIP 输出根目录（gui_config.last_selected.zip_output_directory）。"""
+        if not self.config_manager:
+            return None
+        try:
+            last_selected = self.config_manager.get_last_selected() or {}
+        except Exception:
+            return None
+        root = str(last_selected.get("zip_output_directory", "") or "").strip()
+        if not root:
+            return None
+        return os.path.normpath(root)
+
     def _export_filtered_aligned_csv_patches(self):
         """主线程按「向下搜」相同规则枚举全部命中，后台逐条导出 Aligned 局部 PNG（无星标）。
 
@@ -7285,16 +7298,20 @@ class FitsImageViewer:
         self, hits: List[Tuple[Any, str, str, int, dict]], condition_summary: str
     ) -> Tuple[int, str, str]:
         """执行网页+ZIP导出，返回 (导出数量, zip路径, 输出目录)。"""
-        root = self._get_configured_diff_output_root_dir()
-        if not root:
-            raise ValueError("请先在配置中设置 diff 输出目录（且路径存在）。")
+        zip_root = self._get_configured_zip_output_root_dir()
+        if zip_root:
+            out_zip_base = Path(zip_root).resolve()
+        else:
+            root = self._get_configured_diff_output_root_dir()
+            if not root:
+                raise ValueError("请先在配置中设置 diff 输出目录（且路径存在）。")
+            root_path = Path(os.path.normpath(root)).resolve()
+            parent_dir = root_path.parent
+            if parent_dir == root_path:
+                raise ValueError("配置的 diff 输出目录没有可用父目录，无法创建 out_zip_yyyymmdd。")
+            out_zip_base = parent_dir
 
-        root_path = Path(os.path.normpath(root)).resolve()
-        parent_dir = root_path.parent
-        if parent_dir == root_path:
-            raise ValueError("配置的 diff 输出目录没有可用父目录，无法创建 out_zip_yyyymmdd。")
-
-        out_zip_dir = parent_dir / f"out_zip_{datetime.now().strftime('%Y%m%d')}"
+        out_zip_dir = out_zip_base / f"out_zip_{datetime.now().strftime('%Y%m%d')}"
         out_zip_dir.mkdir(parents=True, exist_ok=True)
         run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
         stage_dir = out_zip_dir / f"web_export_{run_tag}"

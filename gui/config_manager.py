@@ -55,7 +55,8 @@ class ConfigManager:
                 "download_directory": "E:/fix_data/download",
                 "template_directory": "E:/fix_data/template",
                 "diff_output_directory": "E:/fix_data/output",
-                "detected_directory": "E:/fix_data/output\\detected"
+                "detected_directory": "E:/fix_data/output\\detected",
+                "zip_output_directory": ""
             },
             "download_settings": {
                 "max_workers": 1,

@@ -26,7 +26,8 @@
     "download_directory": "",
     "template_directory": "",
     "diff_output_directory": "",
-    "detected_directory": ""
+    "detected_directory": "",
+    "zip_output_directory": ""
   },
   "download_settings": {
     "max_workers": 1,
