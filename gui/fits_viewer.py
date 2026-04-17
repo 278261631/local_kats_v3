@@ -471,8 +471,17 @@ class FitsImageViewer:
         # o - 查询变星
         top.bind('o', lambda e: self._query_vsx())
 
+        # CSV 条件搜索 / 跳过标记（优先用功能键，避免在 Entry 里误输入字符）
+        # F3 - 向下搜；Shift+F3 - 向上搜
+        top.bind('<F3>', lambda e: self._jump_to_next_csv_row_by_filters())
+        top.bind('<Shift-F3>', lambda e: self._jump_to_prev_csv_row_by_filters())
+        # F2 - 标记/取消跳过（当前行）
+        top.bind('<F2>', lambda e: self._toggle_skip_for_current_csv_row())
+
         self.logger.info(
-            "已绑定全局快捷键: -/[ /k(上一组), =/]/l(下一组), o(查询变星)"
+            "已绑定全局快捷键: "
+            "-/[ /k(上一组), =/]/l(下一组), o(查询变星), "
+            "F3(向下搜), Shift+F3(向上搜), F2(跳过当前行)"
         )
 
     def _create_directory_tree(self, parent):
