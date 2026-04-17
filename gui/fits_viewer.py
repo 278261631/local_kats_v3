@@ -477,11 +477,15 @@ class FitsImageViewer:
         top.bind('<Shift-F3>', lambda e: self._jump_to_prev_csv_row_by_filters())
         # F2 - 标记/取消跳过（当前行）
         top.bind('<F2>', lambda e: self._toggle_skip_for_current_csv_row())
+        # F4 / Shift+F4 - 循环切换 CSV 尺寸
+        top.bind('<F4>', lambda e: self._cycle_csv_candidate_patch_size(direction=1))
+        top.bind('<Shift-F4>', lambda e: self._cycle_csv_candidate_patch_size(direction=-1))
 
         self.logger.info(
             "已绑定全局快捷键: "
             "-/[ /k(上一组), =/]/l(下一组), o(查询变星), "
-            "F3(向下搜), Shift+F3(向上搜), F2(跳过当前行)"
+            "F3(向下搜), Shift+F3(向上搜), F2(跳过当前行), "
+            "F4(CSV尺寸下一档), Shift+F4(CSV尺寸上一档)"
         )
 
     def _create_directory_tree(self, parent):
@@ -1160,7 +1164,7 @@ class FitsImageViewer:
             display_settings = self.config_manager.get_display_settings()
 
             csv_patch_size = str(display_settings.get("csv_candidate_patch_size", "512"))
-            if csv_patch_size not in {"128", "256", "384", "512", "640", "768", "1024"}:
+            if csv_patch_size not in {"100", "128", "256", "384", "512", "640", "768", "1024"}:
                 csv_patch_size = "512"
             self.csv_candidate_patch_size_var.set(csv_patch_size)
 
@@ -1665,6 +1669,24 @@ class FitsImageViewer:
             self._display_csv_candidate_by_index(idx)
         except Exception as e:
             self.logger.warning(f"刷新CSV候选显示失败: {e}")
+
+    def _cycle_csv_candidate_patch_size(self, direction: int = 1):
+        """循环切换 CSV 候选显示尺寸，并刷新当前候选。"""
+        try:
+            if not hasattr(self, "csv_candidate_patch_size_var"):
+                return
+            values = ["100", "128", "256", "384", "512", "640", "768", "1024"]
+            cur = str(self.csv_candidate_patch_size_var.get()).strip()
+            try:
+                idx = values.index(cur)
+            except ValueError:
+                idx = values.index("512") if "512" in values else 0
+            step = -1 if int(direction) < 0 else 1
+            next_idx = (idx + step) % len(values)
+            self.csv_candidate_patch_size_var.set(values[next_idx])
+            self._on_csv_candidate_view_option_changed()
+        except Exception as e:
+            self.logger.warning(f"循环切换CSV尺寸失败: {e}")
 
     def _on_csv_candidate_filter_option_changed(self):
         """CSV候选过滤选项变化时重载候选并刷新显示。"""
