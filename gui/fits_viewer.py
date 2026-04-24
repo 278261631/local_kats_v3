@@ -519,6 +519,16 @@ class FitsImageViewer:
             command=self._rerun_crossmatch_for_selected_node_filtered_rows
         )
         self.rerun_crossmatch_filtered_button.pack(side=tk.LEFT)
+        ttk.Button(
+            refresh_row2,
+            text="筛选A(-1,-1,0)",
+            command=lambda: self._set_csv_filter_quick_modes(var_mode="=-1", mpc_mode="=-1", ai_mode="=0"),
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(
+            refresh_row2,
+            text="筛选B(0,0,1)",
+            command=lambda: self._set_csv_filter_quick_modes(var_mode="=0", mpc_mode="=0", ai_mode="=1"),
+        ).pack(side=tk.LEFT, padx=(6, 0))
         self.crossmatch_rerun_parallel_workers_var = tk.StringVar(value="3")
         ttk.Label(refresh_row2, text="并行").pack(side=tk.LEFT, padx=(8, 2))
         ttk.Entry(
@@ -2732,6 +2742,22 @@ class FitsImageViewer:
         """更新 CSV 条件搜索状态栏。"""
         if hasattr(self, "csv_filter_search_status_var"):
             self.csv_filter_search_status_var.set(str(text))
+
+    def _set_csv_filter_quick_modes(self, var_mode: str, mpc_mode: str, ai_mode: str):
+        """一键设置 CSV 筛选中的 var/mpc/ai 条件。"""
+        if var_mode not in {"=0", "=-1", ">0"}:
+            return
+        if mpc_mode not in {"=0", "=-1", ">0"}:
+            return
+        if ai_mode not in {"=0", "=1", "<0", "all"}:
+            return
+        self.csv_search_variable_count_mode_var.set(var_mode)
+        self.csv_search_mpc_count_mode_var.set(mpc_mode)
+        self.csv_search_ai_class_mode_var.set(ai_mode)
+        self._save_display_settings()
+        self._set_csv_filter_search_status(
+            f"已应用快捷筛选：var{var_mode} / mpc{mpc_mode} / ai{ai_mode}"
+        )
 
     def _rerun_crossmatch_for_current_csv_row(self):
         """针对当前CSV候选行，重跑 crossmatch_nonref_candidates（--only-rank）。"""
