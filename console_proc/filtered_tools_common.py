@@ -153,6 +153,12 @@ def try_parse_int_from_csv_value(value: Any) -> Optional[int]:
         return None
 
 
+def is_missing_csv_value(value: Any) -> bool:
+    if value is None:
+        return True
+    return str(value).strip() == ""
+
+
 def try_get_float_from_row(row: Dict[str, Any], key_candidates: List[str]) -> Optional[float]:
     for key in key_candidates:
         if key in row:
@@ -171,6 +177,9 @@ def try_get_float_from_row(row: Dict[str, Any], key_candidates: List[str]) -> Op
 
 def csv_count_mode_match(value: Any, mode: str) -> bool:
     iv = try_parse_int_from_csv_value(value)
+    # 兼容历史CSV：计数字段缺失时按 -1 处理。
+    if iv is None and is_missing_csv_value(value):
+        iv = -1
     if iv is None:
         return False
     if mode == "=0":
@@ -244,4 +253,3 @@ def find_primary_aligned_fits_in_output_dir(output_dir: Path) -> Optional[Path]:
     if fallback:
         return fallback[0]
     return None
-

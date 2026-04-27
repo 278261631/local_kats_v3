@@ -2577,9 +2577,18 @@ class FitsImageViewer:
         except Exception:
             return None
 
+    def _is_missing_csv_value(self, value) -> bool:
+        """判断 CSV 字段是否缺失/空值。"""
+        if value is None:
+            return True
+        return str(value).strip() == ""
+
     def _csv_count_mode_match(self, value, mode: str) -> bool:
         """判断计数字段是否满足 =0 / =-1 / >0 三态条件。"""
         iv = self._try_parse_int_from_csv_value(value)
+        # 兼容历史CSV：计数字段缺失时按 -1 处理。
+        if iv is None and self._is_missing_csv_value(value):
+            iv = -1
         if iv is None:
             return False
         if mode == "=0":
