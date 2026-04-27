@@ -13,6 +13,36 @@
   "diff_runner": {
     "max_workers": 2
   },
+  "crossmatch_rerun": {
+    "max_workers": 3
+  },
+  "ai_tools": {
+    "model_path": "gui/classifier_model.joblib",
+    "patch_half_size": 50,
+    "max_workers": 1
+  },
+  "filter_profiles": {
+    "A": {
+      "flux_min": 30.0,
+      "flux_max": 800.0,
+      "variable_count_mode": "=-1",
+      "mpc_count_mode": "=-1",
+      "ai_class_mode": "=0",
+      "skip_mode": "=0",
+      "skip_large_csv": false,
+      "large_csv_max_rows": 200
+    },
+    "B": {
+      "flux_min": 30.0,
+      "flux_max": 800.0,
+      "variable_count_mode": "=0",
+      "mpc_count_mode": "=0",
+      "ai_class_mode": "=1",
+      "skip_mode": "=0",
+      "skip_large_csv": false,
+      "large_csv_max_rows": 200
+    }
+  },
   "network": {
     "timeout": 30,
     "verify_ssl": false,
