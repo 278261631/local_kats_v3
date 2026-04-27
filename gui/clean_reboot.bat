@@ -6,7 +6,7 @@ rem   clean_reboot.bat           -> 倒计时 60 秒后重启（Ctrl+C 可打断
 rem   clean_reboot.bat now       -> 立即重启
 rem   clean_reboot.bat <seconds> -> 倒计时指定秒数后重启（Ctrl+C 可打断）
 
-set "DELAY=30"
+set "DELAY=300"
 
 if /i "%~1"=="now" (
   set "DELAY=0"
