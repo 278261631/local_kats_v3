@@ -144,6 +144,46 @@ def write_csv_rows(csv_path: Path, rows: List[Dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def ensure_csv_default_fields(csv_path: Path) -> Dict[str, int]:
+    """为 CSV 中缺失的 variable_count/mpc_count/ai_class/skip_flag 设置默认值并回写。
+
+    默认值:
+        variable_count → "-1"  (尚未做变星匹配)
+        mpc_count      → "-1"  (尚未做 MPC 匹配)
+        ai_class       → "0"   (尚未做 AI 分类)
+        skip_flag      → "0"   (未被跳过)
+
+    Returns:
+        {"total_rows": 总行数, "changed_rows": 被修改行数}
+    """
+    rows = load_csv_rows(csv_path)
+    if not rows:
+        return {"total_rows": 0, "changed_rows": 0}
+
+    changed_rows = 0
+    for row in rows:
+        modified = False
+        if is_missing_csv_value(row.get("variable_count")):
+            row["variable_count"] = "-1"
+            modified = True
+        if is_missing_csv_value(row.get("mpc_count")):
+            row["mpc_count"] = "-1"
+            modified = True
+        if is_missing_csv_value(row.get("ai_class")):
+            row["ai_class"] = "0"
+            modified = True
+        if is_missing_csv_value(row.get("skip_flag")):
+            row["skip_flag"] = "0"
+            modified = True
+        if modified:
+            changed_rows += 1
+
+    if changed_rows > 0:
+        write_csv_rows(csv_path, rows)
+
+    return {"total_rows": len(rows), "changed_rows": changed_rows}
+
+
 def try_parse_int_from_csv_value(value: Any) -> Optional[int]:
     if value is None:
         return None

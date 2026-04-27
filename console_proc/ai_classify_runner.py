@@ -21,6 +21,7 @@ from torchvision.models import ResNet18_Weights, resnet18
 
 from filtered_tools_common import (
     discover_candidate_csvs,
+    ensure_csv_default_fields,
     find_primary_aligned_fits_in_output_dir,
     load_csv_rows,
     load_filter_profile,
@@ -180,6 +181,7 @@ def process_one_csv(
     patch_half_size: int,
     dry_run: bool,
 ) -> Dict[str, int]:
+    ensure_csv_default_fields(csv_path)
     rows = load_csv_rows(csv_path)
     output_dir = csv_path.parent
     skip_large_csv = bool(profile.get("skip_large_csv", False))
