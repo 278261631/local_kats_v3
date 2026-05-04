@@ -7218,6 +7218,7 @@ class FitsImageViewer:
         condition_summary: str,
         patch_size_px: int,
         hist_level: str,
+        empty_message: str = "",
     ) -> str:
         """生成筛选导出网页 HTML。"""
         import html
@@ -7258,6 +7259,14 @@ class FitsImageViewer:
                 )
             )
         groups_html = "\n".join(group_blocks)
+        if not groups_html:
+            empty_text = empty_message or "当前筛选条件没有命中任何 CSV 行。"
+            groups_html = (
+                '<section class="group">'
+                '<h3>筛选结果为 0</h3>'
+                f'<p>{html.escape(empty_text)}</p>'
+                "</section>"
+            )
 
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -7328,14 +7337,9 @@ class FitsImageViewer:
         self._save_display_settings()
         stats: Dict[str, int] = {"skipped_large_csv": 0}
         hits = list(self._iter_csv_filter_hits_from_context(ctx, 1, stop_after_first=False, stats=stats))
-        if not hits:
-            msg = "在整棵树内，向下未找到满足条件的 CSV 行。"
-            if ctx["skip_large_csv"]:
-                msg += f"\n（跳过大 CSV 的文件数：{stats.get('skipped_large_csv', 0)}）"
-            messagebox.showinfo("提示", msg)
-            return
-
         condition_summary = ctx["condition_summary"]
+        if not hits and ctx["skip_large_csv"]:
+            condition_summary += f"\n跳过大 CSV 的文件数：{stats.get('skipped_large_csv', 0)}"
 
         def worker():
             try:
@@ -7396,6 +7400,7 @@ class FitsImageViewer:
         aligned_data = None
         aligned_header = None
         n_ok = 0
+        empty_message = "当前筛选条件没有命中任何 CSV 行。" if not hits else ""
 
         try:
             for seq_idx, (_node, _file_path, output_dir, raw_idx, row) in enumerate(hits):
@@ -7454,14 +7459,17 @@ class FitsImageViewer:
                 )
                 n_ok += 1
 
-            if n_ok == 0:
-                raise ValueError("没有可导出的候选（缺少 aligned FITS、坐标解析失败或写入失败）。")
+            if n_ok == 0 and hits:
+                empty_message = "没有可导出的候选（缺少 aligned FITS、坐标解析失败或写入失败）。"
+                self.logger.warning(empty_message)
+                print(empty_message)
 
             html_text = self._build_filtered_web_export_html(
                 items,
                 condition_summary=condition_summary,
                 patch_size_px=patch_size_px,
                 hist_level=hist_level,
+                empty_message=empty_message,
             )
             (stage_dir / "index.html").write_text(html_text, encoding="utf-8")
             (stage_dir / "meta.json").write_text(
@@ -7472,6 +7480,7 @@ class FitsImageViewer:
                         "patch_size_px": patch_size_px,
                         "hist_level": hist_level,
                         "count": n_ok,
+                        "empty_message": empty_message,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -7479,7 +7488,8 @@ class FitsImageViewer:
                 encoding="utf-8",
             )
 
-            zip_path = out_zip_dir / f"csv_filtered_web_{run_tag}.zip"
+            result_tag = "filter_results_0_" if n_ok == 0 else ""
+            zip_path = out_zip_dir / f"csv_filtered_web_{result_tag}{run_tag}.zip"
             with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for p in sorted(stage_dir.rglob("*")):
                     if p.is_file():

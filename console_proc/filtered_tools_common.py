@@ -59,6 +59,11 @@ def load_filter_profile(cfg: Dict[str, Any], profile_name: str) -> Dict[str, Any
     merged_profiles = merge_dict(default_filter_profiles(), cfg.get("filter_profiles", {}))
     key = str(profile_name).strip().upper() or "A"
     if key not in merged_profiles:
+        for candidate in merged_profiles.keys():
+            if str(candidate).strip().upper() == key:
+                key = candidate
+                break
+    if key not in merged_profiles:
         raise ValueError(f"未知筛选配置: {profile_name}，可选: {', '.join(sorted(merged_profiles.keys()))}")
 
     p = dict(merged_profiles[key])
