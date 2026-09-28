@@ -1,0 +1,6 @@
+PySide6>=6.5
+numpy
+astropy
+scipy
+torch
+opencv-python
