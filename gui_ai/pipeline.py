@@ -77,19 +77,6 @@ def _downscale_f32(arr: np.ndarray, max_side: int) -> np.ndarray:
     return out
 
 
-def _dedup(dets: List[Dict], radius: float) -> List[Dict]:
-    """按分数降序贪心去重（跨瓦片同一目标只保留最高分）。"""
-    if not dets:
-        return []
-    r2 = float(radius) ** 2
-    kept: List[Dict] = []
-    for d in sorted(dets, key=lambda x: -x["score"]):
-        if any((d["x"] - k["x"]) ** 2 + (d["y"] - k["y"]) ** 2 <= r2 for k in kept):
-            continue
-        kept.append(d)
-    return kept
-
-
 def process_b_file(
     b_path: str,
     model: PairModel,
@@ -116,11 +103,14 @@ def process_b_file(
         "height": 0,
         "detections": [],
         "n_tiles": 0,
+        "n_keep": 0,
+        "n_total": 0,
         "mean_dx": 0.0,
         "mean_dy": 0.0,
         "mean_roll": 0.0,
         "a_u8": None,
         "b_raw": None,
+        "ob_prev": None,
         "preview_scale": 1.0,
         "elapsed": 0.0,
         "error": None,
@@ -159,6 +149,12 @@ def process_b_file(
     result["n_tiles"] = len(tiles)
     log(f"瓦片数: {len(tiles)} (tile={tile_size}, overlap={overlap:.0%})")
 
+    # ob 掩码在预览尺度上累加，供叠加显示
+    prev_scale = min(1.0, float(preview_max_side) / float(max(h, w)))
+    ph = max(1, int(round(h * prev_scale)))
+    pw = max(1, int(round(w * prev_scale)))
+    ob_prev = None
+
     batch_a: List[np.ndarray] = []
     batch_b: List[np.ndarray] = []
     origins: List[tuple] = []
@@ -166,24 +162,48 @@ def process_b_file(
     poses: List[tuple] = []
 
     def flush() -> None:
+        nonlocal ob_prev
         if not batch_a:
             return
+        import cv2
+
         out = model.infer_tiles(batch_a, batch_b, tile_size)
         for (x0, y0), r in zip(origins, out):
             poses.append((r["dx"], r["dy"], r["roll"]))
+            # 累加 ob 掩码到预览尺度
+            m = r.get("masks")
+            if m is not None:
+                if ob_prev is None:
+                    ob_prev = np.zeros((ph, pw, m.shape[0]), dtype=np.uint8)
+                x0p = int(round(x0 * prev_scale))
+                y0p = int(round(y0 * prev_scale))
+                x1p = min(pw, max(x0p + 1, int(round((x0 + tile_size) * prev_scale))))
+                y1p = min(ph, max(y0p + 1, int(round((y0 + tile_size) * prev_scale))))
+                tw, th = x1p - x0p, y1p - y0p
+                for c in range(min(m.shape[0], ob_prev.shape[2])):
+                    mc = cv2.resize(
+                        m[c].astype(np.float32), (tw, th), interpolation=cv2.INTER_AREA
+                    )
+                    mcu = np.clip(mc * 255.0, 0, 255).astype(np.uint8)
+                    np.maximum(
+                        ob_prev[y0p:y1p, x0p:x1p, c], mcu,
+                        out=ob_prev[y0p:y1p, x0p:x1p, c],
+                    )
             for pk in r["peaks"]:
                 fx = x0 + pk["x"]
                 fy = y0 + pk["y"]
                 xi = min(w - 1, max(0, int(round(fx))))
                 yi = min(h - 1, max(0, int(round(fy))))
-                if not valid[yi, xi]:
-                    continue  # B 未覆盖区域，忽略
+                status = pk.get("status", "keep")
+                if status == "keep" and not valid[yi, xi]:
+                    status = "b_uncovered"
                 dets.append(
                     {
                         "x": float(fx),
                         "y": float(fy),
                         "score": float(pk["score"]),
                         "cls": int(pk["cls"]),
+                        "status": status,
                         "dx": float(r["dx"]),
                         "dy": float(r["dy"]),
                         "roll": float(r["roll"]),
@@ -203,9 +223,20 @@ def process_b_file(
             flush()
     flush()
 
-    dets = _dedup(dets, dedup_radius)
+    # 跨瓦片去重：把重复标记为 dedup（保留在结果里，便于排查）
+    r2 = float(dedup_radius) ** 2
+    dets.sort(key=lambda d: -d["score"])
+    kept: List[Dict] = []
+    for d in dets:
+        if d["status"] == "keep":
+            if any((d["x"] - k["x"]) ** 2 + (d["y"] - k["y"]) ** 2 <= r2 for k in kept):
+                d["status"] = "dedup"
+            else:
+                kept.append(d)
     dets.sort(key=lambda d: -d["score"])
     result["detections"] = dets
+    result["n_total"] = len(dets)
+    result["n_keep"] = sum(1 for d in dets if d["status"] == "keep")
     if poses:
         arr = np.asarray(poses, dtype=np.float64)
         result["mean_dx"] = float(np.mean(np.abs(arr[:, 0])))
@@ -215,11 +246,12 @@ def process_b_file(
     a_prev, s = _downscale_u8(a_u8, preview_max_side)
     result["a_u8"] = a_prev
     result["b_raw"] = _downscale_f32(b_filled, preview_max_side)
+    result["ob_prev"] = ob_prev
     result["preview_scale"] = s
     result["elapsed"] = time.perf_counter() - t0
     log(
-        f"完成 {os.path.basename(b_path)}: 检测 {len(dets)} 个, "
-        f"|pose| dx={result['mean_dx']:.2f} dy={result['mean_dy']:.2f} "
+        f"完成 {os.path.basename(b_path)}: 命中 {result['n_keep']}/{result['n_total']} "
+        f"(原始峰值), |pose| dx={result['mean_dx']:.2f} dy={result['mean_dy']:.2f} "
         f"roll={result['mean_roll']:.2f}°, 用时 {result['elapsed']:.1f}s"
     )
     return result

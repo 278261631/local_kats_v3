@@ -38,6 +38,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFileSystemModel,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -48,6 +50,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -62,10 +65,39 @@ from config import DEFAULTS
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
 
-_COLUMNS = ["文件", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
+_COLUMNS = ["文件", "状态", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
+
+_STATUS_TEXT = {
+    "keep": "命中",
+    "ob_unusable": "ob遮蔽",
+    "ob_satellite": "ob卫星",
+    "b_uncovered": "B未覆盖",
+    "dedup": "重复",
+}
+_STATUS_COLOR = {
+    "ob_unusable": QColor(200, 200, 200),
+    "ob_satellite": QColor(255, 170, 80),
+    "b_uncovered": QColor(150, 150, 200),
+    "dedup": QColor(160, 160, 160),
+}
+
+
+def _det_status_color(status: str) -> QColor:
+    return _DET_COLOR if status == "keep" else _STATUS_COLOR.get(status, _DET_COLOR)
+
+
+# ob 掩码叠加颜色：A-unusable 青、B-unusable 红、B-satellite 橙
+_OB_A_UNUSABLE_RGB = (0, 200, 255)
+_OB_B_UNUSABLE_RGB = (230, 60, 60)
+_OB_B_SAT_RGB = (255, 170, 0)
+
+
+def _swatch(color) -> str:
+    c = QColor(*color) if isinstance(color, tuple) else color
+    return f'<span style="color:{c.name()}">\u25a0</span>'
 
 
 def numpy_to_qimage(arr: np.ndarray) -> QImage:
@@ -74,6 +106,28 @@ def numpy_to_qimage(arr: np.ndarray) -> QImage:
     img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8).copy()
     # 转 RGB 以便绘制彩色检测圈
     return img.convertToFormat(QImage.Format_RGB888)
+
+
+def rgb_to_qimage(rgb: np.ndarray) -> QImage:
+    rgb = np.ascontiguousarray(rgb)
+    h, w, _ = rgb.shape
+    return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+
+
+def gray_to_rgb(gray: np.ndarray) -> np.ndarray:
+    return np.repeat(gray[:, :, None], 3, axis=2)
+
+
+def overlay_ob(rgb: np.ndarray, ob: np.ndarray, channels: Dict[int, tuple]) -> np.ndarray:
+    """把 ob 掩码以半透明色叠加到 RGB 图上。channels: {通道: (r,g,b)}。"""
+    out = rgb.astype(np.float32)
+    for c, col in channels.items():
+        if c >= ob.shape[2]:
+            continue
+        a = (ob[:, :, c].astype(np.float32) / 255.0 * 0.5)[:, :, None]
+        colv = np.array(col, dtype=np.float32)[None, None, :]
+        out = out * (1.0 - a) + colv * a
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
 def _mtf(m: float, x: np.ndarray) -> np.ndarray:
@@ -378,8 +432,36 @@ class MainWindow(QMainWindow):
         hint = QLabel("（Tab 切换；全图模式下点击十字可切到裁切）")
         hint.setStyleSheet("color:#666;")
         vrow.addWidget(hint)
+        vrow.addSpacing(12)
+        self.show_filtered_check = QCheckBox("显示被过滤结果")
+        self.show_filtered_check.setChecked(True)
+        self.show_filtered_check.stateChanged.connect(lambda _=0: self._rebuild_table())
+        vrow.addWidget(self.show_filtered_check)
+        self.overlay_ob_check = QCheckBox("叠加 ob 掩码")
+        self.overlay_ob_check.setChecked(False)
+        self.overlay_ob_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.overlay_ob_check)
         vrow.addStretch(1)
         pw.addLayout(vrow)
+
+        legend = QLabel()
+        legend.setTextFormat(Qt.RichText)
+        legend.setWordWrap(True)
+        legend.setStyleSheet("font-size:11px; color:#333; padding:2px;")
+        legend.setText(
+            "<b>标注颜色：</b>"
+            + _swatch(_DET_COLOR) + " 命中(keep)　"
+            + _swatch(_STATUS_COLOR["ob_unusable"]) + " ob遮蔽(B-unusable)　"
+            + _swatch(_STATUS_COLOR["ob_satellite"]) + " ob卫星(B-satellite)　"
+            + _swatch(_STATUS_COLOR["b_uncovered"]) + " B未覆盖　"
+            + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
+            + _swatch(_SEL_COLOR) + " 当前选中"
+            + "　　|　　<b>ob 掩码叠加：</b>"
+            + _swatch(_OB_A_UNUSABLE_RGB) + " A-unusable　"
+            + _swatch(_OB_B_UNUSABLE_RGB) + " B-unusable　"
+            + _swatch(_OB_B_SAT_RGB) + " B-satellite"
+        )
+        pw.addWidget(legend)
 
         tabs = QTabWidget()
         self.table = QTableWidget(0, len(_COLUMNS))
@@ -395,6 +477,25 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
         tabs.addTab(self.log_view, "运行日志")
+
+        montage_wrap = QWidget()
+        mv = QVBoxLayout(montage_wrap)
+        mrow = QHBoxLayout()
+        self.montage_btn = QPushButton("生成小图墙")
+        self.montage_btn.clicked.connect(self._build_montage)
+        self.montage_info = QLabel("（每个检测一张 A|B 裁切；双击单元格可跳转到该行）")
+        self.montage_info.setStyleSheet("color:#666;")
+        mrow.addWidget(self.montage_btn)
+        mrow.addWidget(self.montage_info)
+        mrow.addStretch(1)
+        mv.addLayout(mrow)
+        self.montage_area = QScrollArea()
+        self.montage_area.setWidgetResizable(True)
+        self.montage_container = QWidget()
+        self.montage_grid = QGridLayout(self.montage_container)
+        self.montage_area.setWidget(self.montage_container)
+        mv.addWidget(self.montage_area)
+        tabs.addTab(montage_wrap, "小图墙")
 
         splitter.addWidget(preview_wrap)
         splitter.addWidget(tabs)
@@ -482,24 +583,49 @@ class MainWindow(QMainWindow):
     def _on_finished(self) -> None:
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self._log(f"==== 处理结束，命中检测 {self.table.rowCount()} 条 ====")
+        n_keep = sum(int(r.get("n_keep", 0)) for r in self._results)
+        self._log(
+            f"==== 处理结束，命中 {n_keep} 条（表格显示 {self.table.rowCount()} 行）===="
+        )
+
+    def _append_detection_row(self, res: Dict, d: Dict) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        status = d.get("status", "keep")
+        vals = [
+            os.path.basename(res["b_path"]),
+            _STATUS_TEXT.get(status, status),
+            f"{d['x']:.1f}", f"{d['y']:.1f}", f"{d['score']:.3f}",
+            f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
+            str(d["tile_x"]), str(d["tile_y"]),
+        ]
+        for c, v in enumerate(vals):
+            item = QTableWidgetItem(v)
+            if c == 1 and status in _STATUS_COLOR:
+                item.setForeground(_STATUS_COLOR[status])
+            self.table.setItem(row, c, item)
+        entry = dict(d)
+        entry["_result"] = res
+        self._row_map.append(entry)
+
+    def _rebuild_table(self) -> None:
+        self.table.setRowCount(0)
+        self._row_map.clear()
+        show_all = self.show_filtered_check.isChecked()
+        for res in self._results:
+            for d in res["detections"]:
+                if not show_all and d.get("status", "keep") != "keep":
+                    continue
+                self._append_detection_row(res, d)
+        self._refresh_preview()
 
     def _on_file_done(self, res: Dict) -> None:
         self._results.append(res)
+        show_all = self.show_filtered_check.isChecked()
         for d in res["detections"]:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            name = os.path.basename(res["b_path"])
-            vals = [
-                name, f"{d['x']:.1f}", f"{d['y']:.1f}", f"{d['score']:.3f}",
-                f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
-                str(d["tile_x"]), str(d["tile_y"]),
-            ]
-            for c, v in enumerate(vals):
-                self.table.setItem(row, c, QTableWidgetItem(v))
-            entry = dict(d)
-            entry["_result"] = res
-            self._row_map.append(entry)
+            if not show_all and d.get("status", "keep") != "keep":
+                continue
+            self._append_detection_row(res, d)
         # 每个文件处理完都刷新一次预览（无选中行时显示该文件全图叠加）
         self._refresh_preview()
 
@@ -568,8 +694,9 @@ class MainWindow(QMainWindow):
         a = res["a_u8"]
         b_raw = res["b_raw"]
         s = res["preview_scale"]
-
-        a_img = numpy_to_qimage(a)
+        ob = res.get("ob_prev")
+        show_ob = self.overlay_ob_check.isChecked() and ob is not None
+        show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
         mode_crop = self.view_combo.currentIndex() == 1 and entry is not None
@@ -583,21 +710,42 @@ class MainWindow(QMainWindow):
             y1 = int(min(a.shape[0], round(cy + half)))
             x1 = max(x1, x0 + 1)
             y1 = max(y1, y0 + 1)
-            a_img = a_img.copy(x0, y0, x1 - x0, y1 - y0)
+            a_gray = a[y0:y1, x0:x1]
             # B：先按局部裁剪，再对局部做（线性）自适应拉伸
-            b_img = numpy_to_qimage(_linear_u8(b_raw[y0:y1, x0:x1]))
+            b_gray = _linear_u8(b_raw[y0:y1, x0:x1])
+            ob_crop = ob[y0:y1, x0:x1] if ob is not None else None
             px, py = cx - x0, cy - y0
+        else:
+            a_gray = a
+            # B：按全图做自适应拉伸（STF）
+            b_gray = _stretch_u8(b_raw)
+            ob_crop = ob
+            px = py = 0.0
+
+        a_rgb = gray_to_rgb(a_gray)
+        b_rgb = gray_to_rgb(b_gray)
+        if show_ob and ob_crop is not None:
+            # A：通道0 A-unusable；B：通道1 B-unusable、通道2 B-satellite
+            a_rgb = overlay_ob(a_rgb, ob_crop, {0: _OB_A_UNUSABLE_RGB})
+            b_rgb = overlay_ob(b_rgb, ob_crop, {1: _OB_B_UNUSABLE_RGB, 2: _OB_B_SAT_RGB})
+
+        a_img = rgb_to_qimage(a_rgb)
+        b_img = rgb_to_qimage(b_rgb)
+
+        if mode_crop:
             size = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
             # A 与 B 同一网格，同一位置都做标注
             self._draw_crosshair(a_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
             self._draw_crosshair(b_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
         else:
-            # B：按全图做自适应拉伸
-            b_img = numpy_to_qimage(_stretch_u8(b_raw))
             for d in res["detections"]:
+                st = d.get("status", "keep")
+                if st != "keep" and not show_all:
+                    continue
                 dx, dy = d["x"] * s, d["y"] * s
-                self._draw_crosshair(a_img, dx, dy, _DET_COLOR)
-                self._draw_crosshair(b_img, dx, dy, _DET_COLOR)
+                col = _det_status_color(st)
+                self._draw_crosshair(a_img, dx, dy, col)
+                self._draw_crosshair(b_img, dx, dy, col)
             if entry is not None and entry["_result"] is res:
                 sx, sy = entry["x"] * s, entry["y"] * s
                 self._draw_crosshair(a_img, sx, sy, _SEL_COLOR)
@@ -612,6 +760,80 @@ class MainWindow(QMainWindow):
             self.preview_b.width(), self.preview_b.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
+    def _make_pair_thumb(self, res: Dict, det: Dict, side: int = 128) -> QPixmap:
+        """生成单个检测的 A|B 裁切缩略图（带十字）。"""
+        a = res.get("a_u8")
+        b_raw = res.get("b_raw")
+        if a is None or b_raw is None:
+            return QPixmap()
+        s = res["preview_scale"]
+        cx, cy = det["x"] * s, det["y"] * s
+        half = max(8.0, float(self.crop_spin.value()) * s / 2.0)
+        x0 = int(max(0, round(cx - half)))
+        y0 = int(max(0, round(cy - half)))
+        x1 = int(min(a.shape[1], round(cx + half)))
+        y1 = int(min(a.shape[0], round(cy + half)))
+        x1 = max(x1, x0 + 1)
+        y1 = max(y1, y0 + 1)
+        a_img = numpy_to_qimage(a[y0:y1, x0:x1])
+        b_img = numpy_to_qimage(_linear_u8(b_raw[y0:y1, x0:x1]))
+        self._draw_crosshair(a_img, cx - x0, cy - y0, _SEL_COLOR)
+        self._draw_crosshair(b_img, cx - x0, cy - y0, _SEL_COLOR)
+        w = a_img.width() + b_img.width()
+        h = max(a_img.height(), b_img.height())
+        combined = QImage(w, h, QImage.Format_RGB888)
+        combined.fill(QColor(0, 0, 0))
+        p = QPainter(combined)
+        p.drawImage(0, 0, a_img)
+        p.drawImage(a_img.width(), 0, b_img)
+        p.end()
+        return QPixmap.fromImage(combined).scaled(
+            side * 2, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _build_montage(self, limit: int = 300) -> None:
+        """把当前所有检测做成小图墙（每格 A|B 裁切 + 信息）。"""
+        while self.montage_grid.count():
+            item = self.montage_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        show_all = self.show_filtered_check.isChecked()
+        cols = 4
+        n = 0
+        for res in self._results:
+            for det in res["detections"]:
+                st = det.get("status", "keep")
+                if st != "keep" and not show_all:
+                    continue
+                if n >= limit:
+                    break
+                pm = self._make_pair_thumb(res, det)
+                cell = QFrame()
+                cell.setFrameShape(QFrame.Box)
+                cl = QVBoxLayout(cell)
+                cl.setContentsMargins(2, 2, 2, 2)
+                img_lbl = QLabel()
+                img_lbl.setPixmap(pm)
+                img_lbl.setAlignment(Qt.AlignCenter)
+                cap = QLabel(
+                    f"{_STATUS_TEXT.get(st, st)}  {det['score']:.2f}\n"
+                    f"({det['x']:.0f},{det['y']:.0f})"
+                )
+                cap.setAlignment(Qt.AlignCenter)
+                cap.setStyleSheet("color:#444; font-size:10px;")
+                cl.addWidget(img_lbl)
+                cl.addWidget(cap)
+                r, c = divmod(n, cols)
+                self.montage_grid.addWidget(cell, r, c)
+                n += 1
+            if n >= limit:
+                break
+        self.montage_info.setText(
+            f"（已生成 {n} 个检测的 A|B 裁切"
+            + ("，已截断" if n >= limit else "")
+            + "）"
+        )
+
     # ---------------------------------------------------------------- export
     def _export_csv(self) -> None:
         if self.table.rowCount() == 0:
@@ -624,10 +846,11 @@ class MainWindow(QMainWindow):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["file", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"])
+            w.writerow(["file", "status", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"])
             for e in self._row_map:
                 w.writerow([
                     os.path.basename(e.get("_result", {}).get("b_path", "")),
+                    e.get("status", "keep"),
                     f"{e['x']:.2f}", f"{e['y']:.2f}", f"{e['score']:.4f}",
                     f"{e['dx']:.3f}", f"{e['dy']:.3f}", f"{e['roll']:.3f}",
                     e["tile_x"], e["tile_y"],

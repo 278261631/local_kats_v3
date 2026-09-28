@@ -137,23 +137,30 @@ class PairModel:
                 peaks = peaks_per[j]
                 masks_j = masks[j] if masks is not None else None
                 # 掩码通道：0=A-unusable, 1=B-unusable, 2=B-satellite
-                drop = None
+                ob_b_unusable = ob_satellite = None
                 if masks_j is not None and masks_j.shape[0] >= 2:
-                    drop = masks_j[1] > 0.5
+                    ob_b_unusable = masks_j[1] > 0.5
                     if masks_j.shape[0] >= 3:
-                        drop = drop | (masks_j[2] > 0.5)
+                        ob_satellite = masks_j[2] > 0.5
 
                 kept = []
                 for cls, xm, ym, sc in peaks:
-                    xt = xm * scale
-                    yt = ym * scale
-                    if drop is not None:
-                        xi = min(drop.shape[1] - 1, max(0, int(round(xt / scale))))
-                        yi = min(drop.shape[0] - 1, max(0, int(round(yt / scale))))
-                        if drop[yi, xi]:
-                            continue
+                    status = "keep"
+                    if ob_b_unusable is not None or ob_satellite is not None:
+                        xi = min(masks_j.shape[2] - 1, max(0, int(round(xm))))
+                        yi = min(masks_j.shape[1] - 1, max(0, int(round(ym))))
+                        if ob_satellite is not None and ob_satellite[yi, xi]:
+                            status = "ob_satellite"
+                        elif ob_b_unusable is not None and ob_b_unusable[yi, xi]:
+                            status = "ob_unusable"
                     kept.append(
-                        {"cls": int(cls), "x": float(xt), "y": float(yt), "score": float(sc)}
+                        {
+                            "cls": int(cls),
+                            "x": float(xm * scale),
+                            "y": float(ym * scale),
+                            "score": float(sc),
+                            "status": status,
+                        }
                     )
 
                 results.append(
