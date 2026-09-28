@@ -19,7 +19,16 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from PySide6.QtCore import QDir, QModelIndex, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QKeySequence,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -65,6 +74,33 @@ def numpy_to_qimage(arr: np.ndarray) -> QImage:
     img = QImage(arr.data, w, h, w, QImage.Format_Grayscale8).copy()
     # 转 RGB 以便绘制彩色检测圈
     return img.convertToFormat(QImage.Format_RGB888)
+
+
+class ClickableLabel(QLabel):
+    """可点击的图片标签，发出点击处在图像像素坐标系中的坐标。"""
+
+    clicked = Signal(float, float)
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text)
+        self._img_w = 0
+        self._img_h = 0
+
+    def set_image_size(self, w: int, h: int) -> None:
+        self._img_w = int(w)
+        self._img_h = int(h)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pm = self.pixmap()
+        if pm is not None and not pm.isNull() and self._img_w > 0 and self._img_h > 0:
+            pw, ph = pm.width(), pm.height()
+            ox = (self.width() - pw) / 2.0
+            oy = (self.height() - ph) / 2.0
+            x = event.position().x() - ox
+            y = event.position().y() - oy
+            if 0 <= x < pw and 0 <= y < ph:
+                self.clicked.emit(x * self._img_w / pw, y * self._img_h / ph)
+        super().mousePressEvent(event)
 
 
 class ProcessWorker(QThread):
@@ -143,6 +179,10 @@ class MainWindow(QMainWindow):
         self._row_map: List[Optional[Dict]] = []  # 表格行 -> 检测项（含 _result 引用）
 
         self._build_ui()
+
+        # Tab 在 全图叠加 / 选中目标裁切 之间切换
+        self.toggle_shortcut = QShortcut(QKeySequence(Qt.Key_Tab), self)
+        self.toggle_shortcut.activated.connect(self._toggle_view)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -241,14 +281,16 @@ class MainWindow(QMainWindow):
     def _build_right_panel(self) -> QWidget:
         splitter = QSplitter(Qt.Vertical)
 
-        preview_box = QGroupBox("预览（左=A 参考，右=B 重投影，红圈=检测，绿=当前）")
+        preview_box = QGroupBox("预览（左=A 参考，右=B 重投影；红=检测，绿=当前；空心十字标注）")
         pl = QHBoxLayout(preview_box)
-        self.preview_a = QLabel("A")
-        self.preview_b = QLabel("B")
+        self.preview_a = ClickableLabel("A")
+        self.preview_b = ClickableLabel("B")
         for lbl in (self.preview_a, self.preview_b):
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setMinimumHeight(300)
             lbl.setStyleSheet("background:#111; color:#888;")
+            lbl.setCursor(Qt.PointingHandCursor)
+            lbl.clicked.connect(self._on_preview_click)
             pl.addWidget(lbl, 1)
 
         preview_wrap = QWidget()
@@ -258,10 +300,22 @@ class MainWindow(QMainWindow):
 
         self.view_combo = QComboBox()
         self.view_combo.addItems(["全图叠加", "选中目标裁切"])
+        self.view_combo.setCurrentIndex(1)
         self.view_combo.currentIndexChanged.connect(lambda _=0: self._refresh_preview())
         vrow = QHBoxLayout()
         vrow.addWidget(QLabel("预览模式:"))
         vrow.addWidget(self.view_combo)
+        vrow.addSpacing(12)
+        vrow.addWidget(QLabel("裁切像素:"))
+        self.crop_spin = QSpinBox()
+        self.crop_spin.setRange(32, 4096)
+        self.crop_spin.setSingleStep(64)
+        self.crop_spin.setValue(DEFAULTS["crop_size"])
+        self.crop_spin.valueChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.crop_spin)
+        hint = QLabel("（Tab 切换；全图模式下点击十字可切到裁切）")
+        hint.setStyleSheet("color:#666;")
+        vrow.addWidget(hint)
         vrow.addStretch(1)
         pw.addLayout(vrow)
 
@@ -400,6 +454,30 @@ class MainWindow(QMainWindow):
     def _on_row_selected(self) -> None:
         self._refresh_preview()
 
+    def _toggle_view(self) -> None:
+        self.view_combo.setCurrentIndex(0 if self.view_combo.currentIndex() == 1 else 1)
+
+    def _on_preview_click(self, ix: float, iy: float) -> None:
+        """全图模式下点击到十字标记附近时，选中该目标并切到裁切模式。"""
+        if self.view_combo.currentIndex() != 0:
+            return
+        res = self._current_result()
+        if not res or res.get("a_u8") is None:
+            return
+        s = res["preview_scale"]
+        r2 = 30.0 ** 2  # 预览像素命中半径
+        best_row: Optional[int] = None
+        best_d2: Optional[float] = None
+        for row, e in enumerate(self._row_map):
+            if e.get("_result") is not res:
+                continue
+            d2 = (e["x"] * s - ix) ** 2 + (e["y"] * s - iy) ** 2
+            if best_d2 is None or d2 < best_d2:
+                best_d2, best_row = d2, row
+        if best_row is not None and best_d2 is not None and best_d2 <= r2:
+            self.table.selectRow(best_row)
+            self.view_combo.setCurrentIndex(1)
+
     def _current_result(self) -> Optional[Dict]:
         entry = self._selected_entry()
         if entry is not None:
@@ -407,10 +485,18 @@ class MainWindow(QMainWindow):
         return self._results[-1] if self._results else None
 
     @staticmethod
-    def _draw_marker(img: QImage, x: float, y: float, color: QColor, r: int = 8) -> None:
+    def _draw_crosshair(
+        img: QImage, x: float, y: float, color: QColor,
+        size: int = 12, gap: int = 4, width: int = 2,
+    ) -> None:
+        """空心十字标注（中心留空）。"""
         p = QPainter(img)
-        p.setPen(QPen(color, 2))
-        p.drawEllipse(int(x) - r, int(y) - r, 2 * r, 2 * r)
+        p.setPen(QPen(color, width))
+        xi, yi = int(round(x)), int(round(y))
+        p.drawLine(xi - size, yi, xi - gap, yi)
+        p.drawLine(xi + gap, yi, xi + size, yi)
+        p.drawLine(xi, yi - size, xi, yi - gap)
+        p.drawLine(xi, yi + gap, xi, yi + size)
         p.end()
 
     def _refresh_preview(self) -> None:
@@ -427,20 +513,32 @@ class MainWindow(QMainWindow):
 
         if mode_crop:
             cx, cy = entry["x"] * s, entry["y"] * s
-            rad = 140
-            x0 = int(max(0, min(a.shape[1] - 1, cx - rad)))
-            y0 = int(max(0, min(a.shape[0] - 1, cy - rad)))
-            x1 = int(min(a.shape[1], x0 + 2 * rad))
-            y1 = int(min(a.shape[0], y0 + 2 * rad))
+            half = max(8.0, float(self.crop_spin.value()) * s / 2.0)
+            x0 = int(max(0, round(cx - half)))
+            y0 = int(max(0, round(cy - half)))
+            x1 = int(min(a.shape[1], round(cx + half)))
+            y1 = int(min(a.shape[0], round(cy + half)))
+            x1 = max(x1, x0 + 1)
+            y1 = max(y1, y0 + 1)
             a_img = a_img.copy(x0, y0, x1 - x0, y1 - y0)
             b_img = b_img.copy(x0, y0, x1 - x0, y1 - y0)
-            self._draw_marker(b_img, cx - x0, cy - y0, _SEL_COLOR)
+            px, py = cx - x0, cy - y0
+            size = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
+            # A 与 B 同一网格，同一位置都做标注
+            self._draw_crosshair(a_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
+            self._draw_crosshair(b_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
         else:
             for d in res["detections"]:
-                self._draw_marker(b_img, d["x"] * s, d["y"] * s, _DET_COLOR)
+                dx, dy = d["x"] * s, d["y"] * s
+                self._draw_crosshair(a_img, dx, dy, _DET_COLOR)
+                self._draw_crosshair(b_img, dx, dy, _DET_COLOR)
             if entry is not None and entry["_result"] is res:
-                self._draw_marker(b_img, entry["x"] * s, entry["y"] * s, _SEL_COLOR)
+                sx, sy = entry["x"] * s, entry["y"] * s
+                self._draw_crosshair(a_img, sx, sy, _SEL_COLOR)
+                self._draw_crosshair(b_img, sx, sy, _SEL_COLOR)
 
+        self.preview_a.set_image_size(a_img.width(), a_img.height())
+        self.preview_b.set_image_size(b_img.width(), b_img.height())
         self.preview_a.setPixmap(QPixmap.fromImage(a_img).scaled(
             self.preview_a.width(), self.preview_a.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation))

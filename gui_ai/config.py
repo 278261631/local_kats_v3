@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 DEFAULTS = {
     # 界面文件树默认根目录
-    "root": "E:/fix_data",
+    "root": "E:/fix_data/download",
     # 参考模板根目录：<root>/<tel小写>/<天区>.fits
     "template_root": "E:/fix_data/template",
     # 模型目录：内含 best.pt / best_info.json（model.py 在本目录内共用）
@@ -22,6 +22,8 @@ DEFAULTS = {
     "tile_size": 256,
     # 相邻瓦片重叠比例（占瓦片宽度的百分比），默认 10%
     "overlap": 0.10,
+    # 预览"选中目标裁切"的裁切边长（原生像素）
+    "crop_size": 256,
     # 检测阈值（sigmoid 分数）
     "det_threshold": 0.35,
     # 跨瓦片去重半径（原生像素）
