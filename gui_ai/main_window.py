@@ -76,6 +76,68 @@ def numpy_to_qimage(arr: np.ndarray) -> QImage:
     return img.convertToFormat(QImage.Format_RGB888)
 
 
+def _mtf(m: float, x: np.ndarray) -> np.ndarray:
+    """中间调传递函数 (Midtone Transfer Function)。m=0.5 时为恒等。"""
+    denom = (2.0 * m - 1.0) * x - m
+    denom = np.where(np.abs(denom) < 1e-8, 1e-8, denom)
+    return np.clip(((m - 1.0) * x) / denom, 0.0, 1.0)
+
+
+def _mtf_solve(x: float, target: float) -> float:
+    """求 m 使 _mtf(m, x) == target（x、target 均已归一化到 (0,1)）。"""
+    if abs(x - target) < 1e-6:
+        return 0.5
+    m = x * (1.0 - target) / (x - target * (2.0 * x - 1.0))
+    return float(min(1.0 - 1e-4, max(1e-4, m)))
+
+
+def _linear_u8(arr: np.ndarray) -> np.ndarray:
+    """局部线性百分位(1/99.5)拉伸；NaN 视为背景。用于裁切预览。"""
+    x = np.asarray(arr, dtype=np.float32)
+    finite = np.isfinite(x)
+    if not finite.any():
+        return np.zeros(x.shape, dtype=np.uint8)
+    v = x[finite]
+    lo, hi = np.percentile(v, (1.0, 99.5))
+    if hi - lo <= 1e-6:
+        lo, hi = float(v.min()), float(v.max())
+    if hi - lo <= 1e-6:
+        return np.zeros(x.shape, dtype=np.uint8)
+    n = (np.nan_to_num(x, nan=lo) - lo) / (hi - lo)
+    return np.clip(n * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
+def _stretch_u8(arr: np.ndarray, target_bg: float = 0.25,
+                shadow_clip: float = -2.8, highlight_pct: float = 99.8) -> np.ndarray:
+    """STF 式自动拉伸（背景锚定 + 中间调传递），NaN 视为背景。
+
+    - 黑点：median - k*MAD（背景锚定，抗亮星/热点影响）
+    - 白点：高百分位
+    - 中间调：把背景映射到 target_bg，非线性提升暗弱细节
+    """
+    x = np.asarray(arr, dtype=np.float32)
+    finite = np.isfinite(x)
+    if not finite.any():
+        return np.zeros(x.shape, dtype=np.uint8)
+    v = x[finite]
+    med = float(np.median(v))
+    mad = float(np.median(np.abs(v - med)))
+    sigma = 1.4826 * mad
+    if sigma > 0:
+        lo = med + shadow_clip * sigma
+    else:
+        lo = float(np.percentile(v, 0.1))
+    hi = float(np.percentile(v, highlight_pct))
+    if hi - lo <= 1e-6:
+        lo, hi = float(v.min()), float(v.max())
+    if hi - lo <= 1e-6:
+        return np.zeros(x.shape, dtype=np.uint8)
+    n = np.clip((np.nan_to_num(x, nan=lo) - lo) / (hi - lo), 0.0, 1.0)
+    bg = float(np.clip((med - lo) / (hi - lo), 1e-4, 1.0 - 1e-4))
+    m = _mtf_solve(bg, target_bg)
+    return np.clip(_mtf(m, n) * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
 class ClickableLabel(QLabel):
     """可点击的图片标签，发出点击处在图像像素坐标系中的坐标。"""
 
@@ -501,12 +563,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_preview(self) -> None:
         res = self._current_result()
-        if not res or res.get("a_u8") is None:
+        if not res or res.get("a_u8") is None or res.get("b_raw") is None:
             return
-        a, b, s = res["a_u8"], res["b_u8"], res["preview_scale"]
+        a = res["a_u8"]
+        b_raw = res["b_raw"]
+        s = res["preview_scale"]
 
         a_img = numpy_to_qimage(a)
-        b_img = numpy_to_qimage(b)
 
         entry = self._selected_entry()
         mode_crop = self.view_combo.currentIndex() == 1 and entry is not None
@@ -521,13 +584,16 @@ class MainWindow(QMainWindow):
             x1 = max(x1, x0 + 1)
             y1 = max(y1, y0 + 1)
             a_img = a_img.copy(x0, y0, x1 - x0, y1 - y0)
-            b_img = b_img.copy(x0, y0, x1 - x0, y1 - y0)
+            # B：先按局部裁剪，再对局部做（线性）自适应拉伸
+            b_img = numpy_to_qimage(_linear_u8(b_raw[y0:y1, x0:x1]))
             px, py = cx - x0, cy - y0
             size = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
             # A 与 B 同一网格，同一位置都做标注
             self._draw_crosshair(a_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
             self._draw_crosshair(b_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
         else:
+            # B：按全图做自适应拉伸
+            b_img = numpy_to_qimage(_stretch_u8(b_raw))
             for d in res["detections"]:
                 dx, dy = d["x"] * s, d["y"] * s
                 self._draw_crosshair(a_img, dx, dy, _DET_COLOR)

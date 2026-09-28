@@ -51,6 +51,32 @@ def _downscale_u8(arr_u8: np.ndarray, max_side: int) -> tuple[np.ndarray, float]
     return out, s
 
 
+def _downscale_f32(arr: np.ndarray, max_side: int) -> np.ndarray:
+    """把原始浮点帧降采样为预览用数组（供局部/全图自适应拉伸）。
+
+    NaN（B 未覆盖）用掩码保留，避免 INTER_AREA 把 NaN 扩散到邻域。
+    """
+    import cv2
+
+    h, w = arr.shape
+    s = min(1.0, float(max_side) / float(max(h, w)))
+    src = np.asarray(arr, dtype=np.float32)
+    if s >= 1.0:
+        return src.copy()
+
+    nw = max(1, int(round(w * s)))
+    nh = max(1, int(round(h * s)))
+    finite = np.isfinite(src)
+    filled = np.where(finite, src, 0.0).astype(np.float32)
+    data_small = cv2.resize(filled, (nw, nh), interpolation=cv2.INTER_AREA)
+    mask_small = cv2.resize(
+        finite.astype(np.float32), (nw, nh), interpolation=cv2.INTER_AREA
+    )
+    out = data_small.astype(np.float32)
+    out[mask_small < 0.5] = np.nan
+    return out
+
+
 def _dedup(dets: List[Dict], radius: float) -> List[Dict]:
     """按分数降序贪心去重（跨瓦片同一目标只保留最高分）。"""
     if not dets:
@@ -94,7 +120,7 @@ def process_b_file(
         "mean_dy": 0.0,
         "mean_roll": 0.0,
         "a_u8": None,
-        "b_u8": None,
+        "b_raw": None,
         "preview_scale": 1.0,
         "elapsed": 0.0,
         "error": None,
@@ -187,8 +213,9 @@ def process_b_file(
         result["mean_roll"] = float(np.mean(np.abs(arr[:, 2])))
 
     a_prev, s = _downscale_u8(a_u8, preview_max_side)
-    b_prev, _ = _downscale_u8(b_u8, preview_max_side)
-    result["a_u8"], result["b_u8"], result["preview_scale"] = a_prev, b_prev, s
+    result["a_u8"] = a_prev
+    result["b_raw"] = _downscale_f32(b_filled, preview_max_side)
+    result["preview_scale"] = s
     result["elapsed"] = time.perf_counter() - t0
     log(
         f"完成 {os.path.basename(b_path)}: 检测 {len(dets)} 个, "

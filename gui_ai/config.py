@@ -25,7 +25,7 @@ DEFAULTS = {
     # 预览"选中目标裁切"的裁切边长（原生像素）
     "crop_size": 256,
     # 检测阈值（sigmoid 分数）
-    "det_threshold": 0.35,
+    "det_threshold": 0.45,
     # 跨瓦片去重半径（原生像素）
     "dedup_radius": 8.0,
     # 批推理 batch size
@@ -35,7 +35,7 @@ DEFAULTS = {
     # 重投影分块行数
     "reproject_chunk_rows": 256,
     # 处理 B 帧时，reproject 后 B 的无效区（nan）是否沿用 A 的灰度
-    "fill_invalid_with_a": True,
+    "fill_invalid_with_a": False,
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
 }
