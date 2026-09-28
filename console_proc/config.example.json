@@ -22,6 +22,13 @@
     "patch_half_size": 50,
     "max_workers": 1
   },
+  "pair_tools": {
+    "model_dir": "../gui/models_tr",
+    "model_in": 0,
+    "cutout_size": 128,
+    "det_threshold": 0.35,
+    "max_workers": 1
+  },
   "filter_profiles": {
     "A": {
       "flux_min": 30.0,
@@ -30,6 +37,8 @@
       "mpc_count_mode": "=-1",
       "ai_class_mode": "=0",
       "skip_mode": "=0",
+      "pair_r_min": 0.0,
+      "pair_r_max": 0.0,
       "skip_large_csv": false,
       "large_csv_max_rows": 200
     },
@@ -40,6 +49,8 @@
       "mpc_count_mode": "=-1",
       "ai_class_mode": "=1",
       "skip_mode": "=0",
+      "pair_r_min": 0.0,
+      "pair_r_max": 0.0,
       "skip_large_csv": false,
       "large_csv_max_rows": 200
     },
@@ -50,6 +61,8 @@
       "mpc_count_mode": "=0",
       "ai_class_mode": "=1",
       "skip_mode": "=0",
+      "pair_r_min": 0.0,
+      "pair_r_max": 0.0,
       "skip_large_csv": true,
       "large_csv_max_rows": 200
     }

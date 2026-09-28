@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,8 @@ def default_filter_profiles() -> Dict[str, Dict[str, Any]]:
             "mpc_count_mode": "=-1",
             "ai_class_mode": "=0",
             "skip_mode": "=0",
+            "pair_r_min": 0.0,
+            "pair_r_max": 0.0,
             "skip_large_csv": False,
             "large_csv_max_rows": 200,
         },
@@ -49,6 +52,8 @@ def default_filter_profiles() -> Dict[str, Dict[str, Any]]:
             "mpc_count_mode": "=0",
             "ai_class_mode": "=1",
             "skip_mode": "=0",
+            "pair_r_min": 0.0,
+            "pair_r_max": 0.0,
             "skip_large_csv": False,
             "large_csv_max_rows": 200,
         },
@@ -84,6 +89,15 @@ def validate_filter_profile(profile: Dict[str, Any]) -> None:
         raise ValueError("ai_class_mode 仅支持 =0 / =1 / <0 / all")
     if str(profile.get("skip_mode", "")).lower() not in {"=0", "=1", "all"}:
         raise ValueError("skip_mode 仅支持 =0 / =1 / all")
+    try:
+        pair_r_min = float(profile.get("pair_r_min", 0.0))
+        pair_r_max = float(profile.get("pair_r_max", 0.0))
+    except Exception as ex:
+        raise ValueError("pair_r_min / pair_r_max 必须为数字") from ex
+    if pair_r_max > 0.0 and not (pair_r_min < pair_r_max):
+        raise ValueError(
+            f"筛选配置 {profile.get('name', '?')} 的 pair 半径区间非法: {pair_r_min} !< {pair_r_max}"
+        )
     if int(profile.get("large_csv_max_rows", 200)) <= 0:
         raise ValueError("large_csv_max_rows 必须 > 0")
 
@@ -139,10 +153,14 @@ def load_csv_rows(csv_path: Path) -> List[Dict[str, str]]:
 
 
 def write_csv_rows(csv_path: Path, rows: List[Dict[str, str]]) -> None:
-    if rows:
-        fieldnames = list(rows[0].keys())
-    else:
-        fieldnames = []
+    # 字段顺序：按首次出现顺序取所有行的键并集，避免某些行新增列时被丢弃。
+    fieldnames: List[str] = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -150,13 +168,18 @@ def write_csv_rows(csv_path: Path, rows: List[Dict[str, str]]) -> None:
 
 
 def ensure_csv_default_fields(csv_path: Path) -> Dict[str, int]:
-    """为 CSV 中缺失的 variable_count/mpc_count/ai_class/skip_flag 设置默认值并回写。
+    """为 CSV 中缺失的字段设置默认值并回写。
 
     默认值:
         variable_count → "-1"  (尚未做变星匹配)
         mpc_count      → "-1"  (尚未做 MPC 匹配)
         ai_class       → "0"   (尚未做 AI 分类)
         skip_flag      → "0"   (未被跳过)
+        pair_class     → "-1"  (尚未做 PairRegNet / 无命中)
+        pair_score     → "0"   (PairRegNet 检测分数)
+        pair_dx        → ""    (PairRegNet 帧间位姿 x，像素)
+        pair_dy        → ""    (PairRegNet 帧间位姿 y，像素)
+        pair_droll     → ""    (PairRegNet 帧间滚转角，度)
 
     Returns:
         {"total_rows": 总行数, "changed_rows": 被修改行数}
@@ -165,21 +188,25 @@ def ensure_csv_default_fields(csv_path: Path) -> Dict[str, int]:
     if not rows:
         return {"total_rows": 0, "changed_rows": 0}
 
+    defaults = [
+        ("variable_count", "-1"),
+        ("mpc_count", "-1"),
+        ("ai_class", "0"),
+        ("skip_flag", "0"),
+        ("pair_class", "-1"),
+        ("pair_score", "0"),
+        ("pair_dx", ""),
+        ("pair_dy", ""),
+        ("pair_droll", ""),
+    ]
+
     changed_rows = 0
     for row in rows:
         modified = False
-        if is_missing_csv_value(row.get("variable_count")):
-            row["variable_count"] = "-1"
-            modified = True
-        if is_missing_csv_value(row.get("mpc_count")):
-            row["mpc_count"] = "-1"
-            modified = True
-        if is_missing_csv_value(row.get("ai_class")):
-            row["ai_class"] = "0"
-            modified = True
-        if is_missing_csv_value(row.get("skip_flag")):
-            row["skip_flag"] = "0"
-            modified = True
+        for key, default_value in defaults:
+            if is_missing_csv_value(row.get(key)):
+                row[key] = default_value
+                modified = True
         if modified:
             changed_rows += 1
 
@@ -266,6 +293,31 @@ def csv_skip_mode_match(value: Any, mode: str) -> bool:
     return False
 
 
+def csv_pair_radius_match(
+    row: Dict[str, Any],
+    pair_r_min: float,
+    pair_r_max: float,
+) -> bool:
+    """按 pair_dx/pair_dy 的综合半径 hypot(dx, dy) 判断是否命中。
+
+    pair_r_max <= 0 视为未启用该条件（直接通过）。启用时若行缺少
+    pair_dx/pair_dy（尚未运行 PairRegNet），则视为不命中。
+    """
+    try:
+        r_min = float(pair_r_min)
+        r_max = float(pair_r_max)
+    except Exception:
+        return True
+    if r_max <= 0.0:
+        return True
+    dx = try_get_float_from_row(row, ["pair_dx"])
+    dy = try_get_float_from_row(row, ["pair_dy"])
+    if dx is None or dy is None:
+        return False
+    r = math.hypot(dx, dy)
+    return r_min < r < r_max
+
+
 def row_matches_filter(row: Dict[str, Any], profile: Dict[str, Any]) -> bool:
     flux_min = float(profile.get("flux_min", 0.0))
     flux_max = float(profile.get("flux_max", 0.0))
@@ -284,6 +336,12 @@ def row_matches_filter(row: Dict[str, Any], profile: Dict[str, Any]) -> bool:
     if not csv_ai_class_mode_match(row.get("ai_class"), ai_mode):
         return False
     if not csv_skip_mode_match(row.get("skip_flag", row.get("skip")), skip_mode):
+        return False
+    if not csv_pair_radius_match(
+        row,
+        profile.get("pair_r_min", 0.0),
+        profile.get("pair_r_max", 0.0),
+    ):
         return False
     return True
 

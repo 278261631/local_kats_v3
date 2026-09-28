@@ -7,6 +7,7 @@ FITS图像查看器
 import os
 import sys
 import re
+import math
 import subprocess
 import platform
 import locale
@@ -547,6 +548,8 @@ class FitsImageViewer:
         self.csv_search_mpc_count_mode_var = tk.StringVar(value="=0")
         self.csv_search_ai_class_mode_var = tk.StringVar(value="=0")
         self.csv_search_skip_mode_var = tk.StringVar(value="=0")
+        self.csv_search_pair_r_min_var = tk.StringVar(value="0")
+        self.csv_search_pair_r_max_var = tk.StringVar(value="0")
         self.csv_filter_skip_large_rows_var = tk.BooleanVar(value=False)
         self.csv_filter_max_rows_var = tk.StringVar(value="200")
 
@@ -591,6 +594,27 @@ class FitsImageViewer:
             state="readonly",
             width=5,
         ).pack(side=tk.LEFT)
+
+        # 第1.5行：pair 综合半径筛选（hypot(pair_dx, pair_dy)）
+        csv_row_pair = ttk.Frame(csv_search_frame)
+        csv_row_pair.pack(fill=tk.X, anchor=tk.W, pady=(3, 0))
+        ttk.Label(csv_row_pair, text="pair").pack(side=tk.LEFT)
+        ttk.Label(csv_row_pair, text="r[").pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Entry(csv_row_pair, textvariable=self.csv_search_pair_r_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_row_pair, text=",").pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Entry(csv_row_pair, textvariable=self.csv_search_pair_r_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(csv_row_pair, text="]").pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Label(
+            csv_row_pair,
+            text="(pair_dx/pair_dy 综合半径，max<=0 表示不启用)",
+            foreground="gray",
+        ).pack(side=tk.LEFT)
+        self._pair_reg_filtered_button = ttk.Button(
+            csv_row_pair,
+            text="PairReg(当前节点)",
+            command=self._run_pair_reg_for_selected_node,
+        )
+        self._pair_reg_filtered_button.pack(side=tk.LEFT, padx=(8, 0))
 
         csv_row_actions = ttk.Frame(csv_search_frame)
         csv_row_actions.pack(fill=tk.X, anchor=tk.W, pady=(3, 0))
@@ -720,6 +744,16 @@ class FitsImageViewer:
         ttk.Label(control_frame1, text="MPC:").pack(side=tk.LEFT, padx=(2, 2))
         self.csv_mpc_count_status_label = ttk.Label(control_frame1, text="--", foreground="gray", font=("Arial", 9, "bold"))
         self.csv_mpc_count_status_label.pack(side=tk.LEFT, padx=(0, 2))
+
+        # CSV当前行 PairReg 状态单独一行（避免挤爆控件行）：
+        # pair_class(名称)/pair_score + 综合半径 + pair_dx/dy/droll
+        control_pair_row = ttk.Frame(control_container)
+        control_pair_row.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(control_pair_row, text="Pair:").pack(side=tk.LEFT)
+        self.csv_pair_status_label = ttk.Label(
+            control_pair_row, text="--", foreground="gray", font=("Arial", 9, "bold")
+        )
+        self.csv_pair_status_label.pack(side=tk.LEFT, padx=(0, 2))
 
         # 第二行控制面板：操作按钮
         control_frame2 = ttk.Frame(control_container)
@@ -1232,6 +1266,20 @@ class FitsImageViewer:
             if csv_search_skip_mode not in {"=0", "=1", "all"}:
                 csv_search_skip_mode = "=0"
             self.csv_search_skip_mode_var.set(csv_search_skip_mode)
+
+            csv_search_pair_r_min = str(display_settings.get("csv_search_pair_r_min", "0")).strip()
+            try:
+                float(csv_search_pair_r_min)
+            except Exception:
+                csv_search_pair_r_min = "0"
+            self.csv_search_pair_r_min_var.set(csv_search_pair_r_min)
+
+            csv_search_pair_r_max = str(display_settings.get("csv_search_pair_r_max", "0")).strip()
+            try:
+                float(csv_search_pair_r_max)
+            except Exception:
+                csv_search_pair_r_max = "0"
+            self.csv_search_pair_r_max_var.set(csv_search_pair_r_max)
             crossmatch_parallel_workers = str(
                 display_settings.get("crossmatch_rerun_parallel_workers", "3")
             ).strip()
@@ -1260,6 +1308,8 @@ class FitsImageViewer:
                 csv_search_mpc_count_mode=str(self.csv_search_mpc_count_mode_var.get()).strip(),
                 csv_search_ai_class_mode=str(self.csv_search_ai_class_mode_var.get()).strip().lower(),
                 csv_search_skip_mode=str(self.csv_search_skip_mode_var.get()).strip().lower(),
+                csv_search_pair_r_min=str(self.csv_search_pair_r_min_var.get()).strip(),
+                csv_search_pair_r_max=str(self.csv_search_pair_r_max_var.get()).strip(),
                 crossmatch_rerun_parallel_workers=str(self.crossmatch_rerun_parallel_workers_var.get()).strip(),
                 csv_filter_skip_large_rows_enabled=bool(self.csv_filter_skip_large_rows_var.get()),
                 csv_filter_max_rows=str(self.csv_filter_max_rows_var.get()).strip(),
@@ -2659,6 +2709,39 @@ class FitsImageViewer:
             raise ValueError("大CSV行数阈值无效，必须大于0")
         return enabled, max_rows
 
+    def _parse_csv_pair_radius_range(self) -> Tuple[float, float]:
+        """解析 pair 综合半径区间（hypot(pair_dx, pair_dy)），返回 (min, max)。
+
+        max <= 0 表示未启用该筛选条件。
+        """
+        try:
+            r_min = float(str(self.csv_search_pair_r_min_var.get()).strip() or "0")
+            r_max = float(str(self.csv_search_pair_r_max_var.get()).strip() or "0")
+        except Exception:
+            raise ValueError("pair 半径区间无效，请输入数字")
+        if r_max > 0 and r_min >= r_max:
+            raise ValueError("pair 半径区间无效：下限必须小于上限")
+        return r_min, r_max
+
+    def _csv_pair_radius_match(self, row: dict, pair_r_min: float, pair_r_max: float) -> bool:
+        """按 pair_dx/pair_dy 的综合半径 hypot(dx, dy) 判断是否命中。
+
+        pair_r_max <= 0 视为未启用；启用时缺少 pair_dx/pair_dy 视为不命中。
+        """
+        try:
+            r_min = float(pair_r_min)
+            r_max = float(pair_r_max)
+        except Exception:
+            return True
+        if r_max <= 0.0:
+            return True
+        dx = self._try_get_float_from_row(row, ["pair_dx"])
+        dy = self._try_get_float_from_row(row, ["pair_dy"])
+        if dx is None or dy is None:
+            return False
+        r = math.hypot(float(dx), float(dy))
+        return r_min < r < r_max
+
     def _row_matches_csv_filter_conditions(
         self,
         row: dict,
@@ -2668,6 +2751,8 @@ class FitsImageViewer:
         mpc_mode: str,
         ai_mode: str = "=0",
         skip_mode: str = "=0",
+        pair_r_min: float = 0.0,
+        pair_r_max: float = 0.0,
     ) -> bool:
         """按 AND 逻辑判断一行是否满足搜索条件。"""
         if not isinstance(row, dict):
@@ -2682,6 +2767,8 @@ class FitsImageViewer:
         if not self._csv_ai_class_mode_match(row.get("ai_class"), ai_mode):
             return False
         if not self._csv_skip_mode_match(row.get("skip_flag", row.get("skip")), skip_mode):
+            return False
+        if not self._csv_pair_radius_match(row, pair_r_min, pair_r_max):
             return False
         return True
 
@@ -2739,13 +2826,27 @@ class FitsImageViewer:
         return -1
 
     def _get_csv_filter_condition_summary(
-        self, flux_min: float, flux_max: float, var_mode: str, mpc_mode: str, ai_mode: str, skip_mode: str
+        self,
+        flux_min: float,
+        flux_max: float,
+        var_mode: str,
+        mpc_mode: str,
+        ai_mode: str,
+        skip_mode: str,
+        pair_r_min: float = 0.0,
+        pair_r_max: float = 0.0,
     ) -> str:
         """返回 CSV 条件摘要文本。"""
-        return (
+        text = (
             f"{flux_min:g}<median_flux_norm<{flux_max:g} AND variable_count{var_mode} "
             f"AND mpc_count{mpc_mode} AND ai_class{ai_mode} AND skip_flag{skip_mode}"
         )
+        try:
+            if float(pair_r_max) > 0.0:
+                text += f" AND pair_r[{float(pair_r_min):g},{float(pair_r_max):g}]"
+        except Exception:
+            pass
+        return text
 
     def _set_csv_filter_search_status(self, text: str):
         """更新 CSV 条件搜索状态栏。"""
@@ -2896,19 +2997,56 @@ class FitsImageViewer:
             return ">0", "#B58900"
         return str(iv), "gray"
 
+    def _get_csv_pair_status_style(self, row: Optional[dict]) -> Tuple[str, str]:
+        """返回当前行 PairReg 状态文本与颜色。
+
+        文本格式: "<类别名>/<分数> r=<综合半径> dx.. dy.. dr..°"
+        pair_class: 0=appear, 1=dim, 2=satellite, -1=无命中/未运行
+        """
+        class_names = ("appear", "dim", "satellite")
+        if not isinstance(row, dict):
+            return "--", "gray"
+        dx = self._try_get_float_from_row(row, ["pair_dx"])
+        dy = self._try_get_float_from_row(row, ["pair_dy"])
+        if dx is None or dy is None:
+            return "--", "gray"
+        droll = self._try_get_float_from_row(row, ["pair_droll"])
+        cls = self._try_parse_int_from_csv_value(row.get("pair_class"))
+        score = self._try_get_float_from_row(row, ["pair_score"])
+        r = math.hypot(float(dx), float(dy))
+        if cls is not None and 0 <= cls < len(class_names):
+            cls_text = class_names[cls]
+        elif cls is not None and cls < 0:
+            cls_text = "none"
+        else:
+            cls_text = "?"
+        score_text = f"{score:.2f}" if score is not None else "?"
+        roll_text = f"{droll:+.2f}" if droll is not None else "?"
+        text = (
+            f"{cls_text}/{score_text} r={r:.1f} "
+            f"dx={dx:+.2f} dy={dy:+.2f} dr={roll_text}\u00b0"
+        )
+        color = "green" if (cls is not None and cls >= 0) else "gray"
+        return text, color
+
     def _update_csv_count_status_labels(self, row: Optional[dict]):
-        """刷新右侧图像区域的 variable_count/mpc_count 彩色状态。"""
+        """刷新右侧图像区域的 variable_count/mpc_count/pair 彩色状态。"""
         if not hasattr(self, "csv_variable_count_status_label") or not hasattr(self, "csv_mpc_count_status_label"):
             return
         if not isinstance(row, dict):
             self.csv_variable_count_status_label.config(text="--", foreground="gray")
             self.csv_mpc_count_status_label.config(text="--", foreground="gray")
+            if hasattr(self, "csv_pair_status_label"):
+                self.csv_pair_status_label.config(text="--", foreground="gray")
             self._update_skip_toggle_current_row_button(None)
             return
         var_text, var_color = self._get_csv_count_status_style(row.get("variable_count"))
         mpc_text, mpc_color = self._get_csv_count_status_style(row.get("mpc_count"))
         self.csv_variable_count_status_label.config(text=var_text, foreground=var_color)
         self.csv_mpc_count_status_label.config(text=mpc_text, foreground=mpc_color)
+        if hasattr(self, "csv_pair_status_label"):
+            pair_text, pair_color = self._get_csv_pair_status_style(row)
+            self.csv_pair_status_label.config(text=pair_text, foreground=pair_color)
         self._update_skip_toggle_current_row_button(row)
 
     def _update_skip_toggle_current_row_button(self, row: Optional[dict]):
@@ -2959,10 +3097,16 @@ class FitsImageViewer:
         ):
             raise _CsvFilterSearchSetupError("variable_count / mpc_count / ai_class / skip_flag 条件无效", kind="warning")
         try:
+            pair_r_min, pair_r_max = self._parse_csv_pair_radius_range()
+        except ValueError as e:
+            raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
+        try:
             skip_large_csv, large_csv_max_rows = self._parse_csv_large_rows_skip_settings()
         except ValueError as e:
             raise _CsvFilterSearchSetupError(str(e), kind="warning") from e
-        condition_summary = self._get_csv_filter_condition_summary(flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode)
+        condition_summary = self._get_csv_filter_condition_summary(
+            flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode, pair_r_min, pair_r_max
+        )
 
         selection = self.directory_tree.selection()
         if selection:
@@ -3027,6 +3171,8 @@ class FitsImageViewer:
             "mpc_mode": mpc_mode,
             "ai_mode": ai_mode,
             "skip_mode": skip_mode,
+            "pair_r_min": pair_r_min,
+            "pair_r_max": pair_r_max,
             "skip_large_csv": skip_large_csv,
             "large_csv_max_rows": large_csv_max_rows,
             "condition_summary": condition_summary,
@@ -3052,6 +3198,8 @@ class FitsImageViewer:
         mpc_mode = ctx["mpc_mode"]
         ai_mode = ctx["ai_mode"]
         skip_mode = ctx["skip_mode"]
+        pair_r_min = ctx.get("pair_r_min", 0.0)
+        pair_r_max = ctx.get("pair_r_max", 0.0)
         skip_large_csv = ctx["skip_large_csv"]
         large_csv_max_rows = ctx["large_csv_max_rows"]
         file_nodes = ctx["file_nodes"]
@@ -3094,7 +3242,7 @@ class FitsImageViewer:
             for raw_idx in row_range:
                 row = all_rows[raw_idx]
                 if self._row_matches_csv_filter_conditions(
-                    row, flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode
+                    row, flux_min, flux_max, var_mode, mpc_mode, ai_mode, skip_mode, pair_r_min, pair_r_max
                 ):
                     yield (node, file_path, output_dir, raw_idx, row)
                     if stop_after_first:
@@ -3952,6 +4100,173 @@ class FitsImageViewer:
                 out_dir = getattr(self, "_current_csv_output_dir", None)
                 if out_dir:
                     self.parent_frame.after(0, lambda: self._reload_csv_candidates_for_display(out_dir, keep_current_index=True))
+
+        if btn is not None:
+            btn.config(state="disabled")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _get_pair_reg_module(self):
+        """惰性导入 console_proc/pair_reg_runner（复用其模型加载与匹配逻辑）。"""
+        import importlib
+        console_dir = Path(__file__).resolve().parent.parent / "console_proc"
+        if str(console_dir) not in sys.path:
+            sys.path.insert(0, str(console_dir))
+        return importlib.import_module("pair_reg_runner")
+
+    def _get_pair_reg_settings(self) -> Dict[str, Any]:
+        """读取 PairRegNet 运行参数（显示设置优先，回退默认值）。"""
+        ds: Dict[str, Any] = {}
+        if self.config_manager and hasattr(self.config_manager, "get_display_settings"):
+            try:
+                ds = self.config_manager.get_display_settings() or {}
+            except Exception:
+                ds = {}
+        repo_root = Path(__file__).resolve().parent.parent
+        model_dir = Path(str(ds.get("pair_reg_model_dir", "gui/models_tr")))
+        if not model_dir.is_absolute():
+            model_dir = (repo_root / model_dir).resolve()
+        try:
+            det_threshold = float(str(ds.get("pair_reg_det_threshold", "0.35")))
+        except Exception:
+            det_threshold = 0.35
+        try:
+            cutout_size = int(float(str(ds.get("pair_reg_cutout_size", "128"))))
+        except Exception:
+            cutout_size = 128
+        if cutout_size <= 0:
+            cutout_size = 128
+        try:
+            model_in = int(float(str(ds.get("pair_reg_model_in", "0"))))
+        except Exception:
+            model_in = 0
+        return {
+            "model_dir": model_dir,
+            "det_threshold": det_threshold,
+            "cutout_size": cutout_size,
+            "model_in": model_in,
+        }
+
+    def _run_pair_reg_for_selected_node(self):
+        """对当前选中目录树节点下层的所有 output 目录运行 PairRegNet，回写 pair_* 列（不按筛选条件）。"""
+        btn = getattr(self, "_pair_reg_filtered_button", None)
+        if not hasattr(self, "directory_tree"):
+            self._emit_ai_classification_log("[PairReg] 目录树未初始化", level="WARNING")
+            return
+        selection = self.directory_tree.selection()
+        if not selection:
+            msg = "[PairReg] 请先在目录树中选择一个节点（望远镜/日期/天区/文件）"
+            self._emit_ai_classification_log(msg, level="WARNING")
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(text=msg, foreground="orange")
+            return
+        selected_item = selection[0]
+
+        download_dir = self.get_download_dir_callback() if self.get_download_dir_callback else None
+        base_output_dir = self.get_diff_output_dir_callback() if self.get_diff_output_dir_callback else None
+        if not download_dir or not os.path.isdir(download_dir):
+            self._emit_ai_classification_log("[PairReg] 下载目录未设置或不存在", level="WARNING")
+            return
+        if not base_output_dir or not os.path.isdir(base_output_dir):
+            self._emit_ai_classification_log("[PairReg] 输出根目录未设置或不存在", level="WARNING")
+            return
+
+        csv_paths = self._collect_nonref_inner_border_csv_paths_from_selected_node(
+            selected_item, download_dir, base_output_dir
+        )
+        if not csv_paths:
+            msg = "[PairReg] 当前节点下层未找到 variable_candidates_nonref_only_inner_border.csv"
+            self._emit_ai_classification_log(msg, level="INFO")
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(text=msg, foreground="blue")
+            return
+
+        settings = self._get_pair_reg_settings()
+        model_dir = settings["model_dir"]
+        if not Path(model_dir).exists():
+            msg = f"[PairReg] 模型目录不存在: {model_dir}"
+            self._emit_ai_classification_log(msg, level="ERROR")
+            if hasattr(self, "diff_progress_label"):
+                self.diff_progress_label.config(text=msg, foreground="red")
+            return
+
+        total = len(csv_paths)
+        start_msg = f"[PairReg] 开始处理当前节点下层 {total} 个 output 目录，模型: {model_dir}"
+        self._emit_ai_classification_log(start_msg, level="INFO")
+        if hasattr(self, "diff_progress_label"):
+            self.diff_progress_label.config(
+                text=f"[PairReg] 处理中 0/{total}", foreground="blue"
+            )
+
+        def worker():
+            try:
+                import torch
+
+                prr = self._get_pair_reg_module()
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                mod, model = prr.load_pair_model(Path(model_dir), device)
+                model_size = prr.resolve_model_size(Path(model_dir), int(settings["model_in"]))
+                profile = {"skip_large_csv": False, "large_csv_max_rows": 200}
+
+                written = 0
+                rows_done = 0
+                matched = 0
+                errors = 0
+                for idx, csv_path in enumerate(csv_paths, start=1):
+                    item = prr.process_one_csv(
+                        Path(csv_path),
+                        mod,
+                        model,
+                        device,
+                        model_size,
+                        int(settings["cutout_size"]),
+                        float(settings["det_threshold"]),
+                        profile,
+                        False,
+                    )
+                    written += int(item.get("written_csv", 0))
+                    rows_done += int(item.get("processed_rows", 0))
+                    matched += int(item.get("matched_rows", 0))
+                    errors += int(item.get("error_frames", 0))
+                    if idx % 5 == 0 or idx == total:
+                        self.parent_frame.after(
+                            0,
+                            lambda i=idx: self.diff_progress_label.config(
+                                text=f"[PairReg] 处理中 {i}/{total}", foreground="blue"
+                            ) if hasattr(self, "diff_progress_label") else None,
+                        )
+
+                self.parent_frame.after(
+                    0,
+                    lambda: (
+                        self._emit_ai_classification_log(
+                            "[PairReg] 完成: "
+                            f"处理行={rows_done}, 命中行={matched}, 写回CSV={written}, 错误帧={errors}",
+                            level="INFO",
+                        ),
+                        self.diff_progress_label.config(
+                            text=f"[PairReg] 完成: 行={rows_done}, 命中={matched}, 写回={written}",
+                            foreground="green",
+                        ) if hasattr(self, "diff_progress_label") else None,
+                    ),
+                )
+            except Exception as e:
+                self.logger.exception("当前节点 PairRegNet 运行失败")
+                self.parent_frame.after(
+                    0,
+                    lambda msg=str(e): (
+                        self._emit_ai_classification_log(f"[PairReg] 失败: {msg}", level="ERROR"),
+                        self.diff_progress_label.config(text=f"[PairReg] 失败: {msg}", foreground="red")
+                        if hasattr(self, "diff_progress_label") else None,
+                    ),
+                )
+            finally:
+                if btn is not None:
+                    self.parent_frame.after(0, lambda: btn.config(state="normal"))
+                out_dir = getattr(self, "_current_csv_output_dir", None)
+                if out_dir:
+                    self.parent_frame.after(
+                        0, lambda: self._reload_csv_candidates_for_display(out_dir, keep_current_index=True)
+                    )
 
         if btn is not None:
             btn.config(state="disabled")
