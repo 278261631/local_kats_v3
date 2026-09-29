@@ -78,7 +78,7 @@ _STATUS_TEXT = {
     "dedup": "重复",
 }
 _STATUS_COLOR = {
-    "ob_unusable": QColor(200, 200, 200),
+    "ob_unusable": QColor(255, 64, 255),
     "ob_satellite": QColor(255, 170, 80),
     "b_uncovered": QColor(150, 150, 200),
     "dedup": QColor(160, 160, 160),
@@ -190,6 +190,16 @@ def _stretch_u8(arr: np.ndarray, target_bg: float = 0.25,
     bg = float(np.clip((med - lo) / (hi - lo), 1e-4, 1.0 - 1e-4))
     m = _mtf_solve(bg, target_bg)
     return np.clip(_mtf(m, n) * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
+class _ThumbLabel(QLabel):
+    """小图墙单元格：双击发出信号。"""
+
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
 
 
 class ClickableLabel(QLabel):
@@ -482,7 +492,7 @@ class MainWindow(QMainWindow):
         mv = QVBoxLayout(montage_wrap)
         mrow = QHBoxLayout()
         self.montage_btn = QPushButton("生成小图墙")
-        self.montage_btn.clicked.connect(self._build_montage)
+        self.montage_btn.clicked.connect(lambda: self._build_montage())
         self.montage_info = QLabel("（每个检测一张 A|B 裁切；双击单元格可跳转到该行）")
         self.montage_info.setStyleSheet("color:#666;")
         mrow.addWidget(self.montage_btn)
@@ -606,6 +616,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, c, item)
         entry = dict(d)
         entry["_result"] = res
+        entry["_det"] = d
         self._row_map.append(entry)
 
     def _rebuild_table(self) -> None:
@@ -734,9 +745,10 @@ class MainWindow(QMainWindow):
 
         if mode_crop:
             size = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
-            # A 与 B 同一网格，同一位置都做标注
-            self._draw_crosshair(a_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
-            self._draw_crosshair(b_img, px, py, _SEL_COLOR, size=size, gap=max(3, size // 3))
+            # 裁切模式：十字用该目标的状态(类别)颜色；A/B 同位置都标注
+            col = _det_status_color(entry.get("status", "keep"))
+            self._draw_crosshair(a_img, px, py, col, size=size, gap=max(3, size // 3))
+            self._draw_crosshair(b_img, px, py, col, size=size, gap=max(3, size // 3))
         else:
             for d in res["detections"]:
                 st = d.get("status", "keep")
@@ -792,6 +804,7 @@ class MainWindow(QMainWindow):
 
     def _build_montage(self, limit: int = 300) -> None:
         """把当前所有检测做成小图墙（每格 A|B 裁切 + 信息）。"""
+        limit = int(limit) or 300
         while self.montage_grid.count():
             item = self.montage_grid.takeAt(0)
             w = item.widget()
@@ -812,9 +825,13 @@ class MainWindow(QMainWindow):
                 cell.setFrameShape(QFrame.Box)
                 cl = QVBoxLayout(cell)
                 cl.setContentsMargins(2, 2, 2, 2)
-                img_lbl = QLabel()
+                img_lbl = _ThumbLabel()
                 img_lbl.setPixmap(pm)
                 img_lbl.setAlignment(Qt.AlignCenter)
+                img_lbl.setCursor(Qt.PointingHandCursor)
+                img_lbl.double_clicked.connect(
+                    lambda r=res, d=det: self._jump_to_detection(r, d)
+                )
                 cap = QLabel(
                     f"{_STATUS_TEXT.get(st, st)}  {det['score']:.2f}\n"
                     f"({det['x']:.0f},{det['y']:.0f})"
@@ -833,6 +850,15 @@ class MainWindow(QMainWindow):
             + ("，已截断" if n >= limit else "")
             + "）"
         )
+
+    def _jump_to_detection(self, res: Dict, det: Dict) -> None:
+        """小图墙双击：在表格中选中对应行并切到裁切预览。"""
+        for row, e in enumerate(self._row_map):
+            if e.get("_det") is det:
+                self.table.selectRow(row)
+                self.view_combo.setCurrentIndex(1)
+                return
+        self._log("该检测当前未显示在表格中（可能被“显示被过滤结果”隐藏）")
 
     # ---------------------------------------------------------------- export
     def _export_csv(self) -> None:
