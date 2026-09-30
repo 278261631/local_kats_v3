@@ -76,11 +76,13 @@ _STATUS_TEXT = {
     "keep": "命中",
     "satellite": "卫星",
     "b_uncovered": "B未覆盖",
+    "a_invalid": "A无效区",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
     "satellite": QColor(255, 170, 80),
     "b_uncovered": QColor(150, 150, 200),
+    "a_invalid": QColor(150, 150, 200),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -324,6 +326,7 @@ class ProcessWorker(QThread):
                         dedup_radius=self.params["dedup_radius"],
                         reproject_chunk_rows=self.params["reproject_chunk_rows"],
                         fill_invalid_with_a=self.params["fill_invalid_with_a"],
+                        valid_overlap_filter=self.params.get("valid_overlap_filter", True),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -429,6 +432,9 @@ class MainWindow(QMainWindow):
         self.fill_check = QCheckBox("B 未覆盖区域用 A 填充")
         self.fill_check.setChecked(DEFAULTS["fill_invalid_with_a"])
         form.addRow("", self.fill_check)
+        self.valid_overlap_check = QCheckBox("按A∩B有效区过滤检测")
+        self.valid_overlap_check.setChecked(DEFAULTS["valid_overlap_filter"])
+        form.addRow("", self.valid_overlap_check)
         lay.addWidget(params)
 
         btns = QHBoxLayout()
@@ -491,23 +497,23 @@ class MainWindow(QMainWindow):
         vrow.addWidget(hint)
         vrow.addSpacing(12)
         self.show_filtered_check = QCheckBox("显示被过滤结果")
-        self.show_filtered_check.setChecked(True)
+        self.show_filtered_check.setChecked(False)
         self.show_filtered_check.stateChanged.connect(lambda _=0: self._rebuild_table())
         vrow.addWidget(self.show_filtered_check)
         self.sat_check = QCheckBox("叠加卫星掩码")
-        self.sat_check.setChecked(False)
+        self.sat_check.setChecked(True)
         self.sat_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.sat_check)
         self.cover_check = QCheckBox("显示 B 覆盖边框")
-        self.cover_check.setChecked(False)
+        self.cover_check.setChecked(True)
         self.cover_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.cover_check)
         self.validpoly_check = QCheckBox("显示A有效区边界")
-        self.validpoly_check.setChecked(False)
+        self.validpoly_check.setChecked(True)
         self.validpoly_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.validpoly_check)
         self.validpoly_b_check = QCheckBox("显示B有效区边界")
-        self.validpoly_b_check.setChecked(False)
+        self.validpoly_b_check.setChecked(True)
         self.validpoly_b_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.validpoly_b_check)
         vrow.addStretch(1)
@@ -609,6 +615,7 @@ class MainWindow(QMainWindow):
             "dedup_radius": float(DEFAULTS["dedup_radius"]),
             "reproject_chunk_rows": int(DEFAULTS["reproject_chunk_rows"]),
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
+            "valid_overlap_filter": bool(self.valid_overlap_check.isChecked()),
         }
 
     # -------------------------------------------------------------- process

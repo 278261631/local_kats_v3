@@ -36,6 +36,8 @@ DEFAULTS = {
     "reproject_chunk_rows": 256,
     # 处理 B 帧时，reproject 后 B 的无效区（nan）是否沿用 A 的灰度
     "fill_invalid_with_a": False,
+    # 是否按 A、B 有效区的重叠部分过滤检测
+    "valid_overlap_filter": True,
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
 }

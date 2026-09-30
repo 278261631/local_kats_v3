@@ -23,12 +23,14 @@ from reproject import (
     reproject_b_to_a_wcs,
 )
 from template_resolver import is_fits, resolve_reference
-from valid_region import extract_valid_polygons
+from valid_region import compute_valid_mask, extract_valid_polygons
 
 LogCb = Optional[Callable[[str], None]]
 
 #: A 模板有效区多边形缓存（同一模板在处理多个 B 时复用）
 _VALID_POLY_CACHE: Dict[str, list] = {}
+#: A 模板有效区掩码缓存（供 A∩B 重叠过滤）
+_A_VALID_CACHE: Dict[str, np.ndarray] = {}
 
 
 def collect_fits_files(path: str | os.PathLike) -> List[str]:
@@ -106,6 +108,7 @@ def process_b_file(
     reproject_chunk_rows: int,
     fill_invalid_with_a: bool = True,
     preview_max_side: int = 1600,
+    valid_overlap_filter: bool = True,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -154,6 +157,7 @@ def process_b_file(
     wcs_b = build_celestial_wcs(b_header)
 
     # A 模板有效区(星空/空白)边界多边形（多项式坐标，A 网格）
+    a_valid = None
     try:
         cached = _VALID_POLY_CACHE.get(a_path)
         if cached is None:
@@ -163,6 +167,12 @@ def process_b_file(
         if cached:
             log(f"A有效区边界: {len(cached)} 个多边形, 最大顶点数 "
                 f"{max(len(p) for p in cached)}")
+        # A 有效区掩码（供 A∩B 重叠过滤）
+        cached_mask = _A_VALID_CACHE.get(a_path)
+        if cached_mask is None:
+            cached_mask = compute_valid_mask(a_data).astype(bool)
+            _A_VALID_CACHE[a_path] = cached_mask
+        a_valid = cached_mask
     except Exception as ex:  # noqa: BLE001
         log(f"A有效区提取失败: {ex}")
 
@@ -247,8 +257,12 @@ def process_b_file(
                 xi = min(w - 1, max(0, int(round(fx))))
                 yi = min(h - 1, max(0, int(round(fy))))
                 status = pk.get("status", "keep")
-                if status == "keep" and not valid[yi, xi]:
-                    status = "b_uncovered"
+                if status == "keep":
+                    if not valid[yi, xi]:
+                        status = "b_uncovered"
+                    elif (valid_overlap_filter and a_valid is not None
+                          and not a_valid[yi, xi]):
+                        status = "a_invalid"
                 dets.append(
                     {
                         "x": float(fx),
