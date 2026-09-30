@@ -67,10 +67,11 @@ from config import DEFAULTS, load_settings, save_settings
 from native_crop import FitsCache, load_native_pair_crops
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
+import query_servers
 import results_io
 
-_COLUMNS = ["文件", "状态", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
-_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "x", "y", "score", "dx", "dy", "roll"]
+_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
+_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "dx", "dy", "roll"]
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
@@ -102,6 +103,9 @@ _COVER_EDGE_RGB = (255, 230, 0)
 _A_VALID_COLOR = QColor(255, 255, 255)
 # B（重投影后）有效区边界
 _B_VALID_COLOR = QColor(0, 220, 180)
+# 变星(VSX) / MPC 命中点
+_VAR_COLOR = QColor(0, 220, 255)
+_MPC_COLOR = QColor(255, 80, 200)
 
 
 def _swatch(color) -> str:
@@ -361,6 +365,8 @@ class MainWindow(QMainWindow):
         self._manual_center: Optional[tuple] = None  # 双击指定的裁切中心(原生坐标)
         self._manual_result = None
         self._daily_rows: List[list] = []
+        self._daily_meta: List[dict] = []
+        self._loaded_path: Optional[str] = None
 
         self._build_ui()
         self._settings = load_settings()
@@ -505,9 +511,12 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self._export_csv)
         self.load_btn = QPushButton("加载已有结果")
         self.load_btn.clicked.connect(self._load_results_from_node)
+        self.query_btn = QPushButton("查询变星/MPC")
+        self.query_btn.clicked.connect(self._run_queries)
         btns.addWidget(self.run_btn)
         btns.addWidget(self.stop_btn)
         btns.addWidget(self.load_btn)
+        btns.addWidget(self.query_btn)
         btns.addWidget(self.export_btn)
         lay.addLayout(btns)
 
@@ -594,9 +603,11 @@ class MainWindow(QMainWindow):
             + "　　|　　<b>叠加：</b>"
             + _swatch(_SAT_RGB) + " 卫星掩码　"
             + _swatch(_COVER_EDGE_RGB) + " B覆盖边框"
-            + "　　|　　<b>有效区边界：</b>"
+            + "　　|　　<b>有效区边界/查询：</b>"
             + _swatch(_A_VALID_COLOR) + " A有效区　"
-            + _swatch(_B_VALID_COLOR) + " B有效区"
+            + _swatch(_B_VALID_COLOR) + " B有效区　"
+            + _swatch(_VAR_COLOR) + " 变星　"
+            + _swatch(_MPC_COLOR) + " MPC"
         )
         pw.addWidget(legend)
 
@@ -608,6 +619,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
+        self.table.cellDoubleClicked.connect(self._jump_table_crop)
         tabs.addTab(self.table, "检测结果")
 
         self.log_view = QPlainTextEdit()
@@ -654,6 +666,7 @@ class MainWindow(QMainWindow):
         self.daily_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.daily_table.horizontalHeader().setStretchLastSection(True)
         self.daily_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.daily_table.cellDoubleClicked.connect(self._jump_daily_row)
         dv.addWidget(self.daily_table)
         tabs.addTab(daily_wrap, "每日总表")
 
@@ -682,8 +695,78 @@ class MainWindow(QMainWindow):
         if not current.isValid():
             return
         path = self.fs_model.filePath(current)
-        kind = "文件夹" if os.path.isdir(path) else "文件"
-        self.sel_label.setText(f"{kind}: {path}")
+        if os.path.isdir(path):
+            self.sel_label.setText(f"文件夹: {path}")
+            self._loaded_path = None
+            return
+        self.sel_label.setText(f"文件: {path}")
+        # 选中文件时若有已保存结果，直接加载
+        if self.worker is None or not self.worker.isRunning():
+            self._maybe_load_result_for_file(path)
+
+    def _maybe_load_result_for_file(self, path: str) -> None:
+        key = os.path.normcase(os.path.abspath(path))
+        if getattr(self, "_loaded_path", None) == key:
+            return
+        j = results_io.result_json_path(path)
+        if not os.path.exists(j):
+            return
+        try:
+            res = results_io.load_result(j)
+        except Exception as ex:  # noqa: BLE001
+            self._log(f"加载结果失败 {j}: {ex}")
+            return
+        self._show_result(res)
+        self._loaded_path = key
+        self._log(f"已自动加载结果: {os.path.basename(path)}{results_io.SUFFIX_JSON}")
+
+    def _show_result(self, res: Dict, target_det: Optional[Dict] = None) -> None:
+        """用单个结果替换当前显示；可跳到指定检测的裁切。"""
+        self._results.clear()
+        self._row_map.clear()
+        self.table.setRowCount(0)
+        self._manual_center = None
+        self._manual_result = None
+        self._on_file_done(res)
+        if target_det is None:
+            return
+        row = None
+        for r, e in enumerate(self._row_map):
+            d = e["_det"]
+            if (abs(d.get("x", 0) - target_det.get("x", 0)) < 1e-3
+                    and abs(d.get("y", 0) - target_det.get("y", 0)) < 1e-3
+                    and abs(d.get("score", 0) - target_det.get("score", 0)) < 1e-4
+                    and d.get("status") == target_det.get("status")):
+                row = r
+                break
+        if row is not None:
+            self.table.selectRow(row)
+            self._manual_center = None
+            self._manual_result = None
+        else:
+            self._manual_center = (target_det.get("x"), target_det.get("y"))
+            self._manual_result = res
+        self.view_combo.setCurrentIndex(1)
+
+    def _jump_table_crop(self, row: int, _col: int = 0) -> None:
+        """检测结果表双击 -> 跳到该目标的裁切。"""
+        if 0 <= row < len(self._row_map):
+            self.table.selectRow(row)
+            self._manual_center = None
+            self._manual_result = None
+            self.view_combo.setCurrentIndex(1)
+
+    def _jump_daily_row(self, row: int, _col: int = 0) -> None:
+        """每日总表双击 -> 载入该文件并跳到该目标的裁切。"""
+        if not (0 <= row < len(self._daily_meta)):
+            return
+        meta = self._daily_meta[row]
+        try:
+            res = results_io.load_result(meta["json"])
+        except Exception as ex:  # noqa: BLE001
+            self._log(f"加载结果失败 {meta['json']}: {ex}")
+            return
+        self._show_result(res, meta.get("det"))
 
     def _log(self, msg: str) -> None:
         self.log_view.appendPlainText(msg)
@@ -722,6 +805,7 @@ class MainWindow(QMainWindow):
         self._row_map.clear()
         self._manual_center = None
         self._manual_result = None
+        self._loaded_path = None
         self.table.setRowCount(0)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -759,6 +843,8 @@ class MainWindow(QMainWindow):
         vals = [
             os.path.basename(res.get("b_path") or ""),
             _STATUS_TEXT.get(status, status),
+            str(d.get("var_count", -1)),
+            str(d.get("mpc_count", -1)),
             f"{d['x']:.1f}", f"{d['y']:.1f}", f"{d['score']:.3f}",
             f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
             str(d["tile_x"]), str(d["tile_y"]),
@@ -828,6 +914,7 @@ class MainWindow(QMainWindow):
                   else self.root_edit.text().strip())
         jsons = results_io.scan_results(target)
         self._daily_rows = []
+        self._daily_meta = []
         for j in jsons:
             info = results_io.parse_path_info(j)
             try:
@@ -840,11 +927,13 @@ class MainWindow(QMainWindow):
                 self._daily_rows.append([
                     info["date"], info["tel"], info["region"], fname,
                     _STATUS_TEXT.get(st, st),
+                    str(det.get("var_count", -1)), str(det.get("mpc_count", -1)),
                     f"{det.get('x', 0):.1f}", f"{det.get('y', 0):.1f}",
                     f"{det.get('score', 0):.3f}",
                     f"{det.get('dx', 0):+.2f}", f"{det.get('dy', 0):+.2f}",
                     f"{det.get('roll', 0):+.2f}",
                 ])
+                self._daily_meta.append({"json": j, "det": det})
         self.daily_table.setRowCount(len(self._daily_rows))
         for r, row in enumerate(self._daily_rows):
             for c, v in enumerate(row):
@@ -866,6 +955,125 @@ class MainWindow(QMainWindow):
             w.writerow(_DAILY_COLUMNS)
             w.writerows(self._daily_rows)
         self._log(f"已导出总表: {path}")
+
+    # --------------------------------------------------- 变星 / MPC 查询
+    def _safe_wcs(self, a_path):
+        if not a_path:
+            return None
+        try:
+            return self._fits_cache.get(a_path)[2]
+        except Exception:
+            return None
+
+    def _safe_epoch_mjd(self, b_path):
+        if not b_path:
+            return None
+        try:
+            header = self._fits_cache.get(b_path)[0][0].header
+        except Exception:
+            return None
+        from astropy.time import Time
+        for k in ("MJD-OBS", "MJD_OBS", "MJD"):
+            if k in header:
+                try:
+                    return float(header[k])
+                except Exception:
+                    pass
+        for k in ("JD", "JD-OBS", "JD_OBS", "JDAVG", "JD-AVG"):
+            if k in header:
+                try:
+                    return float(header[k]) - 2400000.5
+                except Exception:
+                    pass
+        for k in ("DATE-OBS", "DATEOBS"):
+            if k in header:
+                try:
+                    return float(Time(str(header[k]), scale="utc").mjd)
+                except Exception:
+                    pass
+        return None
+
+    @staticmethod
+    def _hits_to_pix(hits, wcs):
+        out = []
+        for h in hits:
+            try:
+                px, py = wcs.all_world2pix(float(h["ra"]), float(h["dec"]), 0)
+                out.append([float(px), float(py)])
+            except Exception:
+                continue
+        return out
+
+    def _run_queries(self) -> None:
+        if not self._results:
+            QMessageBox.information(self, "提示", "没有结果可查询")
+            return
+        radius = float(DEFAULTS["query_radius_arcsec"])
+        mag_limit = float(DEFAULTS["query_mag_limit"])
+        timeout = float(DEFAULTS["query_timeout"])
+        vsx_down = mpc_down = False
+        vsx_url = f"{DEFAULTS['vsx_host']}:{DEFAULTS['vsx_port']}"
+        mpc_url = f"{DEFAULTS['mpc_host']}:{DEFAULTS['mpc_port']}"
+        n_q = 0
+        for res in self._results:
+            wcs = self._safe_wcs(res.get("a_path"))
+            epoch = self._safe_epoch_mjd(res.get("b_path"))
+            for det in res.get("detections", []):
+                if det.get("status", "keep") != "keep":
+                    det.setdefault("var_count", -1)
+                    det.setdefault("mpc_count", -1)
+                    continue
+                if wcs is None:
+                    det["var_count"] = det["mpc_count"] = -1
+                    continue
+                try:
+                    ra, dec = wcs.all_pix2world(float(det["x"]), float(det["y"]), 0)
+                    ra, dec = float(ra), float(dec)
+                except Exception:
+                    det["var_count"] = det["mpc_count"] = -1
+                    continue
+                # 变星(VSX)
+                if vsx_down:
+                    det["var_count"] = -1
+                else:
+                    try:
+                        hits = query_servers.query_vsx(
+                            ra, dec, radius, mag_limit=mag_limit,
+                            host=DEFAULTS["vsx_host"], port=int(DEFAULTS["vsx_port"]),
+                            timeout=timeout)
+                        det["var_count"] = len(hits)
+                        det["var_hits"] = self._hits_to_pix(hits, wcs)
+                    except Exception as ex:  # noqa: BLE001
+                        det["var_count"] = -1
+                        det["var_hits"] = []
+                        vsx_down = True
+                        self._log(f"变星服务({vsx_url})不可用: {ex}")
+                # MPC
+                if mpc_down or epoch is None:
+                    det["mpc_count"] = -1
+                else:
+                    try:
+                        hits = query_servers.query_mpc(
+                            ra, dec, epoch, radius,
+                            host=DEFAULTS["mpc_host"], port=int(DEFAULTS["mpc_port"]),
+                            timeout=timeout)
+                        det["mpc_count"] = len(hits)
+                        det["mpc_hits"] = self._hits_to_pix(hits, wcs)
+                    except Exception as ex:  # noqa: BLE001
+                        det["mpc_count"] = -1
+                        det["mpc_hits"] = []
+                        mpc_down = True
+                        self._log(f"MPC服务({mpc_url})不可用: {ex}")
+                n_q += 1
+        self._log(
+            f"查询完成: {n_q} 个目标（变星服务不可用={vsx_down}, MPC服务不可用={mpc_down}）")
+        self._rebuild_table()
+        self._refresh_preview()
+        for res in self._results:
+            try:
+                results_io.save_result(res, self._params())
+            except Exception:
+                pass
 
     # --------------------------------------------------------------- preview
     def _selected_entry(self) -> Optional[Dict]:
@@ -944,6 +1152,14 @@ class MainWindow(QMainWindow):
         p = QPainter(img)
         p.setPen(QPen(color, width))
         p.drawPolygon(QPolygon(pts))
+        p.end()
+
+    @staticmethod
+    def _draw_ring(img: QImage, x: float, y: float, color: QColor,
+                   r: int = 6, width: int = 2) -> None:
+        p = QPainter(img)
+        p.setPen(QPen(color, width))
+        p.drawEllipse(int(round(x - r)), int(round(y - r)), 2 * r, 2 * r)
         p.end()
 
     def _refresh_preview(self) -> None:
@@ -1077,6 +1293,17 @@ class MainWindow(QMainWindow):
                 _draw_polys(res["a_valid_polys"], _A_VALID_COLOR)
             if show_validpoly_b and res.get("b_valid_polys"):
                 _draw_polys(res["b_valid_polys"], _B_VALID_COLOR)
+
+        # 变星/MPC 命中点（投影回像素）
+        for det in res.get("detections", []):
+            for hx, hy in det.get("var_hits", []) or []:
+                xx, yy = (hx - vx0) * vscale, (hy - vy0) * vscale
+                self._draw_ring(a_img, xx, yy, _VAR_COLOR)
+                self._draw_ring(b_img, xx, yy, _VAR_COLOR)
+            for hx, hy in det.get("mpc_hits", []) or []:
+                xx, yy = (hx - vx0) * vscale, (hy - vy0) * vscale
+                self._draw_ring(a_img, xx, yy, _MPC_COLOR)
+                self._draw_ring(b_img, xx, yy, _MPC_COLOR)
 
         self.preview_a.set_image_size(a_img.width(), a_img.height())
         self.preview_b.set_image_size(b_img.width(), b_img.height())

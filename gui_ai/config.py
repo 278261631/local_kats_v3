@@ -42,6 +42,16 @@ DEFAULTS = {
     "fill_invalid_with_a": False,
     # 是否按 A、B 有效区的重叠部分过滤检测
     "valid_overlap_filter": True,
+    # 变星(VSX)本地服务
+    "vsx_host": "localhost",
+    "vsx_port": 5000,
+    # MPC(小行星)本地服务
+    "mpc_host": "localhost",
+    "mpc_port": 5001,
+    # 查询参数
+    "query_radius_arcsec": 36.0,
+    "query_mag_limit": 16.0,
+    "query_timeout": 8.0,
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
 }
