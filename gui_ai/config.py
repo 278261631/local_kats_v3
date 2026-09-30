@@ -6,10 +6,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 #: 本模块所在目录（gui_ai/）
 BASE_DIR = Path(__file__).resolve().parent
+
+#: 界面状态持久化文件
+SETTINGS_PATH = BASE_DIR / "settings.json"
 
 DEFAULTS = {
     # 界面文件树默认根目录
@@ -41,3 +45,21 @@ DEFAULTS = {
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
 }
+
+
+def load_settings() -> dict:
+    """读取界面状态（不存在/损坏时返回空 dict）。"""
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_settings(data: dict) -> None:
+    """写入界面状态。"""
+    try:
+        SETTINGS_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass

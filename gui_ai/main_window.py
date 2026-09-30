@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import sys
 from pathlib import Path
@@ -62,12 +63,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import DEFAULTS
+from config import DEFAULTS, load_settings, save_settings
 from native_crop import FitsCache, load_native_pair_crops
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
+import results_io
 
 _COLUMNS = ["文件", "状态", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
+_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "x", "y", "score", "dx", "dy", "roll"]
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
@@ -332,6 +335,11 @@ class ProcessWorker(QThread):
                 except Exception as ex:  # noqa: BLE001
                     self.log.emit(f"处理失败: {ex}")
                     continue
+                try:
+                    results_io.save_result(res, self.params)
+                    self.log.emit(f"  已保存结果: {os.path.basename(res['b_path'])}{results_io.SUFFIX_JSON}")
+                except Exception as ex:  # noqa: BLE001
+                    self.log.emit(f"  结果保存失败: {ex}")
                 self.file_done.emit(res)
             self.progress.emit(total, total)
         except Exception as ex:  # noqa: BLE001
@@ -352,12 +360,62 @@ class MainWindow(QMainWindow):
         self._fits_cache = FitsCache(max_items=2)  # 原生裁块用（A/B 各一）
         self._manual_center: Optional[tuple] = None  # 双击指定的裁切中心(原生坐标)
         self._manual_result = None
+        self._daily_rows: List[list] = []
 
         self._build_ui()
+        self._settings = load_settings()
+        self._apply_settings()
 
         # Tab 在 全图叠加 / 选中目标裁切 之间切换
         self.toggle_shortcut = QShortcut(QKeySequence(Qt.Key_Tab), self)
         self.toggle_shortcut.activated.connect(self._toggle_view)
+
+    def _apply_settings(self) -> None:
+        s = self._settings
+        self.root_edit.setText(s.get("root", DEFAULTS["root"]))
+        self.template_edit.setText(s.get("template_root", DEFAULTS["template_root"]))
+        self.model_edit.setText(s.get("model_dir", DEFAULTS["model_dir"]))
+        self.device_combo.setCurrentText(s.get("device", DEFAULTS["device"]))
+        self.tile_spin.setValue(int(s.get("tile_size", DEFAULTS["tile_size"])))
+        self.overlap_spin.setValue(float(s.get("overlap", DEFAULTS["overlap"])))
+        self.thresh_spin.setValue(float(s.get("det_threshold", DEFAULTS["det_threshold"])))
+        self.batch_spin.setValue(int(s.get("batch_size", DEFAULTS["batch_size"])))
+        self.crop_spin.setValue(int(s.get("crop_size", DEFAULTS["crop_size"])))
+        self.fill_check.setChecked(
+            bool(s.get("fill_invalid_with_a", DEFAULTS["fill_invalid_with_a"])))
+        self.valid_overlap_check.setChecked(
+            bool(s.get("valid_overlap_filter", DEFAULTS["valid_overlap_filter"])))
+        self.show_filtered_check.setChecked(bool(s.get("show_filtered", False)))
+        self.sat_check.setChecked(bool(s.get("show_sat", True)))
+        self.cover_check.setChecked(bool(s.get("show_cover", True)))
+        self.validpoly_check.setChecked(bool(s.get("show_a_validpoly", True)))
+        self.validpoly_b_check.setChecked(bool(s.get("show_b_validpoly", True)))
+        self.view_combo.setCurrentIndex(int(s.get("view_mode", 1)))
+
+    def _collect_settings(self) -> dict:
+        return {
+            "root": self.root_edit.text().strip(),
+            "template_root": self.template_edit.text().strip(),
+            "model_dir": self.model_edit.text().strip(),
+            "device": self.device_combo.currentText(),
+            "tile_size": int(self.tile_spin.value()),
+            "overlap": float(self.overlap_spin.value()),
+            "det_threshold": float(self.thresh_spin.value()),
+            "batch_size": int(self.batch_spin.value()),
+            "crop_size": int(self.crop_spin.value()),
+            "fill_invalid_with_a": bool(self.fill_check.isChecked()),
+            "valid_overlap_filter": bool(self.valid_overlap_check.isChecked()),
+            "show_filtered": bool(self.show_filtered_check.isChecked()),
+            "show_sat": bool(self.sat_check.isChecked()),
+            "show_cover": bool(self.cover_check.isChecked()),
+            "show_a_validpoly": bool(self.validpoly_check.isChecked()),
+            "show_b_validpoly": bool(self.validpoly_b_check.isChecked()),
+            "view_mode": int(self.view_combo.currentIndex()),
+        }
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        save_settings(self._collect_settings())
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -445,8 +503,11 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._stop)
         self.export_btn = QPushButton("导出检测 CSV")
         self.export_btn.clicked.connect(self._export_csv)
+        self.load_btn = QPushButton("加载已有结果")
+        self.load_btn.clicked.connect(self._load_results_from_node)
         btns.addWidget(self.run_btn)
         btns.addWidget(self.stop_btn)
+        btns.addWidget(self.load_btn)
         btns.addWidget(self.export_btn)
         lay.addLayout(btns)
 
@@ -573,6 +634,29 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.montage_area)
         tabs.addTab(montage_wrap, "小图墙")
 
+        # 每日总表
+        daily_wrap = QWidget()
+        dv = QVBoxLayout(daily_wrap)
+        drow = QHBoxLayout()
+        self.daily_btn = QPushButton("汇总选中目录(按天)")
+        self.daily_btn.clicked.connect(self._build_daily_summary)
+        self.daily_export_btn = QPushButton("导出总表 CSV")
+        self.daily_export_btn.clicked.connect(self._export_daily_csv)
+        self.daily_info = QLabel("（扫描选中目录下所有 *.gui_ai.json 汇总）")
+        self.daily_info.setStyleSheet("color:#666;")
+        drow.addWidget(self.daily_btn)
+        drow.addWidget(self.daily_export_btn)
+        drow.addWidget(self.daily_info)
+        drow.addStretch(1)
+        dv.addLayout(drow)
+        self.daily_table = QTableWidget(0, len(_DAILY_COLUMNS))
+        self.daily_table.setHorizontalHeaderLabels(_DAILY_COLUMNS)
+        self.daily_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.daily_table.horizontalHeader().setStretchLastSection(True)
+        self.daily_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        dv.addWidget(self.daily_table)
+        tabs.addTab(daily_wrap, "每日总表")
+
         splitter.addWidget(preview_wrap)
         splitter.addWidget(tabs)
         splitter.setStretchFactor(0, 3)
@@ -585,6 +669,7 @@ class MainWindow(QMainWindow):
         if d:
             self.root_edit.setText(d)
             self._set_root(d)
+            save_settings(self._collect_settings())
 
     def _set_root(self, root: str) -> None:
         if not os.path.isdir(root):
@@ -708,6 +793,79 @@ class MainWindow(QMainWindow):
             self._append_detection_row(res, d)
         # 每个文件处理完都刷新一次预览（无选中行时显示该文件全图叠加）
         self._refresh_preview()
+
+    # ---------------------------------------------------------- 结果持久化
+    def _load_results_from_node(self) -> None:
+        idx = self.tree.currentIndex()
+        if not idx.isValid():
+            QMessageBox.warning(self, "提示", "请先在左侧选择文件或文件夹节点")
+            return
+        target = self.fs_model.filePath(idx)
+        jsons = results_io.scan_results(target)
+        if not jsons:
+            QMessageBox.information(
+                self, "提示", f"未找到结果文件 (*{results_io.SUFFIX_JSON})")
+            return
+        self._results.clear()
+        self._row_map.clear()
+        self._manual_center = None
+        self._manual_result = None
+        self.table.setRowCount(0)
+        loaded = 0
+        for j in jsons:
+            try:
+                res = results_io.load_result(j)
+            except Exception as ex:  # noqa: BLE001
+                self._log(f"加载失败 {j}: {ex}")
+                continue
+            self._on_file_done(res)
+            loaded += 1
+        self._log(f"已加载 {loaded} 个结果 (来自 {target})")
+
+    def _build_daily_summary(self) -> None:
+        idx = self.tree.currentIndex()
+        target = (self.fs_model.filePath(idx) if idx.isValid()
+                  else self.root_edit.text().strip())
+        jsons = results_io.scan_results(target)
+        self._daily_rows = []
+        for j in jsons:
+            info = results_io.parse_path_info(j)
+            try:
+                d = json.loads(Path(j).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            fname = os.path.basename(d.get("b_path") or j)
+            for det in d.get("detections", []):
+                st = det.get("status", "keep")
+                self._daily_rows.append([
+                    info["date"], info["tel"], info["region"], fname,
+                    _STATUS_TEXT.get(st, st),
+                    f"{det.get('x', 0):.1f}", f"{det.get('y', 0):.1f}",
+                    f"{det.get('score', 0):.3f}",
+                    f"{det.get('dx', 0):+.2f}", f"{det.get('dy', 0):+.2f}",
+                    f"{det.get('roll', 0):+.2f}",
+                ])
+        self.daily_table.setRowCount(len(self._daily_rows))
+        for r, row in enumerate(self._daily_rows):
+            for c, v in enumerate(row):
+                self.daily_table.setItem(r, c, QTableWidgetItem(str(v)))
+        self.daily_info.setText(
+            f"（{len(jsons)} 个结果文件, {len(self._daily_rows)} 条检测）")
+        self._log(f"每日总表: {len(jsons)} 个结果文件, {len(self._daily_rows)} 条检测")
+
+    def _export_daily_csv(self) -> None:
+        if not self._daily_rows:
+            QMessageBox.information(self, "提示", "总表为空，请先汇总")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出总表 CSV", "gui_ai_daily.csv", "CSV (*.csv)")
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(_DAILY_COLUMNS)
+            w.writerows(self._daily_rows)
+        self._log(f"已导出总表: {path}")
 
     # --------------------------------------------------------------- preview
     def _selected_entry(self) -> Optional[Dict]:
@@ -1052,7 +1210,7 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     win = MainWindow()
-    default_root = DEFAULTS["root"]
+    default_root = win.root_edit.text().strip() or DEFAULTS["root"]
     if not os.path.isdir(default_root):
         default_root = str(Path.home())
     win._set_root(default_root)
