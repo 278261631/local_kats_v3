@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import DEFAULTS
+from native_crop import FitsCache, load_native_pair_crops
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
 
@@ -93,6 +94,8 @@ def _det_status_color(status: str) -> QColor:
 _OB_A_UNUSABLE_RGB = (0, 200, 255)
 _OB_B_UNUSABLE_RGB = (230, 60, 60)
 _OB_B_SAT_RGB = (255, 170, 0)
+# B 覆盖区（WCS 对齐后）边框颜色
+_COVER_EDGE_RGB = (255, 230, 0)
 
 
 def _swatch(color) -> str:
@@ -128,6 +131,31 @@ def overlay_ob(rgb: np.ndarray, ob: np.ndarray, channels: Dict[int, tuple]) -> n
         colv = np.array(col, dtype=np.float32)[None, None, :]
         out = out * (1.0 - a) + colv * a
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+def _mask_edge(mask: np.ndarray, thicken: bool = True) -> np.ndarray:
+    """布尔掩码的边界（内边缘 + 可选加粗 1px）。"""
+    m = mask.astype(bool)
+    er = m.copy()
+    er[1:, :] &= m[:-1, :]
+    er[:-1, :] &= m[1:, :]
+    er[:, 1:] &= m[:, :-1]
+    er[:, :-1] &= m[:, 1:]
+    edge = m & ~er
+    if thicken:
+        e = edge.copy()
+        e[1:, :] |= edge[:-1, :]
+        e[:-1, :] |= edge[1:, :]
+        e[:, 1:] |= edge[:, :-1]
+        e[:, :-1] |= edge[:, 1:]
+        edge = e
+    return edge
+
+
+def paint_mask(rgb: np.ndarray, mask: np.ndarray, color: tuple) -> np.ndarray:
+    out = rgb.copy()
+    out[mask.astype(bool)] = np.array(color, dtype=np.uint8)
+    return out
 
 
 def _mtf(m: float, x: np.ndarray) -> np.ndarray:
@@ -303,6 +331,7 @@ class MainWindow(QMainWindow):
         self.worker: Optional[ProcessWorker] = None
         self._results: List[Dict] = []          # 每个文件的结果
         self._row_map: List[Optional[Dict]] = []  # 表格行 -> 检测项（含 _result 引用）
+        self._fits_cache = FitsCache(max_items=2)  # 原生裁块用（A/B 各一）
 
         self._build_ui()
 
@@ -451,6 +480,10 @@ class MainWindow(QMainWindow):
         self.overlay_ob_check.setChecked(False)
         self.overlay_ob_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.overlay_ob_check)
+        self.cover_check = QCheckBox("显示 B 覆盖边框")
+        self.cover_check.setChecked(False)
+        self.cover_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.cover_check)
         vrow.addStretch(1)
         pw.addLayout(vrow)
 
@@ -469,7 +502,8 @@ class MainWindow(QMainWindow):
             + "　　|　　<b>ob 掩码叠加：</b>"
             + _swatch(_OB_A_UNUSABLE_RGB) + " A-unusable　"
             + _swatch(_OB_B_UNUSABLE_RGB) + " B-unusable　"
-            + _swatch(_OB_B_SAT_RGB) + " B-satellite"
+            + _swatch(_OB_B_SAT_RGB) + " B-satellite　"
+            + _swatch(_COVER_EDGE_RGB) + " B覆盖边框"
         )
         pw.addWidget(legend)
 
@@ -707,30 +741,65 @@ class MainWindow(QMainWindow):
         s = res["preview_scale"]
         ob = res.get("ob_prev")
         show_ob = self.overlay_ob_check.isChecked() and ob is not None
+        cov = res.get("cov_prev")
+        show_cov = self.cover_check.isChecked() and cov is not None
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
         mode_crop = self.view_combo.currentIndex() == 1 and entry is not None
 
         if mode_crop:
-            cx, cy = entry["x"] * s, entry["y"] * s
-            half = max(8.0, float(self.crop_spin.value()) * s / 2.0)
-            x0 = int(max(0, round(cx - half)))
-            y0 = int(max(0, round(cy - half)))
-            x1 = int(min(a.shape[1], round(cx + half)))
-            y1 = int(min(a.shape[0], round(cy + half)))
-            x1 = max(x1, x0 + 1)
-            y1 = max(y1, y0 + 1)
-            a_gray = a[y0:y1, x0:x1]
-            # B：先按局部裁剪，再对局部做（线性）自适应拉伸
-            b_gray = _linear_u8(b_raw[y0:y1, x0:x1])
-            ob_crop = ob[y0:y1, x0:x1] if ob is not None else None
-            px, py = cx - x0, cy - y0
+            size = int(self.crop_spin.value())
+            a_gray = None
+            try:
+                crops = load_native_pair_crops(
+                    self._fits_cache, res["a_path"], res["b_path"],
+                    [(entry["x"], entry["y"])], size,
+                    fill_invalid_with_a=res.get("fill_invalid_with_a", True),
+                )
+                a_crop, b_crop = crops[0]
+                # 原生分辨率裁块（无降采样），A 线性、B 局部线性
+                a_gray = _linear_u8(a_crop)
+                b_gray = _linear_u8(b_crop)
+            except Exception as ex:  # noqa: BLE001
+                self._log(f"原生裁切失败，回退预览: {ex}")
+            if a_gray is None:
+                cx, cy = entry["x"] * s, entry["y"] * s
+                half = max(8.0, size * s / 2.0)
+                x0 = int(max(0, round(cx - half)))
+                y0 = int(max(0, round(cy - half)))
+                x1 = int(max(x0 + 1, min(a.shape[1], round(cx + half))))
+                y1 = int(max(y0 + 1, min(a.shape[0], round(cy + half))))
+                a_gray = _linear_u8(a[y0:y1, x0:x1].astype(np.float32))
+                b_gray = _linear_u8(b_raw[y0:y1, x0:x1])
+            # 掩码：预览尺度窗口 -> 最近邻放大到 size，与原生裁块对齐
+            ob_crop = cov_crop = None
+            if ob is not None or cov is not None:
+                import cv2
+
+                cx, cy = entry["x"] * s, entry["y"] * s
+                halfp = max(1.0, size * s / 2.0)
+                px0 = int(max(0, round(cx - halfp)))
+                py0 = int(max(0, round(cy - halfp)))
+                px1 = int(max(px0 + 1, min(a.shape[1], round(cx + halfp))))
+                py1 = int(max(py0 + 1, min(a.shape[0], round(cy + halfp))))
+                if ob is not None:
+                    ob_crop = cv2.resize(
+                        ob[py0:py1, px0:px1], (size, size),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                if cov is not None:
+                    cov_crop = cv2.resize(
+                        cov[py0:py1, px0:px1], (size, size),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+            px = py = size // 2
         else:
             a_gray = a
             # B：按全图做自适应拉伸（STF）
             b_gray = _stretch_u8(b_raw)
             ob_crop = ob
+            cov_crop = cov
             px = py = 0.0
 
         a_rgb = gray_to_rgb(a_gray)
@@ -739,6 +808,10 @@ class MainWindow(QMainWindow):
             # A：通道0 A-unusable；B：通道1 B-unusable、通道2 B-satellite
             a_rgb = overlay_ob(a_rgb, ob_crop, {0: _OB_A_UNUSABLE_RGB})
             b_rgb = overlay_ob(b_rgb, ob_crop, {1: _OB_B_UNUSABLE_RGB, 2: _OB_B_SAT_RGB})
+        if show_cov and cov_crop is not None:
+            edge = _mask_edge(cov_crop > 0)
+            a_rgb = paint_mask(a_rgb, edge, _COVER_EDGE_RGB)
+            b_rgb = paint_mask(b_rgb, edge, _COVER_EDGE_RGB)
 
         a_img = rgb_to_qimage(a_rgb)
         b_img = rgb_to_qimage(b_rgb)
@@ -772,25 +845,14 @@ class MainWindow(QMainWindow):
             self.preview_b.width(), self.preview_b.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-    def _make_pair_thumb(self, res: Dict, det: Dict, side: int = 128) -> QPixmap:
-        """生成单个检测的 A|B 裁切缩略图（带十字）。"""
-        a = res.get("a_u8")
-        b_raw = res.get("b_raw")
-        if a is None or b_raw is None:
-            return QPixmap()
-        s = res["preview_scale"]
-        cx, cy = det["x"] * s, det["y"] * s
-        half = max(8.0, float(self.crop_spin.value()) * s / 2.0)
-        x0 = int(max(0, round(cx - half)))
-        y0 = int(max(0, round(cy - half)))
-        x1 = int(min(a.shape[1], round(cx + half)))
-        y1 = int(min(a.shape[0], round(cy + half)))
-        x1 = max(x1, x0 + 1)
-        y1 = max(y1, y0 + 1)
-        a_img = numpy_to_qimage(a[y0:y1, x0:x1])
-        b_img = numpy_to_qimage(_linear_u8(b_raw[y0:y1, x0:x1]))
-        self._draw_crosshair(a_img, cx - x0, cy - y0, _SEL_COLOR)
-        self._draw_crosshair(b_img, cx - x0, cy - y0, _SEL_COLOR)
+    def _thumb_from_crops(self, a_crop: np.ndarray, b_crop: np.ndarray,
+                          side: int = 128) -> QPixmap:
+        """由原生裁块拼出 A|B 缩略图（带十字）。"""
+        a_img = numpy_to_qimage(_linear_u8(a_crop))
+        b_img = numpy_to_qimage(_linear_u8(b_crop))
+        cx, cy = a_img.width() // 2, a_img.height() // 2
+        self._draw_crosshair(a_img, cx, cy, _SEL_COLOR)
+        self._draw_crosshair(b_img, cx, cy, _SEL_COLOR)
         w = a_img.width() + b_img.width()
         h = max(a_img.height(), b_img.height())
         combined = QImage(w, h, QImage.Format_RGB888)
@@ -803,7 +865,7 @@ class MainWindow(QMainWindow):
             side * 2, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def _build_montage(self, limit: int = 300) -> None:
-        """把当前所有检测做成小图墙（每格 A|B 裁切 + 信息）。"""
+        """把当前所有检测做成小图墙（每格 A|B 原生裁切 + 信息）。"""
         limit = int(limit) or 300
         while self.montage_grid.count():
             item = self.montage_grid.takeAt(0)
@@ -811,16 +873,35 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
         show_all = self.show_filtered_check.isChecked()
+        size = int(self.crop_spin.value())
         cols = 4
         n = 0
         for res in self._results:
-            for det in res["detections"]:
-                st = det.get("status", "keep")
-                if st != "keep" and not show_all:
+            if n >= limit:
+                break
+            dets = [
+                d for d in res["detections"]
+                if show_all or d.get("status", "keep") == "keep"
+            ]
+            dets = dets[: max(0, limit - n)]
+            if not dets:
+                continue
+            # 每个文件一次性读取原生裁块
+            crops: List = []
+            try:
+                crops = load_native_pair_crops(
+                    self._fits_cache, res["a_path"], res["b_path"],
+                    [(d["x"], d["y"]) for d in dets], size,
+                    fill_invalid_with_a=res.get("fill_invalid_with_a", True),
+                )
+            except Exception as ex:  # noqa: BLE001
+                self._log(f"小图墙原生裁切失败: {ex}")
+                crops = [(None, None)] * len(dets)
+            for det, cr in zip(dets, crops):
+                if n >= limit or cr is None or cr[0] is None:
                     continue
-                if n >= limit:
-                    break
-                pm = self._make_pair_thumb(res, det)
+                st = det.get("status", "keep")
+                pm = self._thumb_from_crops(cr[0], cr[1])
                 cell = QFrame()
                 cell.setFrameShape(QFrame.Box)
                 cl = QVBoxLayout(cell)

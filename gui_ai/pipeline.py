@@ -51,6 +51,21 @@ def _downscale_u8(arr_u8: np.ndarray, max_side: int) -> tuple[np.ndarray, float]
     return out, s
 
 
+def _downscale_mask(mask: np.ndarray, max_side: int) -> np.ndarray:
+    """把布尔覆盖掩码降采样为预览尺度 uint8(0/255)。"""
+    import cv2
+
+    h, w = mask.shape
+    s = min(1.0, float(max_side) / float(max(h, w)))
+    m = np.asarray(mask, dtype=np.float32)
+    if s >= 1.0:
+        return ((m > 0.5).astype(np.uint8)) * 255
+    nw = max(1, int(round(w * s)))
+    nh = max(1, int(round(h * s)))
+    small = cv2.resize(m, (nw, nh), interpolation=cv2.INTER_AREA)
+    return ((small >= 0.5).astype(np.uint8)) * 255
+
+
 def _downscale_f32(arr: np.ndarray, max_side: int) -> np.ndarray:
     """把原始浮点帧降采样为预览用数组（供局部/全图自适应拉伸）。
 
@@ -111,7 +126,9 @@ def process_b_file(
         "a_u8": None,
         "b_raw": None,
         "ob_prev": None,
+        "cov_prev": None,
         "preview_scale": 1.0,
+        "fill_invalid_with_a": bool(fill_invalid_with_a),
         "elapsed": 0.0,
         "error": None,
     }
@@ -154,6 +171,7 @@ def process_b_file(
     ph = max(1, int(round(h * prev_scale)))
     pw = max(1, int(round(w * prev_scale)))
     ob_prev = None
+    cov_prev = _downscale_mask(valid, preview_max_side)
 
     batch_a: List[np.ndarray] = []
     batch_b: List[np.ndarray] = []
@@ -247,6 +265,7 @@ def process_b_file(
     result["a_u8"] = a_prev
     result["b_raw"] = _downscale_f32(b_filled, preview_max_side)
     result["ob_prev"] = ob_prev
+    result["cov_prev"] = cov_prev
     result["preview_scale"] = s
     result["elapsed"] = time.perf_counter() - t0
     log(
