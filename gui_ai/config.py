@@ -18,6 +18,10 @@ DEFAULTS = {
     "template_root": "E:/fix_data/template",
     # 模型目录：内含 best.pt / best_info.json（model.py 在本目录内共用）
     "model_dir": str(BASE_DIR / "models_256_final"),
+    # 单帧 OB/不可用区分割器（OBNet）目录
+    "ob_model_dir": str(BASE_DIR / "models_ob"),
+    # 单帧 OBNet 的不可用区判定阈值
+    "ob_threshold": 0.5,
     # 瓦片边长（= 模型输入尺寸）
     "tile_size": 256,
     # 相邻瓦片重叠比例（占瓦片宽度的百分比），默认 10%

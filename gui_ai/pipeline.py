@@ -102,6 +102,7 @@ def process_b_file(
     reproject_chunk_rows: int,
     fill_invalid_with_a: bool = True,
     preview_max_side: int = 1600,
+    ob_model=None,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -127,6 +128,8 @@ def process_b_file(
         "b_raw": None,
         "ob_prev": None,
         "cov_prev": None,
+        "ob2_a": None,
+        "ob2_b": None,
         "preview_scale": 1.0,
         "fill_invalid_with_a": bool(fill_invalid_with_a),
         "elapsed": 0.0,
@@ -171,6 +174,8 @@ def process_b_file(
     ph = max(1, int(round(h * prev_scale)))
     pw = max(1, int(round(w * prev_scale)))
     ob_prev = None
+    ob2_a_prev = None
+    ob2_b_prev = None
     cov_prev = _downscale_mask(valid, preview_max_side)
 
     batch_a: List[np.ndarray] = []
@@ -179,34 +184,53 @@ def process_b_file(
     dets: List[Dict] = []
     poses: List[tuple] = []
 
-    def flush() -> None:
-        nonlocal ob_prev
-        if not batch_a:
-            return
+    def _paste(mask2d: np.ndarray, target: np.ndarray, channel: int,
+               x0: int, y0: int) -> None:
+        """把瓦片尺寸掩码缩到预览尺度并 max 合并进 target。"""
         import cv2
 
+        x0p = int(round(x0 * prev_scale))
+        y0p = int(round(y0 * prev_scale))
+        x1p = min(pw, max(x0p + 1, int(round((x0 + tile_size) * prev_scale))))
+        y1p = min(ph, max(y0p + 1, int(round((y0 + tile_size) * prev_scale))))
+        mc = cv2.resize(
+            mask2d.astype(np.float32), (x1p - x0p, y1p - y0p),
+            interpolation=cv2.INTER_AREA,
+        )
+        mcu = np.clip(mc, 0, 255).astype(np.uint8)
+        if target.ndim == 2:
+            np.maximum(target[y0p:y1p, x0p:x1p], mcu,
+                       out=target[y0p:y1p, x0p:x1p])
+        else:
+            np.maximum(target[y0p:y1p, x0p:x1p, channel], mcu,
+                       out=target[y0p:y1p, x0p:x1p, channel])
+
+    def flush() -> None:
+        nonlocal ob_prev, ob2_a_prev, ob2_b_prev
+        if not batch_a:
+            return
         out = model.infer_tiles(batch_a, batch_b, tile_size)
-        for (x0, y0), r in zip(origins, out):
+        ob2_a_tiles = ob_model.infer_tiles(batch_a, tile_size) if ob_model else None
+        ob2_b_tiles = ob_model.infer_tiles(batch_b, tile_size) if ob_model else None
+        for i, ((x0, y0), r) in enumerate(zip(origins, out)):
             poses.append((r["dx"], r["dy"], r["roll"]))
-            # 累加 ob 掩码到预览尺度
+            # PairRegNet ob 掩码
             m = r.get("masks")
             if m is not None:
                 if ob_prev is None:
                     ob_prev = np.zeros((ph, pw, m.shape[0]), dtype=np.uint8)
-                x0p = int(round(x0 * prev_scale))
-                y0p = int(round(y0 * prev_scale))
-                x1p = min(pw, max(x0p + 1, int(round((x0 + tile_size) * prev_scale))))
-                y1p = min(ph, max(y0p + 1, int(round((y0 + tile_size) * prev_scale))))
-                tw, th = x1p - x0p, y1p - y0p
                 for c in range(min(m.shape[0], ob_prev.shape[2])):
-                    mc = cv2.resize(
-                        m[c].astype(np.float32), (tw, th), interpolation=cv2.INTER_AREA
-                    )
-                    mcu = np.clip(mc * 255.0, 0, 255).astype(np.uint8)
-                    np.maximum(
-                        ob_prev[y0p:y1p, x0p:x1p, c], mcu,
-                        out=ob_prev[y0p:y1p, x0p:x1p, c],
-                    )
+                    _paste((np.asarray(m[c]) * 255.0).astype(np.uint8),
+                           ob_prev, c, x0, y0)
+            # 单帧 OBNet 掩码（A / B）
+            if ob2_a_tiles is not None:
+                if ob2_a_prev is None:
+                    ob2_a_prev = np.zeros((ph, pw), dtype=np.uint8)
+                _paste(ob2_a_tiles[i], ob2_a_prev, 0, x0, y0)
+            if ob2_b_tiles is not None:
+                if ob2_b_prev is None:
+                    ob2_b_prev = np.zeros((ph, pw), dtype=np.uint8)
+                _paste(ob2_b_tiles[i], ob2_b_prev, 0, x0, y0)
             for pk in r["peaks"]:
                 fx = x0 + pk["x"]
                 fy = y0 + pk["y"]
@@ -266,7 +290,10 @@ def process_b_file(
     result["b_raw"] = _downscale_f32(b_filled, preview_max_side)
     result["ob_prev"] = ob_prev
     result["cov_prev"] = cov_prev
+    result["ob2_a"] = ob2_a_prev
+    result["ob2_b"] = ob2_b_prev
     result["preview_scale"] = s
+
     result["elapsed"] = time.perf_counter() - t0
     log(
         f"完成 {os.path.basename(b_path)}: 命中 {result['n_keep']}/{result['n_total']} "

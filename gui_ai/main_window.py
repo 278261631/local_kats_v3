@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
 
 from config import DEFAULTS
 from native_crop import FitsCache, load_native_pair_crops
+from ob_infer import OBModel
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
 
@@ -96,6 +97,9 @@ _OB_B_UNUSABLE_RGB = (230, 60, 60)
 _OB_B_SAT_RGB = (255, 170, 0)
 # B 覆盖区（WCS 对齐后）边框颜色
 _COVER_EDGE_RGB = (255, 230, 0)
+# 单帧 OBNet 不可用区 / A 的 OBNet 叠加到 B
+_OB_NET_RGB = (60, 220, 60)
+_OB_NET_A_ON_B_RGB = (180, 80, 255)
 
 
 def _swatch(color) -> str:
@@ -130,6 +134,15 @@ def overlay_ob(rgb: np.ndarray, ob: np.ndarray, channels: Dict[int, tuple]) -> n
         a = (ob[:, :, c].astype(np.float32) / 255.0 * 0.5)[:, :, None]
         colv = np.array(col, dtype=np.float32)[None, None, :]
         out = out * (1.0 - a) + colv * a
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+def tint_mask(rgb: np.ndarray, mask, color: tuple, alpha: float = 0.5) -> np.ndarray:
+    """把布尔掩码以半透明纯色叠加到 RGB 图上。"""
+    out = rgb.astype(np.float32)
+    m = np.asarray(mask).astype(bool)
+    if m.any():
+        out[m] = out[m] * (1.0 - alpha) + np.array(color, dtype=np.float32) * alpha
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
@@ -305,6 +318,19 @@ class ProcessWorker(QThread):
                 batch_size=self.params["batch_size"],
             )
             self.log.emit(f"模型已加载 (device={model.device}, size={model.model_size})")
+            ob_model = None
+            ob_dir = self.params.get("ob_model_dir")
+            if ob_dir:
+                try:
+                    ob_model = OBModel(
+                        ob_dir, device=self.params["device"],
+                        batch_size=max(64, self.params["batch_size"] * 2),
+                        threshold=self.params.get("ob_threshold", 0.5),
+                    )
+                    self.log.emit(f"单帧OBNet已加载: {ob_dir} (device={ob_model.device})")
+                except Exception as ex:  # noqa: BLE001
+                    self.log.emit(f"单帧OBNet加载失败（跳过对比）: {ex}")
+                    ob_model = None
 
             total = len(files)
             for i, f in enumerate(files, 1):
@@ -323,6 +349,7 @@ class ProcessWorker(QThread):
                         dedup_radius=self.params["dedup_radius"],
                         reproject_chunk_rows=self.params["reproject_chunk_rows"],
                         fill_invalid_with_a=self.params["fill_invalid_with_a"],
+                        ob_model=ob_model,
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -401,6 +428,8 @@ class MainWindow(QMainWindow):
         form.addRow("模板根目录", self.template_edit)
         self.model_edit = QLineEdit(DEFAULTS["model_dir"])
         form.addRow("模型目录", self.model_edit)
+        self.ob_model_edit = QLineEdit(DEFAULTS["ob_model_dir"])
+        form.addRow("OBNet目录", self.ob_model_edit)
         self.device_combo = QComboBox()
         self.device_combo.addItems(["auto", "cpu", "cuda"])
         self.device_combo.setCurrentText(DEFAULTS["device"])
@@ -421,6 +450,12 @@ class MainWindow(QMainWindow):
         self.thresh_spin.setDecimals(2)
         self.thresh_spin.setValue(DEFAULTS["det_threshold"])
         form.addRow("检测阈值", self.thresh_spin)
+        self.ob_thresh_spin = QDoubleSpinBox()
+        self.ob_thresh_spin.setRange(0.0, 1.0)
+        self.ob_thresh_spin.setSingleStep(0.05)
+        self.ob_thresh_spin.setDecimals(2)
+        self.ob_thresh_spin.setValue(DEFAULTS["ob_threshold"])
+        form.addRow("OBNet阈值", self.ob_thresh_spin)
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 128)
         self.batch_spin.setValue(DEFAULTS["batch_size"])
@@ -501,6 +536,14 @@ class MainWindow(QMainWindow):
         self.cover_check.setChecked(False)
         self.cover_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.cover_check)
+        self.ob_net_check = QCheckBox("叠加 OBNet(不可用区)")
+        self.ob_net_check.setChecked(False)
+        self.ob_net_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.ob_net_check)
+        self.ob_a_on_b_check = QCheckBox("A的OBNet叠加到B")
+        self.ob_a_on_b_check.setChecked(False)
+        self.ob_a_on_b_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.ob_a_on_b_check)
         vrow.addStretch(1)
         pw.addLayout(vrow)
 
@@ -521,6 +564,9 @@ class MainWindow(QMainWindow):
             + _swatch(_OB_B_UNUSABLE_RGB) + " B-unusable　"
             + _swatch(_OB_B_SAT_RGB) + " B-satellite　"
             + _swatch(_COVER_EDGE_RGB) + " B覆盖边框"
+            + "　　|　　<b>单帧OBNet：</b>"
+            + _swatch(_OB_NET_RGB) + " 不可用区　"
+            + _swatch(_OB_NET_A_ON_B_RGB) + " A的OBNet(叠加到B)"
         )
         pw.addWidget(legend)
 
@@ -592,6 +638,8 @@ class MainWindow(QMainWindow):
         return {
             "template_root": self.template_edit.text().strip(),
             "model_dir": self.model_edit.text().strip(),
+            "ob_model_dir": self.ob_model_edit.text().strip(),
+            "ob_threshold": float(self.ob_thresh_spin.value()),
             "device": self.device_combo.currentText(),
             "tile_size": int(self.tile_spin.value()),
             "overlap": float(self.overlap_spin.value()),
@@ -773,9 +821,13 @@ class MainWindow(QMainWindow):
         b_raw = res["b_raw"]
         s = res["preview_scale"]
         ob = res.get("ob_prev")
-        show_ob = self.overlay_ob_check.isChecked() and ob is not None
+        ob2_a = res.get("ob2_a")
+        ob2_b = res.get("ob2_b")
         cov = res.get("cov_prev")
+        show_ob = self.overlay_ob_check.isChecked() and ob is not None
         show_cov = self.cover_check.isChecked() and cov is not None
+        show_net = self.ob_net_check.isChecked()
+        show_net_a_on_b = self.ob_a_on_b_check.isChecked()
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
@@ -809,59 +861,71 @@ class MainWindow(QMainWindow):
                 y1 = int(max(y0 + 1, min(a.shape[0], round(cy + half))))
                 a_gray = _linear_u8(a[y0:y1, x0:x1].astype(np.float32))
                 b_gray = _linear_u8(b_raw[y0:y1, x0:x1])
-            # 掩码：预览尺度窗口 -> 最近邻放大到 size，与原生裁块对齐
-            ob_crop = cov_crop = None
-            if ob is not None or cov is not None:
-                import cv2
-
-                cx, cy = center[0] * s, center[1] * s
-                halfp = max(1.0, size * s / 2.0)
-                px0 = int(max(0, round(cx - halfp)))
-                py0 = int(max(0, round(cy - halfp)))
-                px1 = int(max(px0 + 1, min(a.shape[1], round(cx + halfp))))
-                py1 = int(max(py0 + 1, min(a.shape[0], round(cy + halfp))))
-                if ob is not None:
-                    ob_crop = cv2.resize(
-                        ob[py0:py1, px0:px1], (size, size),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-                if cov is not None:
-                    cov_crop = cv2.resize(
-                        cov[py0:py1, px0:px1], (size, size),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
+            # 预览尺度窗口（供 ob/cov/对比掩码对齐到裁块）
+            cx, cy = center[0] * s, center[1] * s
+            halfp = max(1.0, size * s / 2.0)
+            mpx0 = int(max(0, round(cx - halfp)))
+            mpy0 = int(max(0, round(cy - halfp)))
+            mpx1 = int(max(mpx0 + 1, min(a.shape[1], round(cx + halfp))))
+            mpy1 = int(max(mpy0 + 1, min(a.shape[0], round(cy + halfp))))
             px = py = size // 2
         else:
             a_gray = a
             # B：按全图做自适应拉伸（STF）
             b_gray = _stretch_u8(b_raw)
-            ob_crop = ob
-            cov_crop = cov
+            mpx0 = mpy0 = 0
+            mpx1, mpy1 = a.shape[1], a.shape[0]
             px = py = 0.0
+
+        import cv2
+
+        img_h, img_w = a_gray.shape[:2]
+
+        def align2d(prevmask):
+            if prevmask is None:
+                return None
+            sub = prevmask[mpy0:mpy1, mpx0:mpx1]
+            if mode_crop:
+                sub = cv2.resize(sub, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+            return np.asarray(sub)
 
         a_rgb = gray_to_rgb(a_gray)
         b_rgb = gray_to_rgb(b_gray)
-        if show_ob and ob_crop is not None:
+        if show_ob and ob is not None:
             # A：通道0 A-unusable；B：通道1 B-unusable、通道2 B-satellite
-            a_rgb = overlay_ob(a_rgb, ob_crop, {0: _OB_A_UNUSABLE_RGB})
-            b_rgb = overlay_ob(b_rgb, ob_crop, {1: _OB_B_UNUSABLE_RGB, 2: _OB_B_SAT_RGB})
-        if show_cov and cov_crop is not None:
-            edge = _mask_edge(cov_crop > 0)
+            a_rgb = overlay_ob(a_rgb, np.stack([align2d(ob[:, :, 0])], axis=2),
+                               {0: _OB_A_UNUSABLE_RGB})
+            b_rgb = overlay_ob(
+                b_rgb,
+                np.stack([align2d(ob[:, :, c]) for c in range(ob.shape[2])], axis=2),
+                {1: _OB_B_UNUSABLE_RGB, 2: _OB_B_SAT_RGB},
+            )
+        if show_cov and cov is not None:
+            edge = _mask_edge(align2d(cov) > 0)
             a_rgb = paint_mask(a_rgb, edge, _COVER_EDGE_RGB)
             b_rgb = paint_mask(b_rgb, edge, _COVER_EDGE_RGB)
+        if show_net:
+            # OBNet 单独显示：A、B 各自叠加自己的不可用区
+            if ob2_a is not None:
+                a_rgb = tint_mask(a_rgb, align2d(ob2_a) > 127, _OB_NET_RGB)
+            if ob2_b is not None:
+                b_rgb = tint_mask(b_rgb, align2d(ob2_b) > 127, _OB_NET_RGB)
+        if show_net_a_on_b and ob2_a is not None:
+            # 把 A 的 OBNet 结果换个颜色叠加到 B 上
+            b_rgb = tint_mask(b_rgb, align2d(ob2_a) > 127, _OB_NET_A_ON_B_RGB)
 
         a_img = rgb_to_qimage(a_rgb)
         b_img = rgb_to_qimage(b_rgb)
 
         if mode_crop:
-            size = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
+            csz = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
             # 裁切模式：十字用该目标的状态(类别)颜色；手动双击点用选中色
             if entry is not None and manual is None:
                 col = _det_status_color(entry.get("status", "keep"))
             else:
                 col = _SEL_COLOR
-            self._draw_crosshair(a_img, px, py, col, size=size, gap=max(3, size // 3))
-            self._draw_crosshair(b_img, px, py, col, size=size, gap=max(3, size // 3))
+            self._draw_crosshair(a_img, px, py, col, size=csz, gap=max(3, csz // 3))
+            self._draw_crosshair(b_img, px, py, col, size=csz, gap=max(3, csz // 3))
         else:
             for d in res["detections"]:
                 st = d.get("status", "keep")
