@@ -64,7 +64,6 @@ from PySide6.QtWidgets import (
 
 from config import DEFAULTS
 from native_crop import FitsCache, load_native_pair_crops
-from ob_infer import OBModel
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
 
@@ -75,17 +74,13 @@ _SEL_COLOR = QColor(60, 255, 120)
 
 _STATUS_TEXT = {
     "keep": "命中",
-    "ob_unusable": "ob遮蔽",
-    "ob_satellite": "ob卫星",
+    "satellite": "卫星",
     "b_uncovered": "B未覆盖",
-    "obnet": "OBNet不可用",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
-    "ob_unusable": QColor(255, 64, 255),
-    "ob_satellite": QColor(255, 170, 80),
+    "satellite": QColor(255, 170, 80),
     "b_uncovered": QColor(150, 150, 200),
-    "obnet": QColor(180, 80, 255),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -94,15 +89,10 @@ def _det_status_color(status: str) -> QColor:
     return _DET_COLOR if status == "keep" else _STATUS_COLOR.get(status, _DET_COLOR)
 
 
-# ob 掩码叠加颜色：A-unusable 青、B-unusable 红、B-satellite 橙
-_OB_A_UNUSABLE_RGB = (0, 200, 255)
-_OB_B_UNUSABLE_RGB = (230, 60, 60)
-_OB_B_SAT_RGB = (255, 170, 0)
+# 卫星掩码叠加颜色
+_SAT_RGB = (255, 170, 0)
 # B 覆盖区（WCS 对齐后）边框颜色
 _COVER_EDGE_RGB = (255, 230, 0)
-# 单帧 OBNet 不可用区 / A 的 OBNet 叠加到 B
-_OB_NET_RGB = (60, 220, 60)
-_OB_NET_A_ON_B_RGB = (180, 80, 255)
 # A 模板有效区（星空/空白）边界
 _A_VALID_COLOR = QColor(255, 255, 255)
 # B（重投影后）有效区边界
@@ -141,15 +131,6 @@ def overlay_ob(rgb: np.ndarray, ob: np.ndarray, channels: Dict[int, tuple]) -> n
         a = (ob[:, :, c].astype(np.float32) / 255.0 * 0.5)[:, :, None]
         colv = np.array(col, dtype=np.float32)[None, None, :]
         out = out * (1.0 - a) + colv * a
-    return np.clip(out, 0.0, 255.0).astype(np.uint8)
-
-
-def tint_mask(rgb: np.ndarray, mask, color: tuple, alpha: float = 0.5) -> np.ndarray:
-    """把布尔掩码以半透明纯色叠加到 RGB 图上。"""
-    out = rgb.astype(np.float32)
-    m = np.asarray(mask).astype(bool)
-    if m.any():
-        out[m] = out[m] * (1.0 - alpha) + np.array(color, dtype=np.float32) * alpha
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
@@ -325,19 +306,6 @@ class ProcessWorker(QThread):
                 batch_size=self.params["batch_size"],
             )
             self.log.emit(f"模型已加载 (device={model.device}, size={model.model_size})")
-            ob_model = None
-            ob_dir = self.params.get("ob_model_dir")
-            if ob_dir:
-                try:
-                    ob_model = OBModel(
-                        ob_dir, device=self.params["device"],
-                        batch_size=max(64, self.params["batch_size"] * 2),
-                        threshold=self.params.get("ob_threshold", 0.5),
-                    )
-                    self.log.emit(f"单帧OBNet已加载: {ob_dir} (device={ob_model.device})")
-                except Exception as ex:  # noqa: BLE001
-                    self.log.emit(f"单帧OBNet加载失败（跳过对比）: {ex}")
-                    ob_model = None
 
             total = len(files)
             for i, f in enumerate(files, 1):
@@ -356,8 +324,6 @@ class ProcessWorker(QThread):
                         dedup_radius=self.params["dedup_radius"],
                         reproject_chunk_rows=self.params["reproject_chunk_rows"],
                         fill_invalid_with_a=self.params["fill_invalid_with_a"],
-                        ob_model=ob_model,
-                        obnet_filter=self.params.get("obnet_filter", True),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -436,8 +402,6 @@ class MainWindow(QMainWindow):
         form.addRow("模板根目录", self.template_edit)
         self.model_edit = QLineEdit(DEFAULTS["model_dir"])
         form.addRow("模型目录", self.model_edit)
-        self.ob_model_edit = QLineEdit(DEFAULTS["ob_model_dir"])
-        form.addRow("OBNet目录", self.ob_model_edit)
         self.device_combo = QComboBox()
         self.device_combo.addItems(["auto", "cpu", "cuda"])
         self.device_combo.setCurrentText(DEFAULTS["device"])
@@ -458,12 +422,6 @@ class MainWindow(QMainWindow):
         self.thresh_spin.setDecimals(2)
         self.thresh_spin.setValue(DEFAULTS["det_threshold"])
         form.addRow("检测阈值", self.thresh_spin)
-        self.ob_thresh_spin = QDoubleSpinBox()
-        self.ob_thresh_spin.setRange(0.0, 1.0)
-        self.ob_thresh_spin.setSingleStep(0.05)
-        self.ob_thresh_spin.setDecimals(2)
-        self.ob_thresh_spin.setValue(DEFAULTS["ob_threshold"])
-        form.addRow("OBNet阈值", self.ob_thresh_spin)
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 128)
         self.batch_spin.setValue(DEFAULTS["batch_size"])
@@ -471,9 +429,6 @@ class MainWindow(QMainWindow):
         self.fill_check = QCheckBox("B 未覆盖区域用 A 填充")
         self.fill_check.setChecked(DEFAULTS["fill_invalid_with_a"])
         form.addRow("", self.fill_check)
-        self.use_obnet_check = QCheckBox("用 OBNet 结果过滤检测")
-        self.use_obnet_check.setChecked(DEFAULTS["use_obnet_filter"])
-        form.addRow("", self.use_obnet_check)
         lay.addWidget(params)
 
         btns = QHBoxLayout()
@@ -539,22 +494,14 @@ class MainWindow(QMainWindow):
         self.show_filtered_check.setChecked(True)
         self.show_filtered_check.stateChanged.connect(lambda _=0: self._rebuild_table())
         vrow.addWidget(self.show_filtered_check)
-        self.overlay_ob_check = QCheckBox("叠加 ob 掩码")
-        self.overlay_ob_check.setChecked(False)
-        self.overlay_ob_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.overlay_ob_check)
+        self.sat_check = QCheckBox("叠加卫星掩码")
+        self.sat_check.setChecked(False)
+        self.sat_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.sat_check)
         self.cover_check = QCheckBox("显示 B 覆盖边框")
         self.cover_check.setChecked(False)
         self.cover_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.cover_check)
-        self.ob_net_check = QCheckBox("叠加 OBNet(不可用区)")
-        self.ob_net_check.setChecked(False)
-        self.ob_net_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.ob_net_check)
-        self.ob_a_on_b_check = QCheckBox("A的OBNet叠加到B")
-        self.ob_a_on_b_check.setChecked(False)
-        self.ob_a_on_b_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.ob_a_on_b_check)
         self.validpoly_check = QCheckBox("显示A有效区边界")
         self.validpoly_check.setChecked(False)
         self.validpoly_check.stateChanged.connect(lambda _=0: self._refresh_preview())
@@ -573,22 +520,16 @@ class MainWindow(QMainWindow):
         legend.setText(
             "<b>标注颜色：</b>"
             + _swatch(_DET_COLOR) + " 命中(keep)　"
-            + _swatch(_STATUS_COLOR["ob_unusable"]) + " ob遮蔽(B-unusable)　"
-            + _swatch(_STATUS_COLOR["ob_satellite"]) + " ob卫星(B-satellite)　"
+            + _swatch(_STATUS_COLOR["satellite"]) + " 卫星(satellite)　"
             + _swatch(_STATUS_COLOR["b_uncovered"]) + " B未覆盖　"
-            + _swatch(_STATUS_COLOR["obnet"]) + " OBNet不可用　"
             + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
             + _swatch(_SEL_COLOR) + " 当前选中"
-            + "　　|　　<b>ob 掩码叠加：</b>"
-            + _swatch(_OB_A_UNUSABLE_RGB) + " A-unusable　"
-            + _swatch(_OB_B_UNUSABLE_RGB) + " B-unusable　"
-            + _swatch(_OB_B_SAT_RGB) + " B-satellite　"
+            + "　　|　　<b>叠加：</b>"
+            + _swatch(_SAT_RGB) + " 卫星掩码　"
             + _swatch(_COVER_EDGE_RGB) + " B覆盖边框"
-            + "　　|　　<b>单帧OBNet：</b>"
-            + _swatch(_OB_NET_RGB) + " 不可用区　"
-            + _swatch(_OB_NET_A_ON_B_RGB) + " A的OBNet(叠加到B)　"
-            + _swatch(_A_VALID_COLOR) + " A有效区边界　"
-            + _swatch(_B_VALID_COLOR) + " B有效区边界"
+            + "　　|　　<b>有效区边界：</b>"
+            + _swatch(_A_VALID_COLOR) + " A有效区　"
+            + _swatch(_B_VALID_COLOR) + " B有效区"
         )
         pw.addWidget(legend)
 
@@ -660,8 +601,6 @@ class MainWindow(QMainWindow):
         return {
             "template_root": self.template_edit.text().strip(),
             "model_dir": self.model_edit.text().strip(),
-            "ob_model_dir": self.ob_model_edit.text().strip(),
-            "ob_threshold": float(self.ob_thresh_spin.value()),
             "device": self.device_combo.currentText(),
             "tile_size": int(self.tile_spin.value()),
             "overlap": float(self.overlap_spin.value()),
@@ -670,7 +609,6 @@ class MainWindow(QMainWindow):
             "dedup_radius": float(DEFAULTS["dedup_radius"]),
             "reproject_chunk_rows": int(DEFAULTS["reproject_chunk_rows"]),
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
-            "obnet_filter": bool(self.use_obnet_check.isChecked()),
         }
 
     # -------------------------------------------------------------- process
@@ -850,14 +788,10 @@ class MainWindow(QMainWindow):
         a = res["a_u8"]
         b_raw = res["b_raw"]
         s = res["preview_scale"]
-        ob = res.get("ob_prev")
-        ob2_a = res.get("ob2_a")
-        ob2_b = res.get("ob2_b")
+        sat = res.get("sat_prev")
         cov = res.get("cov_prev")
-        show_ob = self.overlay_ob_check.isChecked() and ob is not None
+        show_sat = self.sat_check.isChecked() and sat is not None
         show_cov = self.cover_check.isChecked() and cov is not None
-        show_net = self.ob_net_check.isChecked()
-        show_net_a_on_b = self.ob_a_on_b_check.isChecked()
         show_validpoly = self.validpoly_check.isChecked()
         show_validpoly_b = self.validpoly_b_check.isChecked()
         show_all = self.show_filtered_check.isChecked()
@@ -928,28 +862,13 @@ class MainWindow(QMainWindow):
 
         a_rgb = gray_to_rgb(a_gray)
         b_rgb = gray_to_rgb(b_gray)
-        if show_ob and ob is not None:
-            # A：通道0 A-unusable；B：通道1 B-unusable、通道2 B-satellite
-            a_rgb = overlay_ob(a_rgb, np.stack([align2d(ob[:, :, 0])], axis=2),
-                               {0: _OB_A_UNUSABLE_RGB})
-            b_rgb = overlay_ob(
-                b_rgb,
-                np.stack([align2d(ob[:, :, c]) for c in range(ob.shape[2])], axis=2),
-                {1: _OB_B_UNUSABLE_RGB, 2: _OB_B_SAT_RGB},
-            )
+        if show_sat and sat is not None:
+            # 卫星掩码只作用于 B（PairRegNet ob 通道 2）
+            b_rgb = overlay_ob(b_rgb, align2d(sat)[:, :, None], {0: _SAT_RGB})
         if show_cov and cov is not None:
             edge = _mask_edge(align2d(cov) > 0)
             a_rgb = paint_mask(a_rgb, edge, _COVER_EDGE_RGB)
             b_rgb = paint_mask(b_rgb, edge, _COVER_EDGE_RGB)
-        if show_net:
-            # OBNet 单独显示：A、B 各自叠加自己的不可用区
-            if ob2_a is not None:
-                a_rgb = tint_mask(a_rgb, align2d(ob2_a) > 127, _OB_NET_RGB)
-            if ob2_b is not None:
-                b_rgb = tint_mask(b_rgb, align2d(ob2_b) > 127, _OB_NET_RGB)
-        if show_net_a_on_b and ob2_a is not None:
-            # 把 A 的 OBNet 结果换个颜色叠加到 B 上
-            b_rgb = tint_mask(b_rgb, align2d(ob2_a) > 127, _OB_NET_A_ON_B_RGB)
 
         a_img = rgb_to_qimage(a_rgb)
         b_img = rgb_to_qimage(b_rgb)

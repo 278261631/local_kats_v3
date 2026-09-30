@@ -106,8 +106,6 @@ def process_b_file(
     reproject_chunk_rows: int,
     fill_invalid_with_a: bool = True,
     preview_max_side: int = 1600,
-    ob_model=None,
-    obnet_filter: bool = True,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -131,12 +129,10 @@ def process_b_file(
         "mean_roll": 0.0,
         "a_u8": None,
         "b_raw": None,
-        "ob_prev": None,
+        "sat_prev": None,
         "cov_prev": None,
         "a_valid_polys": None,
         "b_valid_polys": None,
-        "ob2_a": None,
-        "ob2_b": None,
         "preview_scale": 1.0,
         "fill_invalid_with_a": bool(fill_invalid_with_a),
         "elapsed": 0.0,
@@ -198,13 +194,11 @@ def process_b_file(
     result["n_tiles"] = len(tiles)
     log(f"瓦片数: {len(tiles)} (tile={tile_size}, overlap={overlap:.0%})")
 
-    # ob 掩码在预览尺度上累加，供叠加显示
+    # 卫星掩码在预览尺度上累加，供叠加显示
     prev_scale = min(1.0, float(preview_max_side) / float(max(h, w)))
     ph = max(1, int(round(h * prev_scale)))
     pw = max(1, int(round(w * prev_scale)))
-    ob_prev = None
-    ob2_a_prev = None
-    ob2_b_prev = None
+    sat_prev = None
     cov_prev = _downscale_mask(valid, preview_max_side)
 
     batch_a: List[np.ndarray] = []
@@ -235,31 +229,18 @@ def process_b_file(
                        out=target[y0p:y1p, x0p:x1p, channel])
 
     def flush() -> None:
-        nonlocal ob_prev, ob2_a_prev, ob2_b_prev
+        nonlocal sat_prev
         if not batch_a:
             return
         out = model.infer_tiles(batch_a, batch_b, tile_size)
-        ob2_a_tiles = ob_model.infer_tiles(batch_a, tile_size) if ob_model else None
-        ob2_b_tiles = ob_model.infer_tiles(batch_b, tile_size) if ob_model else None
         for i, ((x0, y0), r) in enumerate(zip(origins, out)):
             poses.append((r["dx"], r["dy"], r["roll"]))
-            # PairRegNet ob 掩码
+            # 卫星掩码（PairRegNet ob 通道 2）
             m = r.get("masks")
-            if m is not None:
-                if ob_prev is None:
-                    ob_prev = np.zeros((ph, pw, m.shape[0]), dtype=np.uint8)
-                for c in range(min(m.shape[0], ob_prev.shape[2])):
-                    _paste((np.asarray(m[c]) * 255.0).astype(np.uint8),
-                           ob_prev, c, x0, y0)
-            # 单帧 OBNet 掩码（A / B）
-            if ob2_a_tiles is not None:
-                if ob2_a_prev is None:
-                    ob2_a_prev = np.zeros((ph, pw), dtype=np.uint8)
-                _paste(ob2_a_tiles[i], ob2_a_prev, 0, x0, y0)
-            if ob2_b_tiles is not None:
-                if ob2_b_prev is None:
-                    ob2_b_prev = np.zeros((ph, pw), dtype=np.uint8)
-                _paste(ob2_b_tiles[i], ob2_b_prev, 0, x0, y0)
+            if m is not None and m.shape[0] >= 3:
+                if sat_prev is None:
+                    sat_prev = np.zeros((ph, pw), dtype=np.uint8)
+                _paste((np.asarray(m[2]) * 255.0).astype(np.uint8), sat_prev, 0, x0, y0)
             for pk in r["peaks"]:
                 fx = x0 + pk["x"]
                 fy = y0 + pk["y"]
@@ -268,11 +249,6 @@ def process_b_file(
                 status = pk.get("status", "keep")
                 if status == "keep" and not valid[yi, xi]:
                     status = "b_uncovered"
-                if status == "keep" and obnet_filter and ob2_b_tiles is not None:
-                    ty = min(tile_size - 1, max(0, int(round(pk["y"]))))
-                    tx = min(tile_size - 1, max(0, int(round(pk["x"]))))
-                    if ob2_b_tiles[i][ty, tx] > 127:
-                        status = "obnet"
                 dets.append(
                     {
                         "x": float(fx),
@@ -322,10 +298,8 @@ def process_b_file(
     a_prev, s = _downscale_u8(a_u8, preview_max_side)
     result["a_u8"] = a_prev
     result["b_raw"] = _downscale_f32(b_filled, preview_max_side)
-    result["ob_prev"] = ob_prev
+    result["sat_prev"] = sat_prev
     result["cov_prev"] = cov_prev
-    result["ob2_a"] = ob2_a_prev
-    result["ob2_b"] = ob2_b_prev
     result["preview_scale"] = s
 
     result["elapsed"] = time.perf_counter() - t0

@@ -136,23 +136,19 @@ class PairModel:
             for j in range(len(a_chunk)):
                 peaks = peaks_per[j]
                 masks_j = masks[j] if masks is not None else None
-                # 掩码通道：0=A-unusable, 1=B-unusable, 2=B-satellite
-                ob_b_unusable = ob_satellite = None
-                if masks_j is not None and masks_j.shape[0] >= 2:
-                    ob_b_unusable = masks_j[1] > 0.5
-                    if masks_j.shape[0] >= 3:
-                        ob_satellite = masks_j[2] > 0.5
+                # 仅保留卫星通道（掩码通道 2 = B-satellite）
+                sat = None
+                if masks_j is not None and masks_j.shape[0] >= 3:
+                    sat = masks_j[2] > 0.5
 
                 kept = []
                 for cls, xm, ym, sc in peaks:
                     status = "keep"
-                    if ob_b_unusable is not None or ob_satellite is not None:
+                    if sat is not None:
                         xi = min(masks_j.shape[2] - 1, max(0, int(round(xm))))
                         yi = min(masks_j.shape[1] - 1, max(0, int(round(ym))))
-                        if ob_satellite is not None and ob_satellite[yi, xi]:
-                            status = "ob_satellite"
-                        elif ob_b_unusable is not None and ob_b_unusable[yi, xi]:
-                            status = "ob_unusable"
+                        if sat[yi, xi]:
+                            status = "satellite"
                     kept.append(
                         {
                             "cls": int(cls),
