@@ -234,6 +234,7 @@ class ClickableLabel(QLabel):
     """可点击的图片标签，发出点击处在图像像素坐标系中的坐标。"""
 
     clicked = Signal(float, float)
+    double_clicked = Signal(float, float)
 
     def __init__(self, text: str = "") -> None:
         super().__init__(text)
@@ -244,17 +245,30 @@ class ClickableLabel(QLabel):
         self._img_w = int(w)
         self._img_h = int(h)
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+    def _map_pos(self, event: QMouseEvent):
         pm = self.pixmap()
-        if pm is not None and not pm.isNull() and self._img_w > 0 and self._img_h > 0:
-            pw, ph = pm.width(), pm.height()
-            ox = (self.width() - pw) / 2.0
-            oy = (self.height() - ph) / 2.0
-            x = event.position().x() - ox
-            y = event.position().y() - oy
-            if 0 <= x < pw and 0 <= y < ph:
-                self.clicked.emit(x * self._img_w / pw, y * self._img_h / ph)
+        if pm is None or pm.isNull() or self._img_w <= 0 or self._img_h <= 0:
+            return None
+        pw, ph = pm.width(), pm.height()
+        ox = (self.width() - pw) / 2.0
+        oy = (self.height() - ph) / 2.0
+        x = event.position().x() - ox
+        y = event.position().y() - oy
+        if 0 <= x < pw and 0 <= y < ph:
+            return (x * self._img_w / pw, y * self._img_h / ph)
+        return None
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        p = self._map_pos(event)
+        if p is not None:
+            self.clicked.emit(*p)
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        p = self._map_pos(event)
+        if p is not None:
+            self.double_clicked.emit(*p)
+        super().mouseDoubleClickEvent(event)
 
 
 class ProcessWorker(QThread):
@@ -332,6 +346,8 @@ class MainWindow(QMainWindow):
         self._results: List[Dict] = []          # 每个文件的结果
         self._row_map: List[Optional[Dict]] = []  # 表格行 -> 检测项（含 _result 引用）
         self._fits_cache = FitsCache(max_items=2)  # 原生裁块用（A/B 各一）
+        self._manual_center: Optional[tuple] = None  # 双击指定的裁切中心(原生坐标)
+        self._manual_result = None
 
         self._build_ui()
 
@@ -446,6 +462,7 @@ class MainWindow(QMainWindow):
             lbl.setStyleSheet("background:#111; color:#888;")
             lbl.setCursor(Qt.PointingHandCursor)
             lbl.clicked.connect(self._on_preview_click)
+            lbl.double_clicked.connect(self._on_preview_double_click)
             pl.addWidget(lbl, 1)
 
         preview_wrap = QWidget()
@@ -468,7 +485,7 @@ class MainWindow(QMainWindow):
         self.crop_spin.setValue(DEFAULTS["crop_size"])
         self.crop_spin.valueChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.crop_spin)
-        hint = QLabel("（Tab 切换；全图模式下点击十字可切到裁切）")
+        hint = QLabel("（Tab 切换；全图点击十字→裁切；全图双击任意处→看该处局部对比）")
         hint.setStyleSheet("color:#666;")
         vrow.addWidget(hint)
         vrow.addSpacing(12)
@@ -602,6 +619,8 @@ class MainWindow(QMainWindow):
 
         self._results.clear()
         self._row_map.clear()
+        self._manual_center = None
+        self._manual_result = None
         self.table.setRowCount(0)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -637,7 +656,7 @@ class MainWindow(QMainWindow):
         self.table.insertRow(row)
         status = d.get("status", "keep")
         vals = [
-            os.path.basename(res["b_path"]),
+            os.path.basename(res.get("b_path") or ""),
             _STATUS_TEXT.get(status, status),
             f"{d['x']:.1f}", f"{d['y']:.1f}", f"{d['score']:.3f}",
             f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
@@ -685,6 +704,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_row_selected(self) -> None:
+        self._manual_center = None
+        self._manual_result = None
         self._refresh_preview()
 
     def _toggle_view(self) -> None:
@@ -710,6 +731,18 @@ class MainWindow(QMainWindow):
         if best_row is not None and best_d2 is not None and best_d2 <= r2:
             self.table.selectRow(best_row)
             self.view_combo.setCurrentIndex(1)
+
+    def _on_preview_double_click(self, ix: float, iy: float) -> None:
+        """全图模式下双击任意位置，切到该点的局部 A/B 对比（无需命中检测）。"""
+        if self.view_combo.currentIndex() != 0:
+            return
+        res = self._current_result()
+        if not res or res.get("a_u8") is None:
+            return
+        s = res["preview_scale"]
+        self._manual_center = (ix / s, iy / s)  # 预览坐标 -> 原生坐标
+        self._manual_result = res
+        self.view_combo.setCurrentIndex(1)  # 触发刷新
 
     def _current_result(self) -> Optional[Dict]:
         entry = self._selected_entry()
@@ -746,15 +779,19 @@ class MainWindow(QMainWindow):
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
-        mode_crop = self.view_combo.currentIndex() == 1 and entry is not None
+        manual = self._manual_center if self._manual_result is res else None
+        mode_crop = (
+            self.view_combo.currentIndex() == 1 and (entry is not None or manual is not None)
+        )
 
         if mode_crop:
+            center = manual if manual is not None else (entry["x"], entry["y"])
             size = int(self.crop_spin.value())
             a_gray = None
             try:
                 crops = load_native_pair_crops(
                     self._fits_cache, res["a_path"], res["b_path"],
-                    [(entry["x"], entry["y"])], size,
+                    [center], size,
                     fill_invalid_with_a=res.get("fill_invalid_with_a", True),
                 )
                 a_crop, b_crop = crops[0]
@@ -764,7 +801,7 @@ class MainWindow(QMainWindow):
             except Exception as ex:  # noqa: BLE001
                 self._log(f"原生裁切失败，回退预览: {ex}")
             if a_gray is None:
-                cx, cy = entry["x"] * s, entry["y"] * s
+                cx, cy = center[0] * s, center[1] * s
                 half = max(8.0, size * s / 2.0)
                 x0 = int(max(0, round(cx - half)))
                 y0 = int(max(0, round(cy - half)))
@@ -777,7 +814,7 @@ class MainWindow(QMainWindow):
             if ob is not None or cov is not None:
                 import cv2
 
-                cx, cy = entry["x"] * s, entry["y"] * s
+                cx, cy = center[0] * s, center[1] * s
                 halfp = max(1.0, size * s / 2.0)
                 px0 = int(max(0, round(cx - halfp)))
                 py0 = int(max(0, round(cy - halfp)))
@@ -818,8 +855,11 @@ class MainWindow(QMainWindow):
 
         if mode_crop:
             size = max(9, int(min(a_img.width(), a_img.height()) * 0.18))
-            # 裁切模式：十字用该目标的状态(类别)颜色；A/B 同位置都标注
-            col = _det_status_color(entry.get("status", "keep"))
+            # 裁切模式：十字用该目标的状态(类别)颜色；手动双击点用选中色
+            if entry is not None and manual is None:
+                col = _det_status_color(entry.get("status", "keep"))
+            else:
+                col = _SEL_COLOR
             self._draw_crosshair(a_img, px, py, col, size=size, gap=max(3, size // 3))
             self._draw_crosshair(b_img, px, py, col, size=size, gap=max(3, size // 3))
         else:
@@ -956,7 +996,7 @@ class MainWindow(QMainWindow):
             w.writerow(["file", "status", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"])
             for e in self._row_map:
                 w.writerow([
-                    os.path.basename(e.get("_result", {}).get("b_path", "")),
+                    os.path.basename(e.get("_result", {}).get("b_path") or ""),
                     e.get("status", "keep"),
                     f"{e['x']:.2f}", f"{e['y']:.2f}", f"{e['score']:.4f}",
                     f"{e['dx']:.3f}", f"{e['dy']:.3f}", f"{e['roll']:.3f}",
