@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
-from PySide6.QtCore import QDir, QModelIndex, Qt, QThread, Signal
+from PySide6.QtCore import QDir, QModelIndex, QPoint, Qt, QThread, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -27,6 +27,7 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QPolygon,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -77,12 +78,14 @@ _STATUS_TEXT = {
     "ob_unusable": "ob遮蔽",
     "ob_satellite": "ob卫星",
     "b_uncovered": "B未覆盖",
+    "obnet": "OBNet不可用",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
     "ob_unusable": QColor(255, 64, 255),
     "ob_satellite": QColor(255, 170, 80),
     "b_uncovered": QColor(150, 150, 200),
+    "obnet": QColor(180, 80, 255),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -100,6 +103,10 @@ _COVER_EDGE_RGB = (255, 230, 0)
 # 单帧 OBNet 不可用区 / A 的 OBNet 叠加到 B
 _OB_NET_RGB = (60, 220, 60)
 _OB_NET_A_ON_B_RGB = (180, 80, 255)
+# A 模板有效区（星空/空白）边界
+_A_VALID_COLOR = QColor(255, 255, 255)
+# B（重投影后）有效区边界
+_B_VALID_COLOR = QColor(0, 220, 180)
 
 
 def _swatch(color) -> str:
@@ -350,6 +357,7 @@ class ProcessWorker(QThread):
                         reproject_chunk_rows=self.params["reproject_chunk_rows"],
                         fill_invalid_with_a=self.params["fill_invalid_with_a"],
                         ob_model=ob_model,
+                        obnet_filter=self.params.get("obnet_filter", True),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -463,6 +471,9 @@ class MainWindow(QMainWindow):
         self.fill_check = QCheckBox("B 未覆盖区域用 A 填充")
         self.fill_check.setChecked(DEFAULTS["fill_invalid_with_a"])
         form.addRow("", self.fill_check)
+        self.use_obnet_check = QCheckBox("用 OBNet 结果过滤检测")
+        self.use_obnet_check.setChecked(DEFAULTS["use_obnet_filter"])
+        form.addRow("", self.use_obnet_check)
         lay.addWidget(params)
 
         btns = QHBoxLayout()
@@ -544,6 +555,14 @@ class MainWindow(QMainWindow):
         self.ob_a_on_b_check.setChecked(False)
         self.ob_a_on_b_check.stateChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.ob_a_on_b_check)
+        self.validpoly_check = QCheckBox("显示A有效区边界")
+        self.validpoly_check.setChecked(False)
+        self.validpoly_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.validpoly_check)
+        self.validpoly_b_check = QCheckBox("显示B有效区边界")
+        self.validpoly_b_check.setChecked(False)
+        self.validpoly_b_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        vrow.addWidget(self.validpoly_b_check)
         vrow.addStretch(1)
         pw.addLayout(vrow)
 
@@ -557,6 +576,7 @@ class MainWindow(QMainWindow):
             + _swatch(_STATUS_COLOR["ob_unusable"]) + " ob遮蔽(B-unusable)　"
             + _swatch(_STATUS_COLOR["ob_satellite"]) + " ob卫星(B-satellite)　"
             + _swatch(_STATUS_COLOR["b_uncovered"]) + " B未覆盖　"
+            + _swatch(_STATUS_COLOR["obnet"]) + " OBNet不可用　"
             + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
             + _swatch(_SEL_COLOR) + " 当前选中"
             + "　　|　　<b>ob 掩码叠加：</b>"
@@ -566,7 +586,9 @@ class MainWindow(QMainWindow):
             + _swatch(_COVER_EDGE_RGB) + " B覆盖边框"
             + "　　|　　<b>单帧OBNet：</b>"
             + _swatch(_OB_NET_RGB) + " 不可用区　"
-            + _swatch(_OB_NET_A_ON_B_RGB) + " A的OBNet(叠加到B)"
+            + _swatch(_OB_NET_A_ON_B_RGB) + " A的OBNet(叠加到B)　"
+            + _swatch(_A_VALID_COLOR) + " A有效区边界　"
+            + _swatch(_B_VALID_COLOR) + " B有效区边界"
         )
         pw.addWidget(legend)
 
@@ -648,6 +670,7 @@ class MainWindow(QMainWindow):
             "dedup_radius": float(DEFAULTS["dedup_radius"]),
             "reproject_chunk_rows": int(DEFAULTS["reproject_chunk_rows"]),
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
+            "obnet_filter": bool(self.use_obnet_check.isChecked()),
         }
 
     # -------------------------------------------------------------- process
@@ -813,6 +836,13 @@ class MainWindow(QMainWindow):
         p.drawLine(xi, yi + gap, xi, yi + size)
         p.end()
 
+    @staticmethod
+    def _draw_polyline(img: QImage, pts, color: QColor, width: int = 1) -> None:
+        p = QPainter(img)
+        p.setPen(QPen(color, width))
+        p.drawPolygon(QPolygon(pts))
+        p.end()
+
     def _refresh_preview(self) -> None:
         res = self._current_result()
         if not res or res.get("a_u8") is None or res.get("b_raw") is None:
@@ -828,6 +858,8 @@ class MainWindow(QMainWindow):
         show_cov = self.cover_check.isChecked() and cov is not None
         show_net = self.ob_net_check.isChecked()
         show_net_a_on_b = self.ob_a_on_b_check.isChecked()
+        show_validpoly = self.validpoly_check.isChecked()
+        show_validpoly_b = self.validpoly_b_check.isChecked()
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
@@ -869,6 +901,9 @@ class MainWindow(QMainWindow):
             mpx1 = int(max(mpx0 + 1, min(a.shape[1], round(cx + halfp))))
             mpy1 = int(max(mpy0 + 1, min(a.shape[0], round(cy + halfp))))
             px = py = size // 2
+            vx0 = int(round(center[0])) - size // 2
+            vy0 = int(round(center[1])) - size // 2
+            vscale = 1.0
         else:
             a_gray = a
             # B：按全图做自适应拉伸（STF）
@@ -876,6 +911,8 @@ class MainWindow(QMainWindow):
             mpx0 = mpy0 = 0
             mpx1, mpy1 = a.shape[1], a.shape[0]
             px = py = 0.0
+            vx0 = vy0 = 0.0
+            vscale = s
 
         import cv2
 
@@ -939,6 +976,23 @@ class MainWindow(QMainWindow):
                 sx, sy = entry["x"] * s, entry["y"] * s
                 self._draw_crosshair(a_img, sx, sy, _SEL_COLOR)
                 self._draw_crosshair(b_img, sx, sy, _SEL_COLOR)
+
+        if show_validpoly or show_validpoly_b:
+            def _draw_polys(polys, color):
+                for poly in polys:
+                    pts = [
+                        QPoint(int(round((x - vx0) * vscale)),
+                               int(round((y - vy0) * vscale)))
+                        for x, y in poly
+                    ]
+                    if len(pts) >= 3:
+                        self._draw_polyline(a_img, pts, color)
+                        self._draw_polyline(b_img, pts, color)
+
+            if show_validpoly and res.get("a_valid_polys"):
+                _draw_polys(res["a_valid_polys"], _A_VALID_COLOR)
+            if show_validpoly_b and res.get("b_valid_polys"):
+                _draw_polys(res["b_valid_polys"], _B_VALID_COLOR)
 
         self.preview_a.set_image_size(a_img.width(), a_img.height())
         self.preview_b.set_image_size(b_img.width(), b_img.height())

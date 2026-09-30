@@ -22,6 +22,8 @@ DEFAULTS = {
     "ob_model_dir": str(BASE_DIR / "models_ob"),
     # 单帧 OBNet 的不可用区判定阈值
     "ob_threshold": 0.5,
+    # 是否默认用单帧 OBNet 的 B 不可用区过滤检测
+    "use_obnet_filter": True,
     # 瓦片边长（= 模型输入尺寸）
     "tile_size": 256,
     # 相邻瓦片重叠比例（占瓦片宽度的百分比），默认 10%

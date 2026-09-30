@@ -23,8 +23,12 @@ from reproject import (
     reproject_b_to_a_wcs,
 )
 from template_resolver import is_fits, resolve_reference
+from valid_region import extract_valid_polygons
 
 LogCb = Optional[Callable[[str], None]]
+
+#: A 模板有效区多边形缓存（同一模板在处理多个 B 时复用）
+_VALID_POLY_CACHE: Dict[str, list] = {}
 
 
 def collect_fits_files(path: str | os.PathLike) -> List[str]:
@@ -103,6 +107,7 @@ def process_b_file(
     fill_invalid_with_a: bool = True,
     preview_max_side: int = 1600,
     ob_model=None,
+    obnet_filter: bool = True,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -128,6 +133,8 @@ def process_b_file(
         "b_raw": None,
         "ob_prev": None,
         "cov_prev": None,
+        "a_valid_polys": None,
+        "b_valid_polys": None,
         "ob2_a": None,
         "ob2_b": None,
         "preview_scale": 1.0,
@@ -150,6 +157,19 @@ def process_b_file(
     wcs_a = build_celestial_wcs(a_header)
     wcs_b = build_celestial_wcs(b_header)
 
+    # A 模板有效区(星空/空白)边界多边形（多项式坐标，A 网格）
+    try:
+        cached = _VALID_POLY_CACHE.get(a_path)
+        if cached is None:
+            cached = extract_valid_polygons(a_data)
+            _VALID_POLY_CACHE[a_path] = cached
+        result["a_valid_polys"] = cached
+        if cached:
+            log(f"A有效区边界: {len(cached)} 个多边形, 最大顶点数 "
+                f"{max(len(p) for p in cached)}")
+    except Exception as ex:  # noqa: BLE001
+        log(f"A有效区提取失败: {ex}")
+
     log(f"重投影 B -> A 网格 ({a_data.shape[1]}x{a_data.shape[0]}) ...")
     b_rep = reproject_b_to_a_wcs(
         a_data.shape, b_data, wcs_a, wcs_b, chunk_rows=reproject_chunk_rows
@@ -159,6 +179,15 @@ def process_b_file(
         b_filled = np.where(valid, b_rep, a_data)
     else:
         b_filled = b_rep
+
+    # B(重投影后) 有效区(星空/空白)边界多边形
+    try:
+        result["b_valid_polys"] = extract_valid_polygons(b_rep)
+        if result["b_valid_polys"]:
+            log(f"B有效区边界: {len(result['b_valid_polys'])} 个多边形, 最大顶点数 "
+                f"{max(len(p) for p in result['b_valid_polys'])}")
+    except Exception as ex:  # noqa: BLE001
+        log(f"B有效区提取失败: {ex}")
 
     a_u8 = to_uint8(a_data)
     b_u8 = to_uint8(b_filled)
@@ -239,6 +268,11 @@ def process_b_file(
                 status = pk.get("status", "keep")
                 if status == "keep" and not valid[yi, xi]:
                     status = "b_uncovered"
+                if status == "keep" and obnet_filter and ob2_b_tiles is not None:
+                    ty = min(tile_size - 1, max(0, int(round(pk["y"]))))
+                    tx = min(tile_size - 1, max(0, int(round(pk["x"]))))
+                    if ob2_b_tiles[i][ty, tx] > 127:
+                        status = "obnet"
                 dets.append(
                     {
                         "x": float(fx),
