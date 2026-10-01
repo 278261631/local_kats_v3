@@ -307,14 +307,7 @@ class ProcessWorker(QThread):
                 self.finished_all.emit()
                 return
             self.log.emit(f"待处理 B 文件: {len(files)} 个")
-            self.log.emit(f"模型目录: {self.params['model_dir']}")
-            model = PairModel(
-                self.params["model_dir"],
-                device=self.params["device"],
-                det_threshold=self.params["det_threshold"],
-                batch_size=self.params["batch_size"],
-            )
-            self.log.emit(f"模型已加载 (device={model.device}, size={model.model_size})")
+            model = None
 
             total = len(files)
             for i, f in enumerate(files, 1):
@@ -323,6 +316,26 @@ class ProcessWorker(QThread):
                     break
                 self.progress.emit(i - 1, total)
                 self.log.emit(f"[{i}/{total}] {os.path.basename(f)}")
+                if self.params.get("skip_existing", True):
+                    j = results_io.result_json_path(f)
+                    if os.path.exists(j):
+                        try:
+                            res = results_io.load_result(j)
+                            self.log.emit("  跳过(已有结果)，直接加载")
+                            self.file_done.emit(res)
+                            continue
+                        except Exception as ex:  # noqa: BLE001
+                            self.log.emit(f"  已有结果读取失败，改为重新处理: {ex}")
+                if model is None:
+                    self.log.emit(f"模型目录: {self.params['model_dir']}")
+                    model = PairModel(
+                        self.params["model_dir"],
+                        device=self.params["device"],
+                        det_threshold=self.params["det_threshold"],
+                        batch_size=self.params["batch_size"],
+                    )
+                    self.log.emit(
+                        f"模型已加载 (device={model.device}, size={model.model_size})")
                 try:
                     res = process_b_file(
                         f,
@@ -499,6 +512,9 @@ class MainWindow(QMainWindow):
         self.valid_overlap_check = QCheckBox("按A∩B有效区过滤检测")
         self.valid_overlap_check.setChecked(DEFAULTS["valid_overlap_filter"])
         form.addRow("", self.valid_overlap_check)
+        self.skip_existing_check = QCheckBox("跳过已有结果")
+        self.skip_existing_check.setChecked(DEFAULTS["skip_existing"])
+        form.addRow("", self.skip_existing_check)
         lay.addWidget(params)
 
         btns = QHBoxLayout()
@@ -784,6 +800,7 @@ class MainWindow(QMainWindow):
             "reproject_chunk_rows": int(DEFAULTS["reproject_chunk_rows"]),
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
             "valid_overlap_filter": bool(self.valid_overlap_check.isChecked()),
+            "skip_existing": bool(self.skip_existing_check.isChecked()),
         }
 
     # -------------------------------------------------------------- process

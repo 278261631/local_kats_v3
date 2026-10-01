@@ -42,6 +42,8 @@ DEFAULTS = {
     "fill_invalid_with_a": False,
     # 是否按 A、B 有效区的重叠部分过滤检测
     "valid_overlap_filter": True,
+    # 处理时跳过已有结果(<B>.gui_ai.json)的文件（直接加载）
+    "skip_existing": True,
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,
