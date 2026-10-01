@@ -66,3 +66,75 @@ def extract_valid_polygons(
             polys.append(ap.reshape(-1, 2).astype(np.float32))
     polys.sort(key=lambda p: -abs(cv2.contourArea(p.reshape(-1, 1, 2).astype(np.int32))))
     return polys
+
+
+def background_stats(data: np.ndarray, valid: np.ndarray):
+    """有效区的背景中值 bg 与 MAD 噪声 sigma。"""
+    x = np.asarray(data, dtype=np.float32)
+    m = np.asarray(valid).astype(bool) & np.isfinite(x)
+    v = x[m]
+    if v.size == 0:
+        return 0.0, 1.0
+    bg = float(np.median(v))
+    sig = 1.4826 * float(np.median(np.abs(v - bg)))
+    if sig <= 0:
+        sig = 1.0
+    return bg, sig
+
+
+def shading_mask(data: np.ndarray, valid: np.ndarray,
+                 k: float = 3.0, ksize: int = 21) -> np.ndarray:
+    """有效区内"细暗边/黑框"掩码（bool）。
+
+    用**黑帽变换** (closing - image) 提取比结构元更细的暗特征，
+    可压掉大尺度渐晕/噪声包络，只留那条细黑边。
+    """
+    x = np.asarray(data, dtype=np.float32)
+    finite = np.isfinite(x)
+    bg, sig = background_stats(x, valid)
+    xf = np.where(finite, x, bg).astype(np.float32)
+    s = int(ksize) | 1
+    kk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (s, s))
+    bh = cv2.morphologyEx(xf, cv2.MORPH_BLACKHAT, kk)
+    return np.asarray(valid).astype(bool) & (bh > float(k) * sig)
+
+
+def extract_b2_polygons(
+    data: np.ndarray,
+    valid: np.ndarray,
+    k: float = 3.0,
+    ksize: int = 21,
+    approx_frac: float = 0.002,
+    min_area_frac: float = 1e-4,
+    clean: int = 7,
+) -> List[np.ndarray]:
+    """二次有效区边界：在第一次有效区内剔除细黑边(黑帽)后取外轮廓。"""
+    shaded = shading_mask(data, valid, k=k, ksize=ksize)
+    # 把细黑边扩成带，避免边界锯齿
+    if shaded.any():
+        shaded = cv2.dilate(shaded.astype(np.uint8),
+                            np.ones((5, 5), np.uint8)).astype(bool)
+    v2 = (np.asarray(valid).astype(bool) & ~shaded).astype(np.uint8)
+    if v2.sum() == 0:
+        return []
+    # 保留最大连通域（去掉黑边打散的小块）
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(v2, 8)
+    if n > 1:
+        idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        v2 = (lab == idx).astype(np.uint8)
+    if clean > 1:
+        kk = np.ones((int(clean), int(clean)), np.uint8)
+        v2 = cv2.morphologyEx(v2, cv2.MORPH_CLOSE, kk)
+        v2 = cv2.morphologyEx(v2, cv2.MORPH_OPEN, kk)
+    contours, _ = cv2.findContours(v2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    total = float(v2.shape[0] * v2.shape[1])
+    polys: List[np.ndarray] = []
+    for c in contours:
+        if cv2.contourArea(c) < min_area_frac * total:
+            continue
+        peri = cv2.arcLength(c, True)
+        ap = cv2.approxPolyDP(c, approx_frac * peri, True)
+        if len(ap) >= 3:
+            polys.append(ap.reshape(-1, 2).astype(np.float32))
+    polys.sort(key=lambda p: -abs(cv2.contourArea(p.reshape(-1, 1, 2).astype(np.int32))))
+    return polys

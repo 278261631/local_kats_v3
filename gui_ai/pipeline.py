@@ -23,7 +23,13 @@ from reproject import (
     reproject_b_to_a_wcs,
 )
 from template_resolver import is_fits, resolve_reference
-from valid_region import compute_valid_mask, extract_valid_polygons
+from valid_region import (
+    background_stats,
+    compute_valid_mask,
+    extract_b2_polygons,
+    extract_valid_polygons,
+    shading_mask,
+)
 
 LogCb = Optional[Callable[[str], None]]
 
@@ -109,6 +115,11 @@ def process_b_file(
     fill_invalid_with_a: bool = True,
     preview_max_side: int = 1600,
     valid_overlap_filter: bool = True,
+    snr_filter: bool = True,
+    shading_k: float = 3.0,
+    b2_ksize: int = 21,
+    noise_k: float = 3.0,
+    snr_min: float = 3.0,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -136,6 +147,7 @@ def process_b_file(
         "cov_prev": None,
         "a_valid_polys": None,
         "b_valid_polys": None,
+        "b2_valid_polys": None,
         "preview_scale": 1.0,
         "fill_invalid_with_a": bool(fill_invalid_with_a),
         "elapsed": 0.0,
@@ -195,6 +207,21 @@ def process_b_file(
     except Exception as ex:  # noqa: BLE001
         log(f"B有效区提取失败: {ex}")
 
+    # B 二次有效区：剔除内层暗边/渐晕后的边界 + 全局背景统计/暗边掩码
+    b2_polys = []
+    shaded = None
+    g_bg, g_sig = 0.0, 1.0
+    try:
+        b2_polys = extract_b2_polygons(b_rep, valid, k=shading_k, ksize=b2_ksize)
+        result["b2_valid_polys"] = b2_polys
+        shaded = shading_mask(b_rep, valid, k=shading_k, ksize=b2_ksize)
+        g_bg, g_sig = background_stats(b_rep, valid)
+        if b2_polys:
+            log(f"B二级有效区边界: {len(b2_polys)} 个多边形, 暗边占比 "
+                f"{100.0*float(shaded.mean()):.1f}%")
+    except Exception as ex:  # noqa: BLE001
+        log(f"B二级有效区提取失败: {ex}")
+
     a_u8 = to_uint8(a_data)
     b_u8 = to_uint8(b_filled)
     h, w = a_u8.shape
@@ -251,6 +278,18 @@ def process_b_file(
                 if sat_prev is None:
                     sat_prev = np.zeros((ph, pw), dtype=np.uint8)
                 _paste((np.asarray(m[2]) * 255.0).astype(np.uint8), sat_prev, 0, x0, y0)
+            # 瓦片局部统计（供低信噪过滤）
+            t_bg, t_sig = g_bg, g_sig
+            tile_noisy = False
+            if snr_filter:
+                traw = crop_tile(b_filled, x0, y0, tile_size)
+                tv = traw[np.isfinite(traw)]
+                if tv.size:
+                    t_bg = float(np.median(tv))
+                    t_sig = 1.4826 * float(np.median(np.abs(tv - t_bg)))
+                    if t_sig <= 0:
+                        t_sig = g_sig
+                    tile_noisy = t_sig > noise_k * g_sig
             for pk in r["peaks"]:
                 fx = x0 + pk["x"]
                 fy = y0 + pk["y"]
@@ -263,6 +302,11 @@ def process_b_file(
                     elif (valid_overlap_filter and a_valid is not None
                           and not a_valid[yi, xi]):
                         status = "a_invalid"
+                    elif snr_filter:
+                        v_val = float(b_filled[yi, xi])
+                        snr = (v_val - t_bg) / t_sig if t_sig > 0 else 0.0
+                        if (shaded is not None and shaded[yi, xi]) or tile_noisy or snr < snr_min:
+                            status = "low_snr"
                 dets.append(
                     {
                         "x": float(fx),

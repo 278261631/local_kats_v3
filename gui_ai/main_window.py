@@ -81,12 +81,14 @@ _STATUS_TEXT = {
     "satellite": "卫星",
     "b_uncovered": "B未覆盖",
     "a_invalid": "A无效区",
+    "low_snr": "低信噪",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
     "satellite": QColor(255, 170, 80),
     "b_uncovered": QColor(150, 150, 200),
     "a_invalid": QColor(150, 150, 200),
+    "low_snr": QColor(120, 120, 120),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -103,6 +105,8 @@ _COVER_EDGE_RGB = (255, 230, 0)
 _A_VALID_COLOR = QColor(255, 255, 255)
 # B（重投影后）有效区边界
 _B_VALID_COLOR = QColor(0, 220, 180)
+# B 二次有效区(剔除暗边)边界
+_B2_VALID_COLOR = QColor(255, 120, 0)
 # 变星(VSX) / MPC 命中点
 _VAR_COLOR = QColor(0, 220, 255)
 _MPC_COLOR = QColor(255, 80, 200)
@@ -347,6 +351,11 @@ class ProcessWorker(QThread):
                         reproject_chunk_rows=self.params["reproject_chunk_rows"],
                         fill_invalid_with_a=self.params["fill_invalid_with_a"],
                         valid_overlap_filter=self.params.get("valid_overlap_filter", True),
+                        snr_filter=self.params.get("snr_filter", True),
+                        shading_k=self.params.get("shading_k", 3.0),
+                        b2_ksize=self.params.get("b2_ksize", 21),
+                        noise_k=self.params.get("noise_k", 3.0),
+                        snr_min=self.params.get("snr_min", 3.0),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -512,6 +521,9 @@ class MainWindow(QMainWindow):
         self.valid_overlap_check = QCheckBox("按A∩B有效区过滤检测")
         self.valid_overlap_check.setChecked(DEFAULTS["valid_overlap_filter"])
         form.addRow("", self.valid_overlap_check)
+        self.snr_check = QCheckBox("按局部SNR过滤检测(含暗边)")
+        self.snr_check.setChecked(DEFAULTS["snr_filter"])
+        form.addRow("", self.snr_check)
         self.skip_existing_check = QCheckBox("跳过已有结果")
         self.skip_existing_check.setChecked(DEFAULTS["skip_existing"])
         form.addRow("", self.skip_existing_check)
@@ -578,32 +590,44 @@ class MainWindow(QMainWindow):
         self.crop_spin.setValue(DEFAULTS["crop_size"])
         self.crop_spin.valueChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.crop_spin)
-        hint = QLabel("（Tab 切换；全图点击十字→裁切；全图双击任意处→看该处局部对比）")
+        hint = QLabel("（Tab切换；全图点击十字→裁切；双击任意处→看该处局部对比）")
         hint.setStyleSheet("color:#666;")
         vrow.addWidget(hint)
-        vrow.addSpacing(12)
+        vrow.addStretch(1)
+        pw.addLayout(vrow)
+
         self.show_filtered_check = QCheckBox("显示被过滤结果")
         self.show_filtered_check.setChecked(False)
         self.show_filtered_check.stateChanged.connect(lambda _=0: self._rebuild_table())
-        vrow.addWidget(self.show_filtered_check)
         self.sat_check = QCheckBox("叠加卫星掩码")
         self.sat_check.setChecked(True)
         self.sat_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.sat_check)
-        self.cover_check = QCheckBox("显示 B 覆盖边框")
+        self.cover_check = QCheckBox("显示B覆盖边框")
         self.cover_check.setChecked(True)
         self.cover_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.cover_check)
         self.validpoly_check = QCheckBox("显示A有效区边界")
         self.validpoly_check.setChecked(True)
         self.validpoly_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.validpoly_check)
         self.validpoly_b_check = QCheckBox("显示B有效区边界")
         self.validpoly_b_check.setChecked(True)
         self.validpoly_b_check.stateChanged.connect(lambda _=0: self._refresh_preview())
-        vrow.addWidget(self.validpoly_b_check)
-        vrow.addStretch(1)
-        pw.addLayout(vrow)
+        self.validpoly_b2_check = QCheckBox("显示B二级有效区边界")
+        self.validpoly_b2_check.setChecked(True)
+        self.validpoly_b2_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+
+        crow1 = QHBoxLayout()
+        crow1.addWidget(self.show_filtered_check)
+        crow1.addWidget(self.sat_check)
+        crow1.addWidget(self.cover_check)
+        crow1.addStretch(1)
+        pw.addLayout(crow1)
+
+        crow2 = QHBoxLayout()
+        crow2.addWidget(self.validpoly_check)
+        crow2.addWidget(self.validpoly_b_check)
+        crow2.addWidget(self.validpoly_b2_check)
+        crow2.addStretch(1)
+        pw.addLayout(crow2)
 
         legend = QLabel()
         legend.setTextFormat(Qt.RichText)
@@ -614,6 +638,8 @@ class MainWindow(QMainWindow):
             + _swatch(_DET_COLOR) + " 命中(keep)　"
             + _swatch(_STATUS_COLOR["satellite"]) + " 卫星(satellite)　"
             + _swatch(_STATUS_COLOR["b_uncovered"]) + " B未覆盖　"
+            + _swatch(_STATUS_COLOR["a_invalid"]) + " A无效区　"
+            + _swatch(_STATUS_COLOR["low_snr"]) + " 低信噪　"
             + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
             + _swatch(_SEL_COLOR) + " 当前选中"
             + "　　|　　<b>叠加：</b>"
@@ -622,6 +648,7 @@ class MainWindow(QMainWindow):
             + "　　|　　<b>有效区边界/查询：</b>"
             + _swatch(_A_VALID_COLOR) + " A有效区　"
             + _swatch(_B_VALID_COLOR) + " B有效区　"
+            + _swatch(_B2_VALID_COLOR) + " B二级有效区　"
             + _swatch(_VAR_COLOR) + " 变星　"
             + _swatch(_MPC_COLOR) + " MPC"
         )
@@ -801,6 +828,11 @@ class MainWindow(QMainWindow):
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
             "valid_overlap_filter": bool(self.valid_overlap_check.isChecked()),
             "skip_existing": bool(self.skip_existing_check.isChecked()),
+            "snr_filter": bool(self.snr_check.isChecked()),
+            "shading_k": float(DEFAULTS["shading_k"]),
+            "b2_ksize": int(DEFAULTS["b2_ksize"]),
+            "noise_k": float(DEFAULTS["noise_k"]),
+            "snr_min": float(DEFAULTS["snr_min"]),
         }
 
     # -------------------------------------------------------------- process
@@ -1192,6 +1224,7 @@ class MainWindow(QMainWindow):
         show_cov = self.cover_check.isChecked() and cov is not None
         show_validpoly = self.validpoly_check.isChecked()
         show_validpoly_b = self.validpoly_b_check.isChecked()
+        show_validpoly_b2 = self.validpoly_b2_check.isChecked()
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
@@ -1294,7 +1327,7 @@ class MainWindow(QMainWindow):
                 self._draw_crosshair(a_img, sx, sy, _SEL_COLOR)
                 self._draw_crosshair(b_img, sx, sy, _SEL_COLOR)
 
-        if show_validpoly or show_validpoly_b:
+        if show_validpoly or show_validpoly_b or show_validpoly_b2:
             def _draw_polys(polys, color):
                 for poly in polys:
                     pts = [
@@ -1310,6 +1343,8 @@ class MainWindow(QMainWindow):
                 _draw_polys(res["a_valid_polys"], _A_VALID_COLOR)
             if show_validpoly_b and res.get("b_valid_polys"):
                 _draw_polys(res["b_valid_polys"], _B_VALID_COLOR)
+            if show_validpoly_b2 and res.get("b2_valid_polys"):
+                _draw_polys(res["b2_valid_polys"], _B2_VALID_COLOR)
 
         # 变星/MPC 命中点（投影回像素）
         for det in res.get("detections", []):
