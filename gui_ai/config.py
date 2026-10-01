@@ -60,7 +60,8 @@ DEFAULTS = {
     # 查询参数
     "query_radius_arcsec": 36.0,
     "query_mag_limit": 16.0,
-    "query_timeout": 8.0,
+    "vsx_timeout": 30.0,   # 变星服务超时(秒)
+    "mpc_timeout": 180.0,  # MPC 服务较慢(星历计算), 超时放长
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
 }

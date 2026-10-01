@@ -561,6 +561,20 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         lay.addWidget(self.progress)
 
+        qgrp = QGroupBox("查询进度")
+        qgl = QVBoxLayout(qgrp)
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("变星 VSX:"))
+        self.var_progress = QProgressBar()
+        r1.addWidget(self.var_progress)
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("MPC:"))
+        self.mpc_progress = QProgressBar()
+        r2.addWidget(self.mpc_progress)
+        qgl.addLayout(r1)
+        qgl.addLayout(r2)
+        lay.addWidget(qgrp)
+
         return panel
 
     def _build_right_panel(self) -> QWidget:
@@ -946,17 +960,7 @@ class MainWindow(QMainWindow):
         self._refresh_preview()
 
     # ---------------------------------------------------------- 结果持久化
-    def _load_results_from_node(self) -> None:
-        idx = self.tree.currentIndex()
-        if not idx.isValid():
-            QMessageBox.warning(self, "提示", "请先在左侧选择文件或文件夹节点")
-            return
-        target = self.fs_model.filePath(idx)
-        jsons = results_io.scan_results(target)
-        if not jsons:
-            QMessageBox.information(
-                self, "提示", f"未找到结果文件 (*{results_io.SUFFIX_JSON})")
-            return
+    def _load_jsons(self, jsons: list) -> int:
         self._results.clear()
         self._row_map.clear()
         self._manual_center = None
@@ -971,6 +975,20 @@ class MainWindow(QMainWindow):
                 continue
             self._on_file_done(res)
             loaded += 1
+        return loaded
+
+    def _load_results_from_node(self) -> None:
+        idx = self.tree.currentIndex()
+        if not idx.isValid():
+            QMessageBox.warning(self, "提示", "请先在左侧选择文件或文件夹节点")
+            return
+        target = self.fs_model.filePath(idx)
+        jsons = results_io.scan_results(target)
+        if not jsons:
+            QMessageBox.information(
+                self, "提示", f"未找到结果文件 (*{results_io.SUFFIX_JSON})")
+            return
+        loaded = self._load_jsons(jsons)
         self._log(f"已加载 {loaded} 个结果 (来自 {target})")
 
     def _build_daily_summary(self) -> None:
@@ -1070,16 +1088,27 @@ class MainWindow(QMainWindow):
         return out
 
     def _run_queries(self) -> None:
+        # 按选中节点（文件/文件夹）扫描已有结果并加载后再查询
+        idx = self.tree.currentIndex()
+        target = self.fs_model.filePath(idx) if idx.isValid() else None
+        if target:
+            jsons = results_io.scan_results(target)
+            if jsons:
+                loaded = self._load_jsons(jsons)
+                self._log(f"查询前加载 {loaded} 个结果 (来自 {target})")
         if not self._results:
-            QMessageBox.information(self, "提示", "没有结果可查询")
+            QMessageBox.information(self, "提示", "没有可查询的结果（请先选中已处理的文件/文件夹）")
             return
         radius = float(DEFAULTS["query_radius_arcsec"])
         mag_limit = float(DEFAULTS["query_mag_limit"])
-        timeout = float(DEFAULTS["query_timeout"])
+        vsx_timeout = float(DEFAULTS["vsx_timeout"])
+        mpc_timeout = float(DEFAULTS["mpc_timeout"])
         vsx_down = mpc_down = False
         vsx_url = f"{DEFAULTS['vsx_host']}:{DEFAULTS['vsx_port']}"
         mpc_url = f"{DEFAULTS['mpc_host']}:{DEFAULTS['mpc_port']}"
-        n_q = 0
+
+        # 组织待查询任务（仅命中的检测，需能定位 WCS）
+        tasks = []
         for res in self._results:
             wcs = self._safe_wcs(res.get("a_path"))
             epoch = self._safe_epoch_mjd(res.get("b_path"))
@@ -1093,45 +1122,59 @@ class MainWindow(QMainWindow):
                     continue
                 try:
                     ra, dec = wcs.all_pix2world(float(det["x"]), float(det["y"]), 0)
-                    ra, dec = float(ra), float(dec)
+                    tasks.append((det, wcs, epoch, float(ra), float(dec)))
                 except Exception:
                     det["var_count"] = det["mpc_count"] = -1
-                    continue
-                # 变星(VSX)
-                if vsx_down:
+
+        total = len(tasks)
+        for bar in (self.var_progress, self.mpc_progress):
+            bar.setRange(0, max(1, total))
+            bar.setValue(0)
+        n_q = 0
+        n_no_epoch = 0
+        for i, (det, wcs, epoch, ra, dec) in enumerate(tasks, 1):
+            # 变星(VSX)
+            if vsx_down:
+                det["var_count"] = -1
+            else:
+                try:
+                    hits = query_servers.query_vsx(
+                        ra, dec, radius, mag_limit=mag_limit,
+                        host=DEFAULTS["vsx_host"], port=int(DEFAULTS["vsx_port"]),
+                        timeout=vsx_timeout)
+                    det["var_count"] = len(hits)
+                    det["var_hits"] = self._hits_to_pix(hits, wcs)
+                except Exception as ex:  # noqa: BLE001
                     det["var_count"] = -1
-                else:
-                    try:
-                        hits = query_servers.query_vsx(
-                            ra, dec, radius, mag_limit=mag_limit,
-                            host=DEFAULTS["vsx_host"], port=int(DEFAULTS["vsx_port"]),
-                            timeout=timeout)
-                        det["var_count"] = len(hits)
-                        det["var_hits"] = self._hits_to_pix(hits, wcs)
-                    except Exception as ex:  # noqa: BLE001
-                        det["var_count"] = -1
-                        det["var_hits"] = []
-                        vsx_down = True
-                        self._log(f"变星服务({vsx_url})不可用: {ex}")
-                # MPC
-                if mpc_down or epoch is None:
+                    det["var_hits"] = []
+                    vsx_down = True
+                    self._log(f"变星服务({vsx_url})不可用: {ex}")
+            self.var_progress.setValue(i)
+            # MPC
+            if mpc_down or epoch is None:
+                det["mpc_count"] = -1
+                if epoch is None:
+                    n_no_epoch += 1
+            else:
+                try:
+                    hits = query_servers.query_mpc(
+                        ra, dec, epoch, radius,
+                        host=DEFAULTS["mpc_host"], port=int(DEFAULTS["mpc_port"]),
+                        timeout=mpc_timeout)
+                    det["mpc_count"] = len(hits)
+                    det["mpc_hits"] = self._hits_to_pix(hits, wcs)
+                except Exception as ex:  # noqa: BLE001
                     det["mpc_count"] = -1
-                else:
-                    try:
-                        hits = query_servers.query_mpc(
-                            ra, dec, epoch, radius,
-                            host=DEFAULTS["mpc_host"], port=int(DEFAULTS["mpc_port"]),
-                            timeout=timeout)
-                        det["mpc_count"] = len(hits)
-                        det["mpc_hits"] = self._hits_to_pix(hits, wcs)
-                    except Exception as ex:  # noqa: BLE001
-                        det["mpc_count"] = -1
-                        det["mpc_hits"] = []
-                        mpc_down = True
-                        self._log(f"MPC服务({mpc_url})不可用: {ex}")
-                n_q += 1
+                    det["mpc_hits"] = []
+                    mpc_down = True
+                    self._log(f"MPC服务({mpc_url})不可用: {ex}")
+            self.mpc_progress.setValue(i)
+            n_q += 1
+            QApplication.processEvents()
         self._log(
             f"查询完成: {n_q} 个目标（变星服务不可用={vsx_down}, MPC服务不可用={mpc_down}）")
+        if n_no_epoch:
+            self._log(f"MPC 跳过: {n_no_epoch} 个目标因 B 头缺少观测时间(MJD-OBS/JD/DATE-OBS)")
         self._rebuild_table()
         self._refresh_preview()
         for res in self._results:
