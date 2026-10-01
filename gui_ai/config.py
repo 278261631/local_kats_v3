@@ -44,12 +44,13 @@ DEFAULTS = {
     "valid_overlap_filter": True,
     # 处理时跳过已有结果(<B>.gui_ai.json)的文件（直接加载）
     "skip_existing": True,
-    # 局部低信噪/暗边过滤
-    "snr_filter": True,
+    # 局部低信噪/暗边过滤（默认关闭）
+    "snr_filter": False,
     "shading_k": 3.0,   # 暗边判定：黑帽响应 > k*sigma
     "b2_ksize": 21,     # 黑帽结构元尺寸(px)，约大于黑边宽度
     "noise_k": 3.0,     # 瓦片噪声超过 k*全局sigma 视为噪声区
     "snr_min": 3.0,     # 峰值局部信噪比下限
+    "edge_band": 5,     # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,

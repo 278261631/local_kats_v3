@@ -82,6 +82,7 @@ _STATUS_TEXT = {
     "b_uncovered": "B未覆盖",
     "a_invalid": "A无效区",
     "low_snr": "低信噪",
+    "edge": "边缘",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
@@ -89,6 +90,7 @@ _STATUS_COLOR = {
     "b_uncovered": QColor(150, 150, 200),
     "a_invalid": QColor(150, 150, 200),
     "low_snr": QColor(120, 120, 120),
+    "edge": QColor(110, 110, 110),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -99,6 +101,8 @@ def _det_status_color(status: str) -> QColor:
 
 # 卫星掩码叠加颜色
 _SAT_RGB = (255, 170, 0)
+# 边缘过滤带颜色
+_EDGE_BAND_RGB = (255, 60, 160)
 # B 覆盖区（WCS 对齐后）边框颜色
 _COVER_EDGE_RGB = (255, 230, 0)
 # A 模板有效区（星空/空白）边界
@@ -356,6 +360,7 @@ class ProcessWorker(QThread):
                         b2_ksize=self.params.get("b2_ksize", 21),
                         noise_k=self.params.get("noise_k", 3.0),
                         snr_min=self.params.get("snr_min", 3.0),
+                        edge_band=self.params.get("edge_band", 5),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -524,6 +529,10 @@ class MainWindow(QMainWindow):
         self.snr_check = QCheckBox("按局部SNR过滤检测(含暗边)")
         self.snr_check.setChecked(DEFAULTS["snr_filter"])
         form.addRow("", self.snr_check)
+        self.edge_spin = QSpinBox()
+        self.edge_spin.setRange(0, 200)
+        self.edge_spin.setValue(int(DEFAULTS["edge_band"]))
+        form.addRow("边缘过滤(px)", self.edge_spin)
         self.skip_existing_check = QCheckBox("跳过已有结果")
         self.skip_existing_check.setChecked(DEFAULTS["skip_existing"])
         form.addRow("", self.skip_existing_check)
@@ -614,6 +623,9 @@ class MainWindow(QMainWindow):
         self.validpoly_b2_check = QCheckBox("显示B二级有效区边界")
         self.validpoly_b2_check.setChecked(True)
         self.validpoly_b2_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        self.edge_check = QCheckBox("显示边缘过滤带")
+        self.edge_check.setChecked(True)
+        self.edge_check.stateChanged.connect(lambda _=0: self._refresh_preview())
 
         crow1 = QHBoxLayout()
         crow1.addWidget(self.show_filtered_check)
@@ -626,6 +638,7 @@ class MainWindow(QMainWindow):
         crow2.addWidget(self.validpoly_check)
         crow2.addWidget(self.validpoly_b_check)
         crow2.addWidget(self.validpoly_b2_check)
+        crow2.addWidget(self.edge_check)
         crow2.addStretch(1)
         pw.addLayout(crow2)
 
@@ -640,11 +653,13 @@ class MainWindow(QMainWindow):
             + _swatch(_STATUS_COLOR["b_uncovered"]) + " B未覆盖　"
             + _swatch(_STATUS_COLOR["a_invalid"]) + " A无效区　"
             + _swatch(_STATUS_COLOR["low_snr"]) + " 低信噪　"
+            + _swatch(_STATUS_COLOR["edge"]) + " 边缘　"
             + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
             + _swatch(_SEL_COLOR) + " 当前选中"
             + "　　|　　<b>叠加：</b>"
             + _swatch(_SAT_RGB) + " 卫星掩码　"
-            + _swatch(_COVER_EDGE_RGB) + " B覆盖边框"
+            + _swatch(_COVER_EDGE_RGB) + " B覆盖边框　"
+            + _swatch(_EDGE_BAND_RGB) + " 边缘过滤带"
             + "　　|　　<b>有效区边界/查询：</b>"
             + _swatch(_A_VALID_COLOR) + " A有效区　"
             + _swatch(_B_VALID_COLOR) + " B有效区　"
@@ -833,6 +848,7 @@ class MainWindow(QMainWindow):
             "b2_ksize": int(DEFAULTS["b2_ksize"]),
             "noise_k": float(DEFAULTS["noise_k"]),
             "snr_min": float(DEFAULTS["snr_min"]),
+            "edge_band": int(self.edge_spin.value()),
         }
 
     # -------------------------------------------------------------- process
@@ -1225,6 +1241,7 @@ class MainWindow(QMainWindow):
         show_validpoly = self.validpoly_check.isChecked()
         show_validpoly_b = self.validpoly_b_check.isChecked()
         show_validpoly_b2 = self.validpoly_b2_check.isChecked()
+        show_edge = self.edge_check.isChecked()
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
@@ -1296,6 +1313,10 @@ class MainWindow(QMainWindow):
         if show_sat and sat is not None:
             # 卫星掩码只作用于 B（PairRegNet ob 通道 2）
             b_rgb = overlay_ob(b_rgb, align2d(sat)[:, :, None], {0: _SAT_RGB})
+        if show_edge and res.get("edge_prev") is not None:
+            e = align2d(res["edge_prev"])
+            a_rgb = overlay_ob(a_rgb, e[:, :, None], {0: _EDGE_BAND_RGB})
+            b_rgb = overlay_ob(b_rgb, e[:, :, None], {0: _EDGE_BAND_RGB})
         if show_cov and cov is not None:
             edge = _mask_edge(align2d(cov) > 0)
             a_rgb = paint_mask(a_rgb, edge, _COVER_EDGE_RGB)

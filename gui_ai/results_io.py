@@ -20,7 +20,7 @@ SUFFIX_JSON = ".gui_ai.json"
 SUFFIX_NPZ = ".gui_ai.npz"
 
 #: 需要持久化的预览数组（降采样尺度）
-_PREVIEW_KEYS = ("a_u8", "b_raw", "cov_prev", "sat_prev")
+_PREVIEW_KEYS = ("a_u8", "b_raw", "cov_prev", "sat_prev", "edge_prev")
 
 _DATE_RE = re.compile(r"^\d{8}$")
 _TEL_RE = re.compile(r"^[Gg][Yy][1-6]$")
@@ -96,6 +96,7 @@ def load_result(json_path: str) -> Dict:
         "b_raw": None,
         "cov_prev": None,
         "sat_prev": None,
+        "edge_prev": None,
         "error": None,
         "_loaded": True,
         "_saved_at": d.get("saved_at"),

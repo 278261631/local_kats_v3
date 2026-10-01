@@ -28,6 +28,8 @@ from valid_region import (
     compute_valid_mask,
     extract_b2_polygons,
     extract_valid_polygons,
+    filled_region,
+    inner_band,
     shading_mask,
 )
 
@@ -78,6 +80,21 @@ def _downscale_mask(mask: np.ndarray, max_side: int) -> np.ndarray:
     return ((small >= 0.5).astype(np.uint8)) * 255
 
 
+def _downscale_mask_any(mask: np.ndarray, max_side: int, thresh: float = 0.02) -> np.ndarray:
+    """降采样布尔掩码为预览尺度 uint8(0/255)，保留细带（任一覆盖即可）。"""
+    import cv2
+
+    h, w = mask.shape
+    m = np.asarray(mask, dtype=np.float32)
+    s = min(1.0, float(max_side) / float(max(h, w)))
+    if s >= 1.0:
+        return ((m > 0.5).astype(np.uint8)) * 255
+    nw = max(1, int(round(w * s)))
+    nh = max(1, int(round(h * s)))
+    small = cv2.resize(m, (nw, nh), interpolation=cv2.INTER_AREA)
+    return ((small > float(thresh)).astype(np.uint8)) * 255
+
+
 def _downscale_f32(arr: np.ndarray, max_side: int) -> np.ndarray:
     """把原始浮点帧降采样为预览用数组（供局部/全图自适应拉伸）。
 
@@ -120,6 +137,7 @@ def process_b_file(
     b2_ksize: int = 21,
     noise_k: float = 3.0,
     snr_min: float = 3.0,
+    edge_band: int = 5,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -145,6 +163,7 @@ def process_b_file(
         "b_raw": None,
         "sat_prev": None,
         "cov_prev": None,
+        "edge_prev": None,
         "a_valid_polys": None,
         "b_valid_polys": None,
         "b2_valid_polys": None,
@@ -221,6 +240,26 @@ def process_b_file(
                 f"{100.0*float(shaded.mean()):.1f}%")
     except Exception as ex:  # noqa: BLE001
         log(f"B二级有效区提取失败: {ex}")
+
+    # 边界内边带：命中落在 A/B/B二级 有效区边界 width 像素内也过滤
+    band_a = band_b = band_b2 = None
+    if edge_band and int(edge_band) > 0:
+        try:
+            band_b = inner_band(filled_region(valid), int(edge_band))
+            if shaded is not None:
+                band_b2 = inner_band(
+                    filled_region(valid & ~shaded), int(edge_band))
+            if a_valid is not None:
+                band_a = inner_band(filled_region(a_valid), int(edge_band))
+            band_any = band_b
+            for b in (band_b2, band_a):
+                if b is not None:
+                    band_any = b if band_any is None else (band_any | b)
+            if band_any is not None:
+                result["edge_prev"] = _downscale_mask_any(
+                    band_any, preview_max_side)
+        except Exception as ex:  # noqa: BLE001
+            log(f"边带计算失败: {ex}")
 
     a_u8 = to_uint8(a_data)
     b_u8 = to_uint8(b_filled)
@@ -302,6 +341,10 @@ def process_b_file(
                     elif (valid_overlap_filter and a_valid is not None
                           and not a_valid[yi, xi]):
                         status = "a_invalid"
+                    elif ((band_b is not None and band_b[yi, xi])
+                          or (valid_overlap_filter and band_a is not None and band_a[yi, xi])
+                          or (band_b2 is not None and band_b2[yi, xi])):
+                        status = "edge"
                     elif snr_filter:
                         v_val = float(b_filled[yi, xi])
                         snr = (v_val - t_bg) / t_sig if t_sig > 0 else 0.0

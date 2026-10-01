@@ -68,6 +68,36 @@ def extract_valid_polygons(
     return polys
 
 
+def filled_region(mask: np.ndarray, clean: int = 5, largest: bool = True) -> np.ndarray:
+    """把区域清理成单一、无内部空洞的整体（去掉星洞/碎块）。"""
+    m = np.asarray(mask).astype(np.uint8)
+    if clean > 1:
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((int(clean), int(clean)), np.uint8))
+    if largest and m.any():
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+        if n > 1:
+            idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            m = (lab == idx).astype(np.uint8)
+    if m.any():
+        h, w = m.shape
+        ff = m.copy()
+        ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+        cv2.floodFill(ff, ff_mask, (0, 0), 1)
+        m = m | (ff == 0).astype(np.uint8)
+    return m.astype(bool)
+
+
+def inner_band(mask: np.ndarray, width: int) -> np.ndarray:
+    """掩码的"内边带"（距边界 width 像素内的区域，bool）。"""
+    m = np.asarray(mask).astype(np.uint8)
+    w = int(width)
+    if w <= 0 or m.size == 0:
+        return np.zeros(m.shape, dtype=bool)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * w + 1, 2 * w + 1))
+    er = cv2.erode(m, k)
+    return (m.astype(bool) & ~er.astype(bool))
+
+
 def background_stats(data: np.ndarray, valid: np.ndarray):
     """有效区的背景中值 bg 与 MAD 噪声 sigma。"""
     x = np.asarray(data, dtype=np.float32)
