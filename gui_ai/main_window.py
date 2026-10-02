@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFileSystemModel,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -66,6 +65,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTreeView,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -376,6 +377,8 @@ class ProcessWorker(QThread):
                         isolated_win=self.params.get("isolated_win", 7),
                         isolated_k=self.params.get("isolated_k", 3.0),
                         isolated_min_px=self.params.get("isolated_min_px", 2),
+                        median_filter=self.params.get("median_filter", False),
+                        median_ksize=self.params.get("median_ksize", 3),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -637,16 +640,12 @@ class MainWindow(QMainWindow):
         row.addWidget(browse)
         src_lay.addLayout(row)
 
-        self.fs_model = QFileSystemModel(self)
-        self.fs_model.setNameFilters(["*.fit", "*.fits", "*.fts"])
-        self.fs_model.setNameFilterDisables(False)
-        self.fs_model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
-        self.tree = QTreeView()
-        self.tree.setModel(self.fs_model)
-        for c in range(1, 4):
-            self.tree.hideColumn(c)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.selectionModel().currentChanged.connect(self._on_select)
+        self.tree.itemExpanded.connect(self._on_tree_expand)
+        self.tree.currentItemChanged.connect(self._on_select)
+        self.tree.setColumnCount(1)
         src_lay.addWidget(self.tree, 1)
         self.sel_label = QLabel("未选择节点")
         self.sel_label.setWordWrap(True)
@@ -695,6 +694,9 @@ class MainWindow(QMainWindow):
         self.isolated_check = QCheckBox("排除孤立点(宇宙线/热像素)")
         self.isolated_check.setChecked(DEFAULTS["isolated_filter"])
         form.addRow("", self.isolated_check)
+        self.median_check = QCheckBox("B中值滤波(对比用)")
+        self.median_check.setChecked(DEFAULTS["median_filter"])
+        form.addRow("", self.median_check)
         self.edge_spin = QSpinBox()
         self.edge_spin.setRange(0, 200)
         self.edge_spin.setValue(int(DEFAULTS["edge_band"]))
@@ -933,15 +935,49 @@ class MainWindow(QMainWindow):
     def _set_root(self, root: str) -> None:
         if not os.path.isdir(root):
             return
-        self.fs_model.setRootPath(root)
-        self.tree.setRootIndex(self.fs_model.index(root))
-        self.tree.setColumnWidth(0, 260)
+        self.tree.clear()
+        top = QTreeWidgetItem([f"数据源: {root}"])
+        top.setData(0, Qt.UserRole, root)
+        top.setData(0, Qt.UserRole + 1, "dir")
+        self.tree.addTopLevelItem(top)
+        self._populate_tree(top)
+        top.setExpanded(True)
+        self.tree.setCurrentItem(top)
 
-    def _on_select(self, current: QModelIndex, _prev: QModelIndex) -> None:
-        if not current.isValid():
+    def _populate_tree(self, item: QTreeWidgetItem) -> None:
+        path = item.data(0, Qt.UserRole)
+        try:
+            entries = sorted(os.listdir(path))
+        except Exception:
             return
-        path = self.fs_model.filePath(current)
-        if os.path.isdir(path):
+        for name in entries:
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                child = QTreeWidgetItem([name])
+                child.setData(0, Qt.UserRole, full)
+                child.setData(0, Qt.UserRole + 1, "dir")
+                child.addChild(QTreeWidgetItem(["(展开加载)"]))  # 占位
+                item.addChild(child)
+            elif name.lower().endswith((".fit", ".fits", ".fts")):
+                child = QTreeWidgetItem([name])
+                child.setData(0, Qt.UserRole, full)
+                child.setData(0, Qt.UserRole + 1, "file")
+                item.addChild(child)
+
+    def _on_tree_expand(self, item: QTreeWidgetItem) -> None:
+        if item.childCount() == 1 and item.child(0).data(0, Qt.UserRole) is None:
+            item.takeChild(0)
+            self._populate_tree(item)
+
+    def _current_path(self) -> Optional[str]:
+        it = self.tree.currentItem()
+        return it.data(0, Qt.UserRole) if it is not None else None
+
+    def _on_select(self, current: QTreeWidgetItem, _prev: QTreeWidgetItem) -> None:
+        if current is None:
+            return
+        path = current.data(0, Qt.UserRole)
+        if current.data(0, Qt.UserRole + 1) == "dir":
             self.sel_label.setText(f"文件夹: {path}")
             self._loaded_path = None
             return
@@ -1042,17 +1078,18 @@ class MainWindow(QMainWindow):
             "isolated_win": int(DEFAULTS["isolated_win"]),
             "isolated_k": float(DEFAULTS["isolated_k"]),
             "isolated_min_px": int(DEFAULTS["isolated_min_px"]),
+            "median_filter": bool(self.median_check.isChecked()),
+            "median_ksize": int(DEFAULTS["median_ksize"]),
             "boundary_scale": int(DEFAULTS["boundary_scale"]),
             "amp": bool(DEFAULTS["amp"]),
         }
 
     # -------------------------------------------------------------- process
     def _start(self) -> None:
-        idx = self.tree.currentIndex()
-        if not idx.isValid():
+        target = self._current_path()
+        if not target:
             QMessageBox.warning(self, "提示", "请先在左侧选择文件或文件夹节点")
             return
-        target = self.fs_model.filePath(idx)
         params = self._params()
         if not os.path.isdir(params["template_root"]):
             QMessageBox.warning(self, "提示", f"模板根目录不存在: {params['template_root']}")
@@ -1159,11 +1196,10 @@ class MainWindow(QMainWindow):
         return loaded
 
     def _load_results_from_node(self) -> None:
-        idx = self.tree.currentIndex()
-        if not idx.isValid():
+        target = self._current_path()
+        if not target:
             QMessageBox.warning(self, "提示", "请先在左侧选择文件或文件夹节点")
             return
-        target = self.fs_model.filePath(idx)
         jsons = results_io.scan_results(target)
         if not jsons:
             QMessageBox.information(
@@ -1173,9 +1209,7 @@ class MainWindow(QMainWindow):
         self._log(f"已加载 {loaded} 个结果 (来自 {target})")
 
     def _build_daily_summary(self) -> None:
-        idx = self.tree.currentIndex()
-        target = (self.fs_model.filePath(idx) if idx.isValid()
-                  else self.root_edit.text().strip())
+        target = self._current_path() or self.root_edit.text().strip()
         jsons = results_io.scan_results(target)
         self._daily_rows = []
         self._daily_meta = []
@@ -1270,8 +1304,7 @@ class MainWindow(QMainWindow):
 
     def _run_queries(self) -> None:
         # 按选中节点（文件/文件夹）扫描已有结果并加载后再查询
-        idx = self.tree.currentIndex()
-        target = self.fs_model.filePath(idx) if idx.isValid() else None
+        target = self._current_path()
         if target:
             jsons = results_io.scan_results(target)
             if jsons:

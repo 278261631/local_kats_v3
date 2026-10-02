@@ -55,11 +55,14 @@ DEFAULTS = {
     "noise_k": 3.0,     # 瓦片噪声超过 k*全局sigma 视为噪声区
     "snr_min": 3.0,     # 峰值局部信噪比下限
     "edge_band": 5,     # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
-    # 孤立点(宇宙线/热像素)过滤
-    "isolated_filter": True,
+    # 孤立点(宇宙线/热像素)过滤（默认关闭）
+    "isolated_filter": False,
     "isolated_win": 7,      # 检测点周围窗口(px)
     "isolated_k": 3.0,      # 阈值 = 局部bg + k*sigma
     "isolated_min_px": 2,   # 连通块小于该像素数判为孤立点
+    # 预处理：对 B 做中值滤波（默认开）
+    "median_filter": True,
+    "median_ksize": 3,
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,

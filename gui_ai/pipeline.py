@@ -197,6 +197,8 @@ def process_b_file(
     isolated_win: int = 7,
     isolated_k: float = 3.0,
     isolated_min_px: int = 2,
+    median_filter: bool = False,
+    median_ksize: int = 3,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -341,6 +343,9 @@ def process_b_file(
 
     a_u8 = to_uint8(a_data)
     b_u8 = to_uint8(b_filled)
+    if median_filter and int(median_ksize) >= 3:
+        import cv2
+        b_u8 = cv2.medianBlur(b_u8, int(median_ksize) | 1)
     h, w = a_u8.shape
     result["width"], result["height"] = w, h
 
