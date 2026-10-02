@@ -52,8 +52,12 @@ def reproject_b_to_a_wcs(
     wcs_a: WCS,
     wcs_b: WCS,
     chunk_rows: int = 256,
+    world_cache: dict | None = None,
 ) -> np.ndarray:
     """把 B 重投影到 A 的像素网格上。
+
+    ``world_cache`` 可选：按行块缓存 A 像素→天球（lon,lat），同一模板处理多个 B
+    时复用，省去重复的 A→world 计算。
 
     Returns:
         float32 (H, W) 数组，落在 B 覆盖范围外的像素为 NaN。
@@ -66,13 +70,23 @@ def reproject_b_to_a_wcs(
     step = max(1, int(chunk_rows))
     for y0 in range(0, h, step):
         y1 = min(h, y0 + step)
-        yy = np.arange(y0, y1, dtype=float)
-        gx, gy = np.meshgrid(xx, yy)
-        lon, lat = wcs_a.pixel_to_world_values(gx.ravel(), gy.ravel())
+        rows = y1 - y0
+        key = (y0, y1)
+        if world_cache is not None and key in world_cache:
+            lon, lat = world_cache[key]
+        else:
+            yy = np.arange(y0, y1, dtype=float)
+            gx, gy = np.meshgrid(xx, yy)
+            lon, lat = wcs_a.pixel_to_world_values(gx.ravel(), gy.ravel())
+            if world_cache is not None:
+                world_cache[key] = (
+                    np.asarray(lon, dtype=np.float32),
+                    np.asarray(lat, dtype=np.float32),
+                )
         src_x, src_y = wcs_b.world_to_pixel_values(lon, lat)
         block = map_coordinates(
             src,
-            [src_y.reshape(gx.shape), src_x.reshape(gx.shape)],
+            [src_y.reshape(rows, w), src_x.reshape(rows, w)],
             order=1,
             mode="constant",
             cval=np.nan,

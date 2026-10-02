@@ -15,6 +15,13 @@ import csv
 import json
 import os
 import sys
+import threading
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -83,6 +90,7 @@ _STATUS_TEXT = {
     "a_invalid": "A无效区",
     "low_snr": "低信噪",
     "edge": "边缘",
+    "isolated": "孤立点",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
@@ -91,6 +99,7 @@ _STATUS_COLOR = {
     "a_invalid": QColor(150, 150, 200),
     "low_snr": QColor(120, 120, 120),
     "edge": QColor(110, 110, 110),
+    "isolated": QColor(200, 120, 120),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -341,6 +350,7 @@ class ProcessWorker(QThread):
                         device=self.params["device"],
                         det_threshold=self.params["det_threshold"],
                         batch_size=self.params["batch_size"],
+                        amp=self.params.get("amp", True),
                     )
                     self.log.emit(
                         f"模型已加载 (device={model.device}, size={model.model_size})")
@@ -361,6 +371,11 @@ class ProcessWorker(QThread):
                         noise_k=self.params.get("noise_k", 3.0),
                         snr_min=self.params.get("snr_min", 3.0),
                         edge_band=self.params.get("edge_band", 5),
+                        boundary_scale=self.params.get("boundary_scale", 4),
+                        isolated_filter=self.params.get("isolated_filter", True),
+                        isolated_win=self.params.get("isolated_win", 7),
+                        isolated_k=self.params.get("isolated_k", 3.0),
+                        isolated_min_px=self.params.get("isolated_min_px", 2),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -379,6 +394,147 @@ class ProcessWorker(QThread):
             self.finished_all.emit()
 
 
+class QueryWorker(QThread):
+    """后台执行变星(VSX)/MPC 查询：先变星全部查完，再查 MPC。"""
+
+    log = Signal(str)
+    progress = Signal(str, int, int)  # phase("var"/"mpc"), done, total
+    finished_all = Signal()
+
+    def __init__(self, tasks: list, cfg: dict) -> None:
+        super().__init__()
+        self.tasks = tasks
+        self.cfg = cfg
+        self._resume = threading.Event()
+        self._resume.set()
+        self._stop = threading.Event()
+
+    def pause(self) -> None:
+        self._resume.clear()
+
+    def resume(self) -> None:
+        self._resume.set()
+
+    def is_paused(self) -> bool:
+        return not self._resume.is_set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._resume.set()
+
+    def run(self) -> None:
+        cfg = self.cfg
+        lock = threading.Lock()
+        vstate = {"down": False, "logged": False}
+        mstate = {"down": False, "logged": False}
+
+        def hits_to_pix(hits, wcs):
+            out = []
+            for h in hits:
+                try:
+                    px, py = wcs.all_world2pix(float(h["ra"]), float(h["dec"]), 0)
+                    out.append([float(px), float(py)])
+                except Exception:
+                    continue
+            return out
+
+        def do_vsx(task):
+            det, wcs, epoch, ra, dec = task
+            if vstate["down"]:
+                det["var_count"] = -1
+                return []
+            try:
+                hits = query_servers.query_vsx(
+                    ra, dec, cfg["radius"], mag_limit=cfg["mag_limit"],
+                    host=cfg["vsx_host"], port=cfg["vsx_port"],
+                    timeout=cfg["vsx_timeout"])
+                det["var_count"] = len(hits)
+                det["var_hits"] = hits_to_pix(hits, wcs)
+            except Exception as ex:  # noqa: BLE001
+                det["var_count"] = -1
+                det["var_hits"] = []
+                with lock:
+                    vstate["down"] = True
+                    if not vstate["logged"]:
+                        vstate["logged"] = True
+                        return [f"变星服务({cfg['vsx_url']})不可用: {ex}"]
+            return []
+
+        def do_mpc(task):
+            det, wcs, epoch, ra, dec = task
+            if mstate["down"] or epoch is None:
+                det["mpc_count"] = -1
+                return []
+            try:
+                hits = query_servers.query_mpc(
+                    ra, dec, epoch, cfg["radius"],
+                    host=cfg["mpc_host"], port=cfg["mpc_port"],
+                    timeout=cfg["mpc_timeout"])
+                det["mpc_count"] = len(hits)
+                det["mpc_hits"] = hits_to_pix(hits, wcs)
+            except Exception as ex:  # noqa: BLE001
+                det["mpc_count"] = -1
+                det["mpc_hits"] = []
+                with lock:
+                    mstate["down"] = True
+                    if not mstate["logged"]:
+                        mstate["logged"] = True
+                        return [f"MPC服务({cfg['mpc_url']})不可用: {ex}"]
+            return []
+
+        def run_phase(work, phase_tasks, phase, label):
+            total = len(phase_tasks)
+            self.progress.emit(phase, 0, total)
+            self.log.emit(f"查询{label}: {total} 个目标（并发 {cfg['threads']}）…")
+            if total == 0:
+                return
+            done = 0
+            idx = 0
+            pending = {}
+            with ThreadPoolExecutor(max_workers=cfg["threads"]) as pool:
+                while idx < total or pending:
+                    # 暂停：不提交新任务，等待恢复
+                    while not self._resume.wait(0.2):
+                        if self._stop.is_set():
+                            break
+                    if self._stop.is_set():
+                        idx = total
+                    while idx < total and len(pending) < cfg["threads"]:
+                        fut = pool.submit(work, phase_tasks[idx])
+                        pending[fut] = True
+                        idx += 1
+                    if not pending:
+                        break
+                    done_futs, _ = wait(list(pending), timeout=0.2,
+                                        return_when=FIRST_COMPLETED)
+                    for fut in done_futs:
+                        pending.pop(fut, None)
+                        try:
+                            for m in fut.result():
+                                self.log.emit(m)
+                        except Exception as ex:  # noqa: BLE001
+                            self.log.emit(f"查询任务异常: {ex}")
+                        done += 1
+                        self.progress.emit(phase, done, total)
+
+        vsx_tasks = [t for t in self.tasks
+                     if not (cfg["skip_done"] and t[0].get("var_count", -1) >= 0)]
+        mpc_tasks = [t for t in self.tasks
+                     if not (cfg["skip_done"] and (t[0].get("mpc_count", -1) >= 0 or t[2] is None))]
+        if cfg["skip_done"]:
+            self.log.emit(f"跳过已查询: 变星 {len(self.tasks)-len(vsx_tasks)} 个, "
+                          f"MPC {len(self.tasks)-len(mpc_tasks)} 个")
+        run_phase(do_vsx, vsx_tasks, "var", "变星")
+        if not self._stop.is_set():
+            run_phase(do_mpc, mpc_tasks, "mpc", "MPC")
+        self.log.emit(
+            f"查询完成（变星服务不可用={vstate['down']}, MPC服务不可用={mstate['down']}）")
+        if cfg.get("n_no_epoch"):
+            self.log.emit(
+                f"MPC 跳过: {cfg['n_no_epoch']} 个目标因 B 头缺少观测时间(MJD-OBS/JD/DATE-OBS)")
+        self.finished_all.emit()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -386,6 +542,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 950)
 
         self.worker: Optional[ProcessWorker] = None
+        self.query_worker: Optional[QueryWorker] = None
         self._results: List[Dict] = []          # 每个文件的结果
         self._row_map: List[Optional[Dict]] = []  # 表格行 -> 检测项（含 _result 引用）
         self._fits_cache = FitsCache(max_items=2)  # 原生裁块用（A/B 各一）
@@ -448,6 +605,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         save_settings(self._collect_settings())
+        for wk in (self.worker, self.query_worker):
+            try:
+                if wk is not None and wk.isRunning():
+                    wk.wait(3000)
+            except Exception:
+                pass
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ UI
@@ -529,6 +692,9 @@ class MainWindow(QMainWindow):
         self.snr_check = QCheckBox("按局部SNR过滤检测(含暗边)")
         self.snr_check.setChecked(DEFAULTS["snr_filter"])
         form.addRow("", self.snr_check)
+        self.isolated_check = QCheckBox("排除孤立点(宇宙线/热像素)")
+        self.isolated_check.setChecked(DEFAULTS["isolated_filter"])
+        form.addRow("", self.isolated_check)
         self.edge_spin = QSpinBox()
         self.edge_spin.setRange(0, 200)
         self.edge_spin.setValue(int(DEFAULTS["edge_band"]))
@@ -536,6 +702,9 @@ class MainWindow(QMainWindow):
         self.skip_existing_check = QCheckBox("跳过已有结果")
         self.skip_existing_check.setChecked(DEFAULTS["skip_existing"])
         form.addRow("", self.skip_existing_check)
+        self.query_skip_check = QCheckBox("查询跳过已完成")
+        self.query_skip_check.setChecked(DEFAULTS["query_skip_done"])
+        form.addRow("", self.query_skip_check)
         lay.addWidget(params)
 
         btns = QHBoxLayout()
@@ -550,10 +719,14 @@ class MainWindow(QMainWindow):
         self.load_btn.clicked.connect(self._load_results_from_node)
         self.query_btn = QPushButton("查询变星/MPC")
         self.query_btn.clicked.connect(self._run_queries)
+        self.query_pause_btn = QPushButton("暂停查询")
+        self.query_pause_btn.setEnabled(False)
+        self.query_pause_btn.clicked.connect(self._toggle_query_pause)
         btns.addWidget(self.run_btn)
         btns.addWidget(self.stop_btn)
         btns.addWidget(self.load_btn)
         btns.addWidget(self.query_btn)
+        btns.addWidget(self.query_pause_btn)
         btns.addWidget(self.export_btn)
         lay.addLayout(btns)
 
@@ -668,6 +841,7 @@ class MainWindow(QMainWindow):
             + _swatch(_STATUS_COLOR["a_invalid"]) + " A无效区　"
             + _swatch(_STATUS_COLOR["low_snr"]) + " 低信噪　"
             + _swatch(_STATUS_COLOR["edge"]) + " 边缘　"
+            + _swatch(_STATUS_COLOR["isolated"]) + " 孤立点　"
             + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
             + _swatch(_SEL_COLOR) + " 当前选中"
             + "　　|　　<b>叠加：</b>"
@@ -857,12 +1031,19 @@ class MainWindow(QMainWindow):
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
             "valid_overlap_filter": bool(self.valid_overlap_check.isChecked()),
             "skip_existing": bool(self.skip_existing_check.isChecked()),
+            "query_skip_done": bool(self.query_skip_check.isChecked()),
             "snr_filter": bool(self.snr_check.isChecked()),
             "shading_k": float(DEFAULTS["shading_k"]),
             "b2_ksize": int(DEFAULTS["b2_ksize"]),
             "noise_k": float(DEFAULTS["noise_k"]),
             "snr_min": float(DEFAULTS["snr_min"]),
             "edge_band": int(self.edge_spin.value()),
+            "isolated_filter": bool(self.isolated_check.isChecked()),
+            "isolated_win": int(DEFAULTS["isolated_win"]),
+            "isolated_k": float(DEFAULTS["isolated_k"]),
+            "isolated_min_px": int(DEFAULTS["isolated_min_px"]),
+            "boundary_scale": int(DEFAULTS["boundary_scale"]),
+            "amp": bool(DEFAULTS["amp"]),
         }
 
     # -------------------------------------------------------------- process
@@ -1099,15 +1280,8 @@ class MainWindow(QMainWindow):
         if not self._results:
             QMessageBox.information(self, "提示", "没有可查询的结果（请先选中已处理的文件/文件夹）")
             return
-        radius = float(DEFAULTS["query_radius_arcsec"])
-        mag_limit = float(DEFAULTS["query_mag_limit"])
-        vsx_timeout = float(DEFAULTS["vsx_timeout"])
-        mpc_timeout = float(DEFAULTS["mpc_timeout"])
-        vsx_down = mpc_down = False
-        vsx_url = f"{DEFAULTS['vsx_host']}:{DEFAULTS['vsx_port']}"
-        mpc_url = f"{DEFAULTS['mpc_host']}:{DEFAULTS['mpc_port']}"
-
-        # 组织待查询任务（仅命中的检测，需能定位 WCS）
+        # 组织候选任务（仅命中的检测，需能定位 WCS）
+        skip_done = bool(self.query_skip_check.isChecked())
         tasks = []
         for res in self._results:
             wcs = self._safe_wcs(res.get("a_path"))
@@ -1123,58 +1297,58 @@ class MainWindow(QMainWindow):
                 try:
                     ra, dec = wcs.all_pix2world(float(det["x"]), float(det["y"]), 0)
                     tasks.append((det, wcs, epoch, float(ra), float(dec)))
+                    if epoch is None and det.get("mpc_count") is None:
+                        det["mpc_count"] = -1
                 except Exception:
                     det["var_count"] = det["mpc_count"] = -1
 
-        total = len(tasks)
-        for bar in (self.var_progress, self.mpc_progress):
-            bar.setRange(0, max(1, total))
-            bar.setValue(0)
-        n_q = 0
-        n_no_epoch = 0
-        for i, (det, wcs, epoch, ra, dec) in enumerate(tasks, 1):
-            # 变星(VSX)
-            if vsx_down:
-                det["var_count"] = -1
-            else:
-                try:
-                    hits = query_servers.query_vsx(
-                        ra, dec, radius, mag_limit=mag_limit,
-                        host=DEFAULTS["vsx_host"], port=int(DEFAULTS["vsx_port"]),
-                        timeout=vsx_timeout)
-                    det["var_count"] = len(hits)
-                    det["var_hits"] = self._hits_to_pix(hits, wcs)
-                except Exception as ex:  # noqa: BLE001
-                    det["var_count"] = -1
-                    det["var_hits"] = []
-                    vsx_down = True
-                    self._log(f"变星服务({vsx_url})不可用: {ex}")
-            self.var_progress.setValue(i)
-            # MPC
-            if mpc_down or epoch is None:
-                det["mpc_count"] = -1
-                if epoch is None:
-                    n_no_epoch += 1
-            else:
-                try:
-                    hits = query_servers.query_mpc(
-                        ra, dec, epoch, radius,
-                        host=DEFAULTS["mpc_host"], port=int(DEFAULTS["mpc_port"]),
-                        timeout=mpc_timeout)
-                    det["mpc_count"] = len(hits)
-                    det["mpc_hits"] = self._hits_to_pix(hits, wcs)
-                except Exception as ex:  # noqa: BLE001
-                    det["mpc_count"] = -1
-                    det["mpc_hits"] = []
-                    mpc_down = True
-                    self._log(f"MPC服务({mpc_url})不可用: {ex}")
-            self.mpc_progress.setValue(i)
-            n_q += 1
-            QApplication.processEvents()
-        self._log(
-            f"查询完成: {n_q} 个目标（变星服务不可用={vsx_down}, MPC服务不可用={mpc_down}）")
-        if n_no_epoch:
-            self._log(f"MPC 跳过: {n_no_epoch} 个目标因 B 头缺少观测时间(MJD-OBS/JD/DATE-OBS)")
+        cfg = {
+            "radius": float(DEFAULTS["query_radius_arcsec"]),
+            "mag_limit": float(DEFAULTS["query_mag_limit"]),
+            "vsx_timeout": float(DEFAULTS["vsx_timeout"]),
+            "mpc_timeout": float(DEFAULTS["mpc_timeout"]),
+            "threads": max(1, int(DEFAULTS.get("query_threads", 3))),
+            "skip_done": skip_done,
+            "vsx_host": DEFAULTS["vsx_host"], "vsx_port": int(DEFAULTS["vsx_port"]),
+            "mpc_host": DEFAULTS["mpc_host"], "mpc_port": int(DEFAULTS["mpc_port"]),
+            "vsx_url": f"{DEFAULTS['vsx_host']}:{DEFAULTS['vsx_port']}",
+            "mpc_url": f"{DEFAULTS['mpc_host']}:{DEFAULTS['mpc_port']}",
+            "n_no_epoch": 0,
+        }
+        cfg["n_no_epoch"] = sum(
+            1 for t in tasks
+            if t[2] is None and not (skip_done and t[0].get("mpc_count", -1) >= 0))
+
+        # 后台线程执行，不阻塞界面
+        self.query_btn.setEnabled(False)
+        self.query_pause_btn.setEnabled(True)
+        self.query_pause_btn.setText("暂停查询")
+        self.query_worker = QueryWorker(tasks, cfg)
+        self.query_worker.log.connect(self._log)
+        self.query_worker.progress.connect(self._on_query_progress)
+        self.query_worker.finished_all.connect(self._on_query_finished)
+        self.query_worker.start()
+
+    def _on_query_progress(self, phase: str, done: int, total: int) -> None:
+        bar = self.var_progress if phase == "var" else self.mpc_progress
+        bar.setRange(0, max(1, total))
+        bar.setValue(done)
+
+    def _toggle_query_pause(self) -> None:
+        wk = self.query_worker
+        if wk is None or not wk.isRunning():
+            return
+        if wk.is_paused():
+            wk.resume()
+            self.query_pause_btn.setText("暂停查询")
+        else:
+            wk.pause()
+            self.query_pause_btn.setText("继续查询")
+
+    def _on_query_finished(self) -> None:
+        self.query_btn.setEnabled(True)
+        self.query_pause_btn.setEnabled(False)
+        self.query_pause_btn.setText("暂停查询")
         self._rebuild_table()
         self._refresh_preview()
         for res in self._results:

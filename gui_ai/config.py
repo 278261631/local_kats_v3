@@ -33,11 +33,15 @@ DEFAULTS = {
     # 跨瓦片去重半径（原生像素）
     "dedup_radius": 8.0,
     # 批推理 batch size
-    "batch_size": 16,
+    "batch_size": 32,
     # 推理设备：auto / cpu / cuda
     "device": "auto",
     # 重投影分块行数
     "reproject_chunk_rows": 256,
+    # 边界检测降采样倍率（有效区/二级/黑帽在半分辨率上算）
+    "boundary_scale": 4,
+    # GPU 混合精度推理
+    "amp": True,
     # 处理 B 帧时，reproject 后 B 的无效区（nan）是否沿用 A 的灰度
     "fill_invalid_with_a": False,
     # 是否按 A、B 有效区的重叠部分过滤检测
@@ -51,6 +55,11 @@ DEFAULTS = {
     "noise_k": 3.0,     # 瓦片噪声超过 k*全局sigma 视为噪声区
     "snr_min": 3.0,     # 峰值局部信噪比下限
     "edge_band": 5,     # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
+    # 孤立点(宇宙线/热像素)过滤
+    "isolated_filter": True,
+    "isolated_win": 7,      # 检测点周围窗口(px)
+    "isolated_k": 3.0,      # 阈值 = 局部bg + k*sigma
+    "isolated_min_px": 2,   # 连通块小于该像素数判为孤立点
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,
@@ -62,6 +71,8 @@ DEFAULTS = {
     "query_mag_limit": 16.0,
     "vsx_timeout": 30.0,   # 变星服务超时(秒)
     "mpc_timeout": 180.0,  # MPC 服务较慢(星历计算), 超时放长
+    "query_threads": 3,    # 变星/MPC 查询并发线程数
+    "query_skip_done": True,  # 跳过已查询(变星与MPC均已完成)的检测
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
 }

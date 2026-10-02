@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -68,6 +69,7 @@ class PairModel:
         device: str = "auto",
         det_threshold: float = 0.35,
         batch_size: int = 16,
+        amp: bool | None = None,
     ) -> None:
         self.mod = _load_model_module()
         self.model_dir = Path(model_dir)
@@ -83,6 +85,12 @@ class PairModel:
         self.net = self.mod.build_model_from_state(sd)
         self.net.to(self.device)
         self.net.eval()
+        self.amp = (self.device == "cuda") if amp is None else bool(amp and self.device == "cuda")
+        if self.device == "cpu":
+            try:
+                torch.set_num_threads(max(1, (os.cpu_count() or 1)))
+            except Exception:
+                pass
 
     @staticmethod
     def _resolve_model_size(model_dir: Path) -> int:
@@ -105,7 +113,7 @@ class PairModel:
             b_u8 = cv2.resize(b_u8, (size, size), interpolation=cv2.INTER_AREA)
         return self.mod.preprocess(a_u8, b_u8)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def infer_tiles(
         self,
         a_tiles_u8: List[np.ndarray],
@@ -124,7 +132,12 @@ class PairModel:
                 [self._prepare(a, b) for a, b in zip(a_chunk, b_chunk)]
             ).to(self.device)
 
-            pose, det, ob = self.net(pair)
+            if self.amp:
+                import torch as _t
+                with _t.autocast(device_type="cuda", dtype=_t.float16):
+                    pose, det, ob = self.net(pair)
+            else:
+                pose, det, ob = self.net(pair)
             dxdy = self.mod.decode(pose).cpu().numpy()  # (N,3) dx,dy,roll(deg)
             peaks_per = (
                 self.mod.heat_to_peaks(torch.sigmoid(det), thresh=self.det_threshold)

@@ -39,6 +39,10 @@ LogCb = Optional[Callable[[str], None]]
 _VALID_POLY_CACHE: Dict[str, list] = {}
 #: A 模板有效区掩码缓存（供 A∩B 重叠过滤）
 _A_VALID_CACHE: Dict[str, np.ndarray] = {}
+#: A 模板数据/WCS 缓存（同模板多 B 时免重复读盘）
+_A_DATA_CACHE: Dict[str, tuple] = {}
+#: A 模板"像素->天球"分块缓存（供重投影复用）
+_A_WORLD_CACHE: Dict[str, dict] = {}
 
 
 def collect_fits_files(path: str | os.PathLike) -> List[str]:
@@ -121,6 +125,56 @@ def _downscale_f32(arr: np.ndarray, max_side: int) -> np.ndarray:
     return out
 
 
+def _blob_size(img: np.ndarray, xi: int, yi: int, win: int, thresh: float) -> int:
+    """以 (xi,yi) 为中心窗口内，阈值化后包含中心像素的连通块大小。"""
+    import cv2
+
+    half = max(1, int(win) // 2)
+    h, w = img.shape
+    x0 = max(0, xi - half)
+    y0 = max(0, yi - half)
+    x1 = min(w, xi + half + 1)
+    y1 = min(h, yi + half + 1)
+    sub = np.asarray(img[y0:y1, x0:x1], dtype=np.float32)
+    m = (sub > float(thresh)).astype(np.uint8)
+    cy, cx = yi - y0, xi - x0
+    if cy < 0 or cx < 0 or cy >= m.shape[0] or cx >= m.shape[1] or m[cy, cx] == 0:
+        return 0
+    n, lab = cv2.connectedComponents(m, 8)
+    return int((lab == lab[cy, cx]).sum())
+
+
+def _block_mean_nan(arr: np.ndarray, factor: int) -> np.ndarray:
+    """按 factor×factor 块求均值（忽略 NaN），用于降分辨率做边界检测。"""
+    f = int(factor)
+    a = np.asarray(arr, dtype=np.float32)
+    if f <= 1:
+        return a
+    h, w = a.shape
+    h2, w2 = (h // f) * f, (w // f) * f
+    if h2 == 0 or w2 == 0:
+        return a
+    blk = a[:h2, :w2].reshape(h2 // f, f, w2 // f, f)
+    fin = np.isfinite(blk)
+    s = np.where(fin, blk, 0.0).sum(axis=(1, 3))
+    c = fin.sum(axis=(1, 3))
+    return np.where(c > 0, s / np.maximum(c, 1), np.nan).astype(np.float32)
+
+
+def _scale_polys(polys: list, factor: float) -> list:
+    return [(np.asarray(p, dtype=np.float32) * float(factor)) for p in polys]
+
+
+def _upsample_mask(mask_small: np.ndarray, factor: int, shape) -> np.ndarray:
+    f = int(factor)
+    m = np.repeat(np.repeat(np.asarray(mask_small).astype(np.uint8), f, 0), f, 1)
+    out = np.zeros(shape, dtype=np.uint8)
+    hh = min(shape[0], m.shape[0])
+    ww = min(shape[1], m.shape[1])
+    out[:hh, :ww] = m[:hh, :ww]
+    return out.astype(bool)
+
+
 def process_b_file(
     b_path: str,
     model: PairModel,
@@ -138,6 +192,11 @@ def process_b_file(
     noise_k: float = 3.0,
     snr_min: float = 3.0,
     edge_band: int = 5,
+    boundary_scale: int = 4,
+    isolated_filter: bool = True,
+    isolated_win: int = 7,
+    isolated_k: float = 3.0,
+    isolated_min_px: int = 2,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -182,9 +241,17 @@ def process_b_file(
     result["a_path"] = a_path
     log(f"参考 A: {a_path}")
 
-    a_data, a_header = load_fits_data(a_path)
+    # A 模板：数据/WCS 缓存（同一模板处理多个 B 时复用）
+    cached_a = _A_DATA_CACHE.get(a_path)
+    if cached_a is None:
+        a_data, a_header = load_fits_data(a_path)
+        wcs_a = build_celestial_wcs(a_header)
+        if len(_A_DATA_CACHE) >= 2:
+            _A_DATA_CACHE.pop(next(iter(_A_DATA_CACHE)))
+        _A_DATA_CACHE[a_path] = (a_data, wcs_a)
+    else:
+        a_data, wcs_a = cached_a
     b_data, b_header = load_fits_data(b_path)
-    wcs_a = build_celestial_wcs(a_header)
     wcs_b = build_celestial_wcs(b_header)
 
     # A 模板有效区(星空/空白)边界多边形（多项式坐标，A 网格）
@@ -208,8 +275,12 @@ def process_b_file(
         log(f"A有效区提取失败: {ex}")
 
     log(f"重投影 B -> A 网格 ({a_data.shape[1]}x{a_data.shape[0]}) ...")
+    if a_path not in _A_WORLD_CACHE:
+        _A_WORLD_CACHE.clear()
+        _A_WORLD_CACHE[a_path] = {}
     b_rep = reproject_b_to_a_wcs(
-        a_data.shape, b_data, wcs_a, wcs_b, chunk_rows=reproject_chunk_rows
+        a_data.shape, b_data, wcs_a, wcs_b, chunk_rows=reproject_chunk_rows,
+        world_cache=_A_WORLD_CACHE[a_path],
     )
     valid = np.isfinite(b_rep)
     if fill_invalid_with_a:
@@ -217,12 +288,17 @@ def process_b_file(
     else:
         b_filled = b_rep
 
+    # 边界检测在降分辨率上进行（边界平滑，省 10x+）
+    bs = max(1, int(boundary_scale))
+    b_small = _block_mean_nan(b_rep, bs) if bs > 1 else b_rep
+    valid_small = np.isfinite(b_small)
+
     # B(重投影后) 有效区(星空/空白)边界多边形
     try:
-        result["b_valid_polys"] = extract_valid_polygons(b_rep)
+        polys = extract_valid_polygons(b_small)
+        result["b_valid_polys"] = _scale_polys(polys, bs) if bs > 1 else polys
         if result["b_valid_polys"]:
-            log(f"B有效区边界: {len(result['b_valid_polys'])} 个多边形, 最大顶点数 "
-                f"{max(len(p) for p in result['b_valid_polys'])}")
+            log(f"B有效区边界: {len(result['b_valid_polys'])} 个多边形")
     except Exception as ex:  # noqa: BLE001
         log(f"B有效区提取失败: {ex}")
 
@@ -231,12 +307,14 @@ def process_b_file(
     shaded = None
     g_bg, g_sig = 0.0, 1.0
     try:
-        b2_polys = extract_b2_polygons(b_rep, valid, k=shading_k, ksize=b2_ksize)
-        result["b2_valid_polys"] = b2_polys
-        shaded = shading_mask(b_rep, valid, k=shading_k, ksize=b2_ksize)
+        ks = max(3, int(b2_ksize) // bs)
+        b2_small = extract_b2_polygons(b_small, valid_small, k=shading_k, ksize=ks)
+        result["b2_valid_polys"] = _scale_polys(b2_small, bs) if bs > 1 else b2_small
+        shaded_small = shading_mask(b_small, valid_small, k=shading_k, ksize=ks)
+        shaded = _upsample_mask(shaded_small, bs, b_rep.shape) if bs > 1 else shaded_small
         g_bg, g_sig = background_stats(b_rep, valid)
-        if b2_polys:
-            log(f"B二级有效区边界: {len(b2_polys)} 个多边形, 暗边占比 "
+        if result["b2_valid_polys"]:
+            log(f"B二级有效区边界: {len(result['b2_valid_polys'])} 个多边形, 暗边占比 "
                 f"{100.0*float(shaded.mean()):.1f}%")
     except Exception as ex:  # noqa: BLE001
         log(f"B二级有效区提取失败: {ex}")
@@ -350,6 +428,12 @@ def process_b_file(
                         snr = (v_val - t_bg) / t_sig if t_sig > 0 else 0.0
                         if (shaded is not None and shaded[yi, xi]) or tile_noisy or snr < snr_min:
                             status = "low_snr"
+                    if status == "keep" and isolated_filter:
+                        blobs = _blob_size(
+                            b_filled, xi, yi, isolated_win,
+                            t_bg + isolated_k * t_sig)
+                        if blobs < int(isolated_min_px):
+                            status = "isolated"
                 dets.append(
                     {
                         "x": float(fx),
