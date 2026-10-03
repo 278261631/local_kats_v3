@@ -31,7 +31,7 @@ _LEVELS = {
 
 def sanitize_name(value) -> str:
     text = str(value or "").strip()
-    text = re.sub(r'[<>:"/\\|?*\s]+', "_", text)
+    text = re.sub(r'[<>:"/\\|?*\s%#&]+', "_", text)
     text = re.sub(r"_+", "_", text).strip("._")
     return text or "item"
 
@@ -61,16 +61,30 @@ def stretch_patch(patch: np.ndarray, level: str = "high") -> np.ndarray:
     return np.round(out * 255.0).astype(np.uint8)
 
 
+def _with_cross(u8: np.ndarray, size: int = 6, gap: int = 3) -> np.ndarray:
+    """灰度转 RGB 并在中心画**空心十字**（中心留空）。"""
+    img = np.repeat(u8[:, :, None], 3, axis=2)
+    h, w, _ = img.shape
+    cx, cy = w // 2, h // 2
+    img[cy, max(0, cx - size):max(0, cx - gap)] = (255, 0, 0)
+    img[cy, min(w, cx + gap + 1):min(w, cx + size + 1)] = (255, 0, 0)
+    img[max(0, cy - size):max(0, cy - gap), cx] = (255, 0, 0)
+    img[min(h, cy + gap + 1):min(h, cy + size + 1), cx] = (255, 0, 0)
+    return img
+
+
 def _side_by_side(a_u8: np.ndarray, b_u8: np.ndarray) -> np.ndarray:
-    h = max(a_u8.shape[0], b_u8.shape[0])
+    a = _with_cross(a_u8)
+    b = _with_cross(b_u8)
+    h = max(a.shape[0], b.shape[0])
 
     def pad(x):
         if x.shape[0] == h:
             return x
-        return np.pad(x, ((0, h - x.shape[0]), (0, 0)), mode="edge")
+        return np.pad(x, ((0, h - x.shape[0]), (0, 0), (0, 0)), mode="edge")
 
-    sep = np.zeros((h, 2), dtype=np.uint8)
-    return np.concatenate([pad(a_u8), sep, pad(b_u8)], axis=1)
+    sep = np.zeros((h, 2, 3), dtype=np.uint8)
+    return np.concatenate([pad(a), sep, pad(b)], axis=1)
 
 
 def _radec(wcs, x: float, y: float):
@@ -86,8 +100,7 @@ def _radec(wcs, x: float, y: float):
 def _card(item: Dict) -> str:
     return (
         '<div class="card">'
-        f'<a href="{html.escape(item["img_rel"])}" target="_blank">'
-        f'<img src="{html.escape(item["img_rel"])}" alt="patch"></a>'
+        f'<img src="{html.escape(item["img_rel"])}" alt="patch">'
         '<div class="meta">'
         f'<div>status: {html.escape(str(item.get("status", "")))}</div>'
         f'<div>score: {html.escape(str(item.get("score", "")))}</div>'
@@ -101,7 +114,7 @@ def _card(item: Dict) -> str:
     )
 
 
-def _build_html(items: List[Dict], summary: str, patch_size: int, hist_level: str) -> str:
+def _group_blocks(items: List[Dict]) -> str:
     grouped: Dict[str, List[Dict]] = {}
     for it in items:
         grouped.setdefault(it.get("group", "UNGROUPED"), []).append(it)
@@ -113,7 +126,23 @@ def _build_html(items: List[Dict], summary: str, patch_size: int, hist_level: st
             f'<h3>分组: {html.escape(key)} <span class="count">({len(grouped[key])})</span></h3>'
             f'<div class="grid">{cards}</div></section>'
         )
-    groups_html = "\n".join(blocks) or "<p>无结果</p>"
+    return "\n".join(blocks)
+
+
+def _build_html(items: List[Dict], summary: str, patch_size: int, hist_level: str,
+                snr_split: float = 10.0) -> str:
+    hi, lo = [], []
+    for it in items:
+        s = it.get("_snr")
+        (hi if (s is not None and s >= snr_split) else lo).append(it)
+    hi_html = _group_blocks(hi) or "<p>无</p>"
+    if lo:
+        lo_html = (
+            f'<details><summary>SNR&lt;{snr_split:g}（{len(lo)} 个，默认折叠，点击展开）'
+            f'</summary>{_group_blocks(lo)}</details>'
+        )
+    else:
+        lo_html = ""
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -126,15 +155,34 @@ def _build_html(items: List[Dict], summary: str, patch_size: int, hist_level: st
  .card img {{ width:100%; height:auto; display:block; background:#000; }}
  .meta {{ font-size:12px; line-height:1.45; padding:8px; }}
  .count {{ color:#666; font-weight:normal; font-size:12px; }}
+ .card img {{ cursor: zoom-in; }}
+ details {{ margin-top:14px; border-top:1px solid #eee; padding-top:8px; }}
+ summary {{ cursor:pointer; font-weight:bold; }}
+ #lb {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.85);
+        z-index:1000; text-align:center; cursor: zoom-out; }}
+ #lb img {{ max-width:96%; max-height:96%; margin-top:2%; }}
 </style></head><body>
 <h2>gui_ai 检测导出网页 (V4)</h2>
 <div class="summary">
  <div>导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
- <div>命中导出: {len(items)}</div>
+ <div>命中导出: {len(items)}  （SNR≥{snr_split:g}: {len(hi)}，SNR&lt;{snr_split:g}: {len(lo)}）</div>
  <div>patch尺寸: {patch_size}px，拉伸: {html.escape(hist_level)}</div>
  <pre>条件: {html.escape(summary)}</pre>
 </div>
-{groups_html}
+<h3>SNR≥{snr_split:g}（{len(hi)}）</h3>
+{hi_html}
+{lo_html}
+<div id="lb"><img id="lbimg" alt="zoom"></div>
+<script>
+document.querySelectorAll('.card img').forEach(function(im){{
+  im.addEventListener('click', function(ev){{
+    ev.stopPropagation();
+    document.getElementById('lbimg').src = im.src;
+    document.getElementById('lb').style.display = 'block';
+  }});
+}});
+document.getElementById('lb').addEventListener('click', function(){{ this.style.display='none'; }});
+</script>
 </body></html>"""
 
 
@@ -145,6 +193,7 @@ def export_results_web(
     hist_level: str = "high",
     keep_only: bool = True,
     tag: str = "V4",
+    snr_split: float = 10.0,
     log=print,
 ) -> Tuple[int, Path, Path]:
     out_dir = Path(out_root) / f"out_zip_{datetime.now().strftime('%Y%m%d')}"
@@ -161,7 +210,8 @@ def export_results_web(
             a_path = res.get("a_path")
             b_path = res.get("b_path")
             dets = [d for d in res.get("detections", [])
-                    if (not keep_only or d.get("status") == "keep")]
+                    if (not keep_only or d.get("status") == "keep")
+                    and d.get("var_count") == 0 and d.get("mpc_count") == 0]
             if not dets:
                 continue
             wcs_a = None
@@ -199,18 +249,26 @@ def export_results_web(
                     "status": d.get("status", ""),
                     "score": f"{d.get('score', 0):.3f}",
                     "snr": "-" if d.get("snr") is None else f"{d.get('snr'):.1f}",
+                    "_snr": d.get("snr"),
                     "var_count": d.get("var_count", -1),
                     "mpc_count": d.get("mpc_count", -1),
                     "radec": "" if ra is None else f"{ra:.6f}, {dec:.6f}",
                     "xy": f"{d.get('x', 0):.0f},{d.get('y', 0):.0f}",
                 })
 
-        summary = f"状态={'仅命中' if keep_only else '全部'}"
+        n_hi = sum(1 for it in items
+                   if it.get("_snr") is not None and it["_snr"] >= snr_split)
+        summary = (f"仅 var=0 且 mpc=0；状态={'仅命中' if keep_only else '全部'}；"
+                   f"SNR≥{snr_split:g} 优先，其余折叠")
         (stage / "index.html").write_text(
-            _build_html(items, summary, patch_size, hist_level), encoding="utf-8")
+            _build_html(items, summary, patch_size, hist_level, snr_split),
+            encoding="utf-8")
         (stage / "meta.json").write_text(json.dumps({
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "count": len(items),
+            "snr_split": snr_split,
+            "n_snr_high": n_hi,
+            "n_snr_low": len(items) - n_hi,
             "patch_size_px": patch_size,
             "hist_level": hist_level,
             "keep_only": keep_only,

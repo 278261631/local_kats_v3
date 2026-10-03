@@ -145,7 +145,7 @@ def _blob_size(img: np.ndarray, xi: int, yi: int, win: int, thresh: float) -> in
 
 
 def _det_metrics(img: np.ndarray, xi: int, yi: int, r: int, R: int,
-                 search: int = 4):
+                 search: int = 5):
     """先在小窗口内重新定位局部峰值，再返回 (SNR, conc, sigma)。
 
     - 重新定位可消除检测点 (x,y) 的 1~2px 偏差，避免 conc 被误压低；
@@ -216,12 +216,12 @@ def _det_metrics(img: np.ndarray, xi: int, yi: int, r: int, R: int,
 
 
 def _aperture_snr(img: np.ndarray, xi: int, yi: int, r: int, R: int,
-                  search: int = 4) -> float:
+                  search: int = 5) -> float:
     return _det_metrics(img, xi, yi, r, R, search)[0]
 
 
 def _shape_metrics(img: np.ndarray, xi: int, yi: int, r: int, R: int,
-                   search: int = 4):
+                   search: int = 5):
     _, conc, sig = _det_metrics(img, xi, yi, r, R, search)
     return conc, sig
 
@@ -275,7 +275,7 @@ def process_b_file(
     aperture_radius: int = 3,
     aperture_annulus: int = 6,
     aperture_snr_min: float = 4.0,
-    det_center_search: int = 4,
+    det_center_search: int = 5,
     shape_conc_max: float = 0.5,
     shape_fwhm_min: float = 0.8,
     shape_fwhm_max: float = 0.0,

@@ -56,7 +56,7 @@ DEFAULTS = {
     "aperture_radius": 3,     # 孔径半径(px)，约等于PSF半径
     "aperture_annulus": 6,    # 背景环外半径(px)
     "aperture_snr_min": 4.0,  # 孔径信噪比下限
-    "det_center_search": 4,   # 在检测点周围重新定位峰值的搜索半径(px)
+    "det_center_search": 5,   # 在检测点周围重新定位峰值的搜索半径(px)
     # 形状判据（并入 SNR 过滤：剔除亮孤立尖峰，保留 PSF 星点）
     "shape_conc_max": 0.5,   # 集中度上限，超过判为尖峰
     "shape_fwhm_min": 0.8,   # FWHM 下限(px)，低于判为尖峰/过小
