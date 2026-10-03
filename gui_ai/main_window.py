@@ -2045,6 +2045,7 @@ class MainWindow(QMainWindow):
                 patch_size=int(self.crop_spin.value()),
                 keep_only=keep_only,
                 tag=str(DEFAULTS["web_zip_tag"]),
+                group_radius_px=float(DEFAULTS["web_group_radius_px"]),
                 log=self._log,
             )
         except Exception as ex:  # noqa: BLE001

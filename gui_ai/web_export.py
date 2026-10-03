@@ -208,6 +208,7 @@ def export_results_web(
     keep_only: bool = True,
     tag: str = "V4",
     snr_split: float = 10.0,
+    group_radius_px: float = 100.0,
     log=print,
 ) -> Tuple[int, Path, Path]:
     out_dir = Path(out_root) / f"out_zip_{datetime.now().strftime('%Y%m%d')}"
@@ -234,6 +235,12 @@ def export_results_web(
                     wcs_a = cache.get(a_path)[2]
                 except Exception:
                     wcs_a = None
+            wcs_b = None
+            if b_path:
+                try:
+                    wcs_b = cache.get(b_path)[2]
+                except Exception:
+                    wcs_b = None
             centers = [(float(d["x"]), float(d["y"])) for d in dets]
             try:
                 crops = load_native_pair_crops(
@@ -242,7 +249,7 @@ def export_results_web(
                 log(f"读取裁块失败 {b_path}: {ex}")
                 continue
             stem = sanitize_name(Path(b_path).stem) if b_path else "unknown"
-            group = _parse_group(b_path)
+            region = parse_region(b_path)
             for d, cr in zip(dets, crops):
                 if cr is None:
                     continue
@@ -256,9 +263,19 @@ def export_results_web(
                     log(f"写 PNG 失败: {ex}")
                     continue
                 ra, dec = _radec(wcs_a, d["x"], d["y"])
+                bx = by = None
+                if wcs_b is not None and ra is not None:
+                    try:
+                        bxy = wcs_b.all_world2pix([[float(ra), float(dec)]], 0)[0]
+                        bx, by = float(bxy[0]), float(bxy[1])
+                    except Exception:
+                        bx = by = None
                 items.append({
                     "img_rel": f"assets/{fname}",
-                    "group": group,
+                    "group": region,
+                    "region": region,
+                    "_bx": bx,
+                    "_by": by,
                     "file": stem,
                     "status": d.get("status", ""),
                     "score": f"{d.get('score', 0):.3f}",
@@ -270,9 +287,11 @@ def export_results_web(
                     "xy": f"{d.get('x', 0):.0f},{d.get('y', 0):.0f}",
                 })
 
+        _cluster_by_pixel(items, group_radius_px)
         n_hi = sum(1 for it in items
                    if it.get("_snr") is not None and it["_snr"] >= snr_split)
-        summary = (f"仅 var=0 且 mpc=0；状态={'仅命中' if keep_only else '全部'}；"
+        summary = (f"同天区(GYx+Ky)按B图像素聚类(半径{group_radius_px:g}px)；"
+                   f"仅 var=0 且 mpc=0；状态={'仅命中' if keep_only else '全部'}；"
                    f"SNR≥{snr_split:g} 优先，其余折叠")
         (stage / "index.html").write_text(
             _build_html(items, summary, patch_size, hist_level, snr_split),
@@ -306,3 +325,48 @@ def _parse_group(b_path) -> str:
         if re.fullmatch(r"\d{8}", part):
             return part
     return "UNGROUPED"
+
+
+def parse_region(b_path) -> str:
+    """天区 = 望远镜(GYx) + K编号(Ky)，忽略 -1/-2 后缀。"""
+    base = Path(b_path).name if b_path else ""
+    m = re.search(r"(GY[1-6])[_\-\s]?(K\d{3})", base, re.IGNORECASE)
+    if m:
+        return f"{m.group(1).upper()}-{m.group(2).upper()}"
+    m2 = re.search(r"(K\d{3})", base, re.IGNORECASE)
+    if m2:
+        return m2.group(1).upper()
+    return "UNGROUPED"
+
+
+def _cluster_by_pixel(items: List[Dict], radius_px: float) -> None:
+    """同一天区内按 B 像素位置贪心聚类，写回 item['group']。"""
+    if radius_px <= 0:
+        for it in items:
+            it.setdefault("group", it.get("region", "UNGROUPED"))
+        return
+    regions: Dict[str, List[Dict]] = {}
+    for it in items:
+        regions.setdefault(it.get("region", "UNGROUPED"), []).append(it)
+    r2 = float(radius_px) ** 2
+    for region, its in regions.items():
+        clusters: List = []  # [(bx,by) or None, [items]]
+        for it in sorted(its, key=lambda x: -(x.get("_snr") or -1)):
+            bx, by = it.get("_bx"), it.get("_by")
+            if bx is None or by is None:
+                clusters.append([None, [it]])
+                continue
+            placed = False
+            for c in clusters:
+                if c[0] is None:
+                    continue
+                cx, cy = c[0]
+                if (bx - cx) ** 2 + (by - cy) ** 2 <= r2:
+                    c[1].append(it)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([(bx, by), [it]])
+        for i, c in enumerate(clusters, 1):
+            for it in c[1]:
+                it["group"] = f"{region} #{i}"

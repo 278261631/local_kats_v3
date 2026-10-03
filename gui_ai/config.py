@@ -89,6 +89,7 @@ DEFAULTS = {
     "web_zip_root": "E:/kats_sync",
     "web_zip_tag": "V4",
     "web_patch_size": 512,
+    "web_group_radius_px": 100,  # 同天区(gyX+Ky)内按B图像素聚类半径
 }
 
 
