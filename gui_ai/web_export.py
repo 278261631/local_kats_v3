@@ -159,8 +159,9 @@ def _build_html(items: List[Dict], summary: str, patch_size: int, hist_level: st
  details {{ margin-top:14px; border-top:1px solid #eee; padding-top:8px; }}
  summary {{ cursor:pointer; font-weight:bold; }}
  #lb {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.85);
-        z-index:1000; text-align:center; cursor: zoom-out; }}
- #lb img {{ max-width:96%; max-height:96%; margin-top:2%; }}
+        z-index:1000; align-items:center; justify-content:center; cursor: zoom-out; }}
+ #lb img {{ max-width:96%; max-height:96%; transform-origin:center center;
+            transition: transform .06s ease-out; cursor: default; }}
 </style></head><body>
 <h2>gui_ai 检测导出网页 (V4)</h2>
 <div class="summary">
@@ -174,14 +175,26 @@ def _build_html(items: List[Dict], summary: str, patch_size: int, hist_level: st
 {lo_html}
 <div id="lb"><img id="lbimg" alt="zoom"></div>
 <script>
+var lb = document.getElementById('lb');
+var lbimg = document.getElementById('lbimg');
+var scale = 1;
 document.querySelectorAll('.card img').forEach(function(im){{
   im.addEventListener('click', function(ev){{
     ev.stopPropagation();
-    document.getElementById('lbimg').src = im.src;
-    document.getElementById('lb').style.display = 'block';
+    scale = 1; lbimg.style.transform = 'scale(1)';
+    lbimg.src = im.src;
+    lb.style.display = 'flex';
   }});
 }});
-document.getElementById('lb').addEventListener('click', function(){{ this.style.display='none'; }});
+lb.addEventListener('click', function(){{ lb.style.display = 'none'; }});
+lbimg.addEventListener('click', function(ev){{ ev.stopPropagation(); }});
+lb.addEventListener('wheel', function(ev){{
+  ev.preventDefault();
+  scale *= (ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+  scale = Math.min(12, Math.max(0.2, scale));
+  lbimg.style.transform = 'scale(' + scale + ')';
+}}, {{ passive: false }});
+document.addEventListener('keydown', function(ev){{ if (ev.key === 'Escape') lb.style.display = 'none'; }});
 </script>
 </body></html>"""
 
