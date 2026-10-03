@@ -144,6 +144,33 @@ def _blob_size(img: np.ndarray, xi: int, yi: int, win: int, thresh: float) -> in
     return int((lab == lab[cy, cx]).sum())
 
 
+def _aperture_snr(img: np.ndarray, xi: int, yi: int, r: int, R: int) -> float:
+    """孔径信噪比 = 孔径内(值-局部背景)之和 / (局部噪声 * sqrt(孔径像素数))。"""
+    h, w = img.shape
+    half = max(1, int(R))
+    x0 = max(0, xi - half)
+    y0 = max(0, yi - half)
+    x1 = min(w, xi + half + 1)
+    y1 = min(h, yi + half + 1)
+    sub = np.asarray(img[y0:y1, x0:x1], dtype=np.float32)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    d2 = (xx - xi) ** 2 + (yy - yi) ** 2
+    ap = d2 <= float(r) ** 2
+    ann = (d2 > float(r) ** 2) & (d2 <= float(R) ** 2)
+    av = sub[ap]
+    av = av[np.isfinite(av)]
+    bv = sub[ann]
+    bv = bv[np.isfinite(bv)]
+    if av.size == 0 or bv.size < 5:
+        return 0.0
+    bg = float(np.median(bv))
+    sig = 1.4826 * float(np.median(np.abs(bv - bg)))
+    if sig <= 0:
+        return 0.0
+    flux = float(np.sum(av - bg))
+    return flux / (sig * (av.size ** 0.5))
+
+
 def _block_mean_nan(arr: np.ndarray, factor: int) -> np.ndarray:
     """按 factor×factor 块求均值（忽略 NaN），用于降分辨率做边界检测。"""
     f = int(factor)
@@ -190,7 +217,9 @@ def process_b_file(
     shading_k: float = 3.0,
     b2_ksize: int = 21,
     noise_k: float = 3.0,
-    snr_min: float = 3.0,
+    aperture_radius: int = 3,
+    aperture_annulus: int = 6,
+    aperture_snr_min: float = 4.0,
     edge_band: int = 5,
     boundary_scale: int = 4,
     isolated_filter: bool = True,
@@ -418,6 +447,8 @@ def process_b_file(
                 xi = min(w - 1, max(0, int(round(fx))))
                 yi = min(h - 1, max(0, int(round(fy))))
                 status = pk.get("status", "keep")
+                asnr = _aperture_snr(
+                    b_filled, xi, yi, aperture_radius, aperture_annulus)
                 if status == "keep":
                     if not valid[yi, xi]:
                         status = "b_uncovered"
@@ -429,9 +460,8 @@ def process_b_file(
                           or (band_b2 is not None and band_b2[yi, xi])):
                         status = "edge"
                     elif snr_filter:
-                        v_val = float(b_filled[yi, xi])
-                        snr = (v_val - t_bg) / t_sig if t_sig > 0 else 0.0
-                        if (shaded is not None and shaded[yi, xi]) or tile_noisy or snr < snr_min:
+                        if ((shaded is not None and shaded[yi, xi]) or tile_noisy
+                                or asnr < aperture_snr_min):
                             status = "low_snr"
                     if status == "keep" and isolated_filter:
                         blobs = _blob_size(
@@ -446,6 +476,7 @@ def process_b_file(
                         "score": float(pk["score"]),
                         "cls": int(pk["cls"]),
                         "status": status,
+                        "snr": float(asnr),
                         "dx": float(r["dx"]),
                         "dy": float(r["dy"]),
                         "roll": float(r["roll"]),

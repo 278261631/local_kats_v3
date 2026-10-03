@@ -75,11 +75,12 @@ from config import DEFAULTS, load_settings, save_settings
 from native_crop import FitsCache, load_native_pair_crops
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
+from pipeline import _aperture_snr
 import query_servers
 import results_io
 
-_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
-_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "dx", "dy", "roll"]
+_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "dx", "dy", "roll", "tile_x", "tile_y"]
+_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "dx", "dy", "roll"]
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
@@ -370,7 +371,9 @@ class ProcessWorker(QThread):
                         shading_k=self.params.get("shading_k", 3.0),
                         b2_ksize=self.params.get("b2_ksize", 21),
                         noise_k=self.params.get("noise_k", 3.0),
-                        snr_min=self.params.get("snr_min", 3.0),
+                        aperture_radius=self.params.get("aperture_radius", 3),
+                        aperture_annulus=self.params.get("aperture_annulus", 6),
+                        aperture_snr_min=self.params.get("aperture_snr_min", 4.0),
                         edge_band=self.params.get("edge_band", 5),
                         boundary_scale=self.params.get("boundary_scale", 4),
                         isolated_filter=self.params.get("isolated_filter", True),
@@ -709,7 +712,6 @@ class MainWindow(QMainWindow):
         form.addRow("", self.query_skip_check)
         lay.addWidget(params)
 
-        btns = QHBoxLayout()
         self.run_btn = QPushButton("开始处理")
         self.run_btn.clicked.connect(self._start)
         self.stop_btn = QPushButton("停止")
@@ -724,13 +726,25 @@ class MainWindow(QMainWindow):
         self.query_pause_btn = QPushButton("暂停查询")
         self.query_pause_btn.setEnabled(False)
         self.query_pause_btn.clicked.connect(self._toggle_query_pause)
-        btns.addWidget(self.run_btn)
-        btns.addWidget(self.stop_btn)
-        btns.addWidget(self.load_btn)
-        btns.addWidget(self.query_btn)
-        btns.addWidget(self.query_pause_btn)
-        btns.addWidget(self.export_btn)
-        lay.addLayout(btns)
+        self.refilter_btn = QPushButton("重算SNR过滤")
+        self.refilter_btn.clicked.connect(self._refilter_snr)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(self.run_btn)
+        row1.addWidget(self.stop_btn)
+        lay.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(self.load_btn)
+        row2.addWidget(self.refilter_btn)
+        lay.addLayout(row2)
+        row3 = QHBoxLayout()
+        row3.addWidget(self.query_btn)
+        row3.addWidget(self.query_pause_btn)
+        lay.addLayout(row3)
+        row4 = QHBoxLayout()
+        row4.addWidget(self.export_btn)
+        row4.addStretch(1)
+        lay.addLayout(row4)
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
@@ -1072,7 +1086,9 @@ class MainWindow(QMainWindow):
             "shading_k": float(DEFAULTS["shading_k"]),
             "b2_ksize": int(DEFAULTS["b2_ksize"]),
             "noise_k": float(DEFAULTS["noise_k"]),
-            "snr_min": float(DEFAULTS["snr_min"]),
+            "aperture_radius": int(DEFAULTS["aperture_radius"]),
+            "aperture_annulus": int(DEFAULTS["aperture_annulus"]),
+            "aperture_snr_min": float(DEFAULTS["aperture_snr_min"]),
             "edge_band": int(self.edge_spin.value()),
             "isolated_filter": bool(self.isolated_check.isChecked()),
             "isolated_win": int(DEFAULTS["isolated_win"]),
@@ -1137,12 +1153,14 @@ class MainWindow(QMainWindow):
         row = self.table.rowCount()
         self.table.insertRow(row)
         status = d.get("status", "keep")
+        snr = d.get("snr")
         vals = [
             os.path.basename(res.get("b_path") or ""),
             _STATUS_TEXT.get(status, status),
             str(d.get("var_count", -1)),
             str(d.get("mpc_count", -1)),
             f"{d['x']:.1f}", f"{d['y']:.1f}", f"{d['score']:.3f}",
+            "-" if snr is None else f"{snr:.1f}",
             f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
             str(d["tile_x"]), str(d["tile_y"]),
         ]
@@ -1228,6 +1246,7 @@ class MainWindow(QMainWindow):
                     str(det.get("var_count", -1)), str(det.get("mpc_count", -1)),
                     f"{det.get('x', 0):.1f}", f"{det.get('y', 0):.1f}",
                     f"{det.get('score', 0):.3f}",
+                    "-" if det.get("snr") is None else f"{det.get('snr'):.1f}",
                     f"{det.get('dx', 0):+.2f}", f"{det.get('dy', 0):+.2f}",
                     f"{det.get('roll', 0):+.2f}",
                 ])
@@ -1253,6 +1272,57 @@ class MainWindow(QMainWindow):
             w.writerow(_DAILY_COLUMNS)
             w.writerows(self._daily_rows)
         self._log(f"已导出总表: {path}")
+
+    def _refilter_snr(self) -> None:
+        """对已加载/已保存的结果重算孔径SNR并更新状态（无需重投影）。"""
+        # 按选中节点（文件/文件夹）扫描已有结果并加载后再重算
+        target = self._current_path()
+        if target:
+            jsons = results_io.scan_results(target)
+            if jsons:
+                loaded = self._load_jsons(jsons)
+                self._log(f"重算前加载 {loaded} 个结果 (来自 {target})")
+        if not self._results:
+            QMessageBox.information(self, "提示", "没有结果可过滤")
+            return
+        r = int(DEFAULTS["aperture_radius"])
+        R = int(DEFAULTS["aperture_annulus"])
+        smin = float(DEFAULTS["aperture_snr_min"])
+        n = 0
+        for res in self._results:
+            a_path = res.get("a_path")
+            b_path = res.get("b_path")
+            if not a_path or not b_path:
+                continue
+            try:
+                wcs_a = self._fits_cache.get(a_path)[2]
+                b_data = self._fits_cache.get(b_path)[1]
+                wcs_b = self._fits_cache.get(b_path)[2]
+            except Exception as ex:  # noqa: BLE001
+                self._log(f"重算SNR失败(读取文件): {ex}")
+                continue
+            for det in res.get("detections", []):
+                if det.get("status", "keep") not in ("keep", "low_snr"):
+                    continue
+                try:
+                    w = wcs_a.all_pix2world([[float(det["x"]), float(det["y"])]], 0)[0]
+                    bxy = wcs_b.all_world2pix([[float(w[0]), float(w[1])]], 0)[0]
+                    snr = _aperture_snr(
+                        b_data, int(round(float(bxy[0]))), int(round(float(bxy[1]))),
+                        r, R)
+                except Exception:
+                    continue
+                det["snr"] = float(snr)
+                det["status"] = "low_snr" if snr < smin else "keep"
+                n += 1
+        self._log(f"重算SNR过滤: 处理 {n} 个检测（SNR下限 {smin}）")
+        self._rebuild_table()
+        self._refresh_preview()
+        for res in self._results:
+            try:
+                results_io.save_result(res, self._params())
+            except Exception:
+                pass
 
     # --------------------------------------------------- 变星 / MPC 查询
     def _safe_wcs(self, a_path):

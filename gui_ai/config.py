@@ -48,12 +48,14 @@ DEFAULTS = {
     "valid_overlap_filter": True,
     # 处理时跳过已有结果(<B>.gui_ai.json)的文件（直接加载）
     "skip_existing": True,
-    # 局部低信噪/暗边过滤（默认关闭）
-    "snr_filter": False,
+    # 局部低信噪/暗边过滤（孔径信噪比）
+    "snr_filter": True,
     "shading_k": 3.0,   # 暗边判定：黑帽响应 > k*sigma
     "b2_ksize": 21,     # 黑帽结构元尺寸(px)，约大于黑边宽度
     "noise_k": 3.0,     # 瓦片噪声超过 k*全局sigma 视为噪声区
-    "snr_min": 3.0,     # 峰值局部信噪比下限
+    "aperture_radius": 3,     # 孔径半径(px)，约等于PSF半径
+    "aperture_annulus": 6,    # 背景环外半径(px)
+    "aperture_snr_min": 4.0,  # 孔径信噪比下限
     "edge_band": 5,     # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
     # 孤立点(宇宙线/热像素)过滤（默认关闭）
     "isolated_filter": False,
