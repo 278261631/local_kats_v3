@@ -105,9 +105,13 @@ def main() -> int:
                 aperture_radius=int(st.get("aperture_radius", DEFAULTS["aperture_radius"])),
                 aperture_annulus=int(st.get("aperture_annulus", DEFAULTS["aperture_annulus"])),
                 aperture_snr_min=float(st.get("aperture_snr_min", DEFAULTS["aperture_snr_min"])),
+                det_center_search=int(st.get("det_center_search", DEFAULTS["det_center_search"])),
                 edge_band=int(st.get("edge_band", DEFAULTS["edge_band"])),
                 boundary_scale=int(st.get("boundary_scale", DEFAULTS["boundary_scale"])),
                 isolated_filter=bool(st.get("isolated_filter", DEFAULTS["isolated_filter"])),
+                shape_conc_max=float(st.get("shape_conc_max", DEFAULTS["shape_conc_max"])),
+                shape_fwhm_min=float(st.get("shape_fwhm_min", DEFAULTS["shape_fwhm_min"])),
+                shape_fwhm_max=float(st.get("shape_fwhm_max", DEFAULTS["shape_fwhm_max"])),
                 median_filter=bool(st.get("median_filter", DEFAULTS["median_filter"])),
                 median_ksize=int(st.get("median_ksize", DEFAULTS["median_ksize"])),
             )

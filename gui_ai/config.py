@@ -56,6 +56,11 @@ DEFAULTS = {
     "aperture_radius": 3,     # 孔径半径(px)，约等于PSF半径
     "aperture_annulus": 6,    # 背景环外半径(px)
     "aperture_snr_min": 4.0,  # 孔径信噪比下限
+    "det_center_search": 4,   # 在检测点周围重新定位峰值的搜索半径(px)
+    # 形状判据（并入 SNR 过滤：剔除亮孤立尖峰，保留 PSF 星点）
+    "shape_conc_max": 0.5,   # 集中度上限，超过判为尖峰
+    "shape_fwhm_min": 0.8,   # FWHM 下限(px)，低于判为尖峰/过小
+    "shape_fwhm_max": 0.0,   # FWHM 上限(px)，0=不限
     "edge_band": 5,     # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
     # 孤立点(宇宙线/热像素)过滤（默认关闭）
     "isolated_filter": False,
@@ -80,6 +85,10 @@ DEFAULTS = {
     "query_skip_done": True,  # 跳过已查询(变星与MPC均已完成)的检测
     # 输出根目录（导出 CSV/PNG 时使用；留空表示写到 B 同目录）
     "output_root": "",
+    # 网页 ZIP 导出（默认与原版一致: zip_output_directory）
+    "web_zip_root": "E:/kats_sync",
+    "web_zip_tag": "V4",
+    "web_patch_size": 512,
 }
 
 

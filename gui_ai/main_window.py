@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -59,6 +60,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -75,12 +77,13 @@ from config import DEFAULTS, load_settings, save_settings
 from native_crop import FitsCache, load_native_pair_crops
 from pair_infer import PairModel
 from pipeline import collect_fits_files, process_b_file
-from pipeline import _aperture_snr
+from pipeline import _det_metrics
 import query_servers
 import results_io
+import web_export
 
-_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "dx", "dy", "roll", "tile_x", "tile_y"]
-_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "dx", "dy", "roll"]
+_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll", "tile_x", "tile_y"]
+_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll"]
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
@@ -93,6 +96,7 @@ _STATUS_TEXT = {
     "low_snr": "低信噪",
     "edge": "边缘",
     "isolated": "孤立点",
+    "spike": "亮尖峰",
     "dedup": "重复",
 }
 _STATUS_COLOR = {
@@ -102,6 +106,7 @@ _STATUS_COLOR = {
     "low_snr": QColor(120, 120, 120),
     "edge": QColor(110, 110, 110),
     "isolated": QColor(200, 120, 120),
+    "spike": QColor(220, 90, 90),
     "dedup": QColor(160, 160, 160),
 }
 
@@ -374,12 +379,16 @@ class ProcessWorker(QThread):
                         aperture_radius=self.params.get("aperture_radius", 3),
                         aperture_annulus=self.params.get("aperture_annulus", 6),
                         aperture_snr_min=self.params.get("aperture_snr_min", 4.0),
+                        det_center_search=self.params.get("det_center_search", 2),
                         edge_band=self.params.get("edge_band", 5),
                         boundary_scale=self.params.get("boundary_scale", 4),
                         isolated_filter=self.params.get("isolated_filter", True),
                         isolated_win=self.params.get("isolated_win", 7),
                         isolated_k=self.params.get("isolated_k", 3.0),
                         isolated_min_px=self.params.get("isolated_min_px", 2),
+                        shape_conc_max=self.params.get("shape_conc_max", 0.5),
+                        shape_fwhm_min=self.params.get("shape_fwhm_min", 0.8),
+                        shape_fwhm_max=self.params.get("shape_fwhm_max", 0.0),
                         median_filter=self.params.get("median_filter", False),
                         median_ksize=self.params.get("median_ksize", 3),
                         log_cb=self.log.emit,
@@ -541,6 +550,150 @@ class QueryWorker(QThread):
         self.finished_all.emit()
 
 
+class ConcDialog(QDialog):
+    """验证 conc：显示原始 FITS 局部块，手动拉伸，叠加孔径/峰值。"""
+
+    def __init__(self, parent, patch: np.ndarray, cx: int, cy: int,
+                 r: int, R: int, search: int) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("验证 conc（原始数据 + 手动拉伸）")
+        self.patch = np.asarray(patch, dtype=np.float32)
+        self.cx, self.cy = int(cx), int(cy)
+        self.r, self.R, self.search = int(r), int(R), int(search)
+
+        finite = self.patch[np.isfinite(self.patch)]
+        lo = float(np.percentile(finite, 1.0)) if finite.size else 0.0
+        hi = float(np.percentile(finite, 99.5)) if finite.size else 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+
+        self.img = QLabel()
+        self.img.setMinimumSize(560, 560)
+        self.img.setAlignment(Qt.AlignCenter)
+        self.img.setStyleSheet("background:#000;")
+
+        self.black = QDoubleSpinBox()
+        self.black.setRange(-1e12, 1e12)
+        self.black.setDecimals(1)
+        self.black.setValue(lo)
+        self.white = QDoubleSpinBox()
+        self.white.setRange(-1e12, 1e12)
+        self.white.setDecimals(1)
+        self.white.setValue(hi)
+        self.gamma = QDoubleSpinBox()
+        self.gamma.setRange(0.1, 5.0)
+        self.gamma.setSingleStep(0.1)
+        self.gamma.setValue(1.0)
+        self.asinh = QCheckBox("asinh")
+        self.overlay = QCheckBox("显示标注")
+        self.overlay.setChecked(False)
+
+        # 数据范围（用于黑/白滑块）
+        self._vmin = float(np.nanmin(finite)) if finite.size else 0.0
+        self._vmax = float(np.nanmax(finite)) if finite.size else 1.0
+        if self._vmax <= self._vmin:
+            self._vmax = self._vmin + 1.0
+        self.black_slider = QSlider(Qt.Horizontal)
+        self.black_slider.setRange(0, 1000)
+        self.black_slider.setValue(self._to_slider(lo))
+        self.white_slider = QSlider(Qt.Horizontal)
+        self.white_slider.setRange(0, 1000)
+        self.white_slider.setValue(self._to_slider(hi))
+
+        for wd in (self.black, self.white, self.gamma):
+            wd.valueChanged.connect(lambda _=0: self.update_img())
+        self.asinh.stateChanged.connect(lambda _=0: self.update_img())
+        self.overlay.stateChanged.connect(lambda _=0: self.update_img())
+        self.black_slider.valueChanged.connect(
+            lambda s: self.black.setValue(self._from_slider(s)))
+        self.white_slider.valueChanged.connect(
+            lambda s: self.white.setValue(self._from_slider(s)))
+        self.black.valueChanged.connect(
+            lambda v: self.black_slider.setValue(self._to_slider(v)))
+        self.white.valueChanged.connect(
+            lambda v: self.white_slider.setValue(self._to_slider(v)))
+
+        self.info = QLabel("")
+        self.info.setStyleSheet("font-family: Consolas, monospace;")
+
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("黑点"))
+        r1.addWidget(self.black)
+        r1.addWidget(self.black_slider, 1)
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("白点"))
+        r2.addWidget(self.white)
+        r2.addWidget(self.white_slider, 1)
+        r3 = QHBoxLayout()
+        r3.addWidget(QLabel("gamma"))
+        r3.addWidget(self.gamma)
+        r3.addWidget(self.asinh)
+        r3.addWidget(self.overlay)
+        r3.addStretch(1)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.img, 1)
+        lay.addLayout(r1)
+        lay.addLayout(r2)
+        lay.addLayout(r3)
+        lay.addWidget(self.info)
+        self.update_img()
+
+    def _to_slider(self, v: float) -> int:
+        return int(round(1000.0 * (v - self._vmin) / (self._vmax - self._vmin)))
+
+    def _from_slider(self, s: int) -> float:
+        return self._vmin + (self._vmax - self._vmin) * float(s) / 1000.0
+
+    def _peak_xy(self):
+        h, w = self.patch.shape
+        yy, xx = np.mgrid[0:h, 0:w]
+        d2 = (xx - self.cx) ** 2 + (yy - self.cy) ** 2
+        m = (d2 <= float(self.search) ** 2) & np.isfinite(self.patch)
+        if not m.any():
+            return self.cx, self.cy
+        py, px = np.unravel_index(
+            int(np.argmax(np.where(m, self.patch, -np.inf))), self.patch.shape)
+        return int(px), int(py)
+
+    def update_img(self):
+        lo, hi, g = self.black.value(), self.white.value(), self.gamma.value()
+        if hi <= lo:
+            hi = lo + 1.0
+        n = np.clip((np.nan_to_num(self.patch, nan=lo) - lo) / (hi - lo), 0.0, 1.0)
+        if abs(g - 1.0) > 1e-6:
+            n = np.power(n, g)
+        if self.asinh.isChecked():
+            n = np.arcsinh(n * 8.0) / np.arcsinh(8.0)
+        u8 = (np.clip(n, 0.0, 1.0) * 255.0).astype(np.uint8)
+        h, w = u8.shape
+        qimg = QImage(np.ascontiguousarray(u8).data, w, h, w,
+                      QImage.Format_Grayscale8).copy().convertToFormat(QImage.Format_RGB888)
+        gpx, gpy = self._peak_xy()
+        if self.overlay.isChecked():
+            p = QPainter(qimg)
+            p.setPen(QPen(QColor(0, 255, 0), 1))
+            p.drawEllipse(self.cx - self.r, self.cy - self.r, 2 * self.r, 2 * self.r)
+            p.setPen(QPen(QColor(255, 200, 0), 1))
+            p.drawEllipse(self.cx - self.R, self.cy - self.R, 2 * self.R, 2 * self.R)
+            p.setPen(QPen(QColor(0, 200, 255), 1))
+            p.drawLine(self.cx - 6, self.cy, self.cx + 6, self.cy)
+            p.drawLine(self.cx, self.cy - 6, self.cx, self.cy + 6)
+            p.setPen(QPen(QColor(255, 60, 60), 1))
+            p.drawLine(gpx - 7, gpy, gpx + 7, gpy)
+            p.drawLine(gpx, gpy - 7, gpx, gpy + 7)
+            p.end()
+        self.img.setPixmap(QPixmap.fromImage(qimg).scaled(
+            self.img.width(), self.img.height(),
+            Qt.KeepAspectRatio, Qt.FastTransformation))
+        snr, conc, sig = _det_metrics(
+            self.patch, self.cx, self.cy, self.r, self.R, self.search)
+        pv = float(self.patch[gpy, gpx]) if 0 <= gpy < h and 0 <= gpx < w else 0.0
+        self.info.setText(
+            f"conc={conc:.3f}  SNR={snr:.2f}  FWHM={2.355*sig:.2f}px  "
+            f"峰值={pv:.0f}  黑/白={lo:.0f}/{hi:.0f}  中心=({self.cx},{self.cy}) 峰值点=({gpx},{gpy})")
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -691,7 +844,7 @@ class MainWindow(QMainWindow):
         self.valid_overlap_check = QCheckBox("按A∩B有效区过滤检测")
         self.valid_overlap_check.setChecked(DEFAULTS["valid_overlap_filter"])
         form.addRow("", self.valid_overlap_check)
-        self.snr_check = QCheckBox("按局部SNR过滤检测(含暗边)")
+        self.snr_check = QCheckBox("按局部SNR/形状过滤(含暗边、亮尖峰)")
         self.snr_check.setChecked(DEFAULTS["snr_filter"])
         form.addRow("", self.snr_check)
         self.isolated_check = QCheckBox("排除孤立点(宇宙线/热像素)")
@@ -719,6 +872,10 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._stop)
         self.export_btn = QPushButton("导出检测 CSV")
         self.export_btn.clicked.connect(self._export_csv)
+        self.export_web_btn = QPushButton("导出网页ZIP(V4)")
+        self.export_web_btn.clicked.connect(self._export_web_zip)
+        self.conc_btn = QPushButton("验证conc")
+        self.conc_btn.clicked.connect(self._open_conc_viewer)
         self.load_btn = QPushButton("加载已有结果")
         self.load_btn.clicked.connect(self._load_results_from_node)
         self.query_btn = QPushButton("查询变星/MPC")
@@ -726,7 +883,7 @@ class MainWindow(QMainWindow):
         self.query_pause_btn = QPushButton("暂停查询")
         self.query_pause_btn.setEnabled(False)
         self.query_pause_btn.clicked.connect(self._toggle_query_pause)
-        self.refilter_btn = QPushButton("重算SNR过滤")
+        self.refilter_btn = QPushButton("重算SNR/形状过滤")
         self.refilter_btn.clicked.connect(self._refilter_snr)
 
         row1 = QHBoxLayout()
@@ -743,6 +900,8 @@ class MainWindow(QMainWindow):
         lay.addLayout(row3)
         row4 = QHBoxLayout()
         row4.addWidget(self.export_btn)
+        row4.addWidget(self.export_web_btn)
+        row4.addWidget(self.conc_btn)
         row4.addStretch(1)
         lay.addLayout(row4)
 
@@ -858,6 +1017,7 @@ class MainWindow(QMainWindow):
             + _swatch(_STATUS_COLOR["low_snr"]) + " 低信噪　"
             + _swatch(_STATUS_COLOR["edge"]) + " 边缘　"
             + _swatch(_STATUS_COLOR["isolated"]) + " 孤立点　"
+            + _swatch(_STATUS_COLOR["spike"]) + " 亮尖峰　"
             + _swatch(_STATUS_COLOR["dedup"]) + " 重复(dedup)　"
             + _swatch(_SEL_COLOR) + " 当前选中"
             + "　　|　　<b>叠加：</b>"
@@ -1089,11 +1249,15 @@ class MainWindow(QMainWindow):
             "aperture_radius": int(DEFAULTS["aperture_radius"]),
             "aperture_annulus": int(DEFAULTS["aperture_annulus"]),
             "aperture_snr_min": float(DEFAULTS["aperture_snr_min"]),
+            "det_center_search": int(DEFAULTS["det_center_search"]),
             "edge_band": int(self.edge_spin.value()),
             "isolated_filter": bool(self.isolated_check.isChecked()),
             "isolated_win": int(DEFAULTS["isolated_win"]),
             "isolated_k": float(DEFAULTS["isolated_k"]),
             "isolated_min_px": int(DEFAULTS["isolated_min_px"]),
+            "shape_conc_max": float(DEFAULTS["shape_conc_max"]),
+            "shape_fwhm_min": float(DEFAULTS["shape_fwhm_min"]),
+            "shape_fwhm_max": float(DEFAULTS["shape_fwhm_max"]),
             "median_filter": bool(self.median_check.isChecked()),
             "median_ksize": int(DEFAULTS["median_ksize"]),
             "boundary_scale": int(DEFAULTS["boundary_scale"]),
@@ -1161,6 +1325,7 @@ class MainWindow(QMainWindow):
             str(d.get("mpc_count", -1)),
             f"{d['x']:.1f}", f"{d['y']:.1f}", f"{d['score']:.3f}",
             "-" if snr is None else f"{snr:.1f}",
+            "-" if d.get("conc") is None else f"{d.get('conc'):.2f}",
             f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
             str(d["tile_x"]), str(d["tile_y"]),
         ]
@@ -1247,6 +1412,7 @@ class MainWindow(QMainWindow):
                     f"{det.get('x', 0):.1f}", f"{det.get('y', 0):.1f}",
                     f"{det.get('score', 0):.3f}",
                     "-" if det.get("snr") is None else f"{det.get('snr'):.1f}",
+                    "-" if det.get("conc") is None else f"{det.get('conc'):.2f}",
                     f"{det.get('dx', 0):+.2f}", f"{det.get('dy', 0):+.2f}",
                     f"{det.get('roll', 0):+.2f}",
                 ])
@@ -1288,6 +1454,11 @@ class MainWindow(QMainWindow):
         r = int(DEFAULTS["aperture_radius"])
         R = int(DEFAULTS["aperture_annulus"])
         smin = float(DEFAULTS["aperture_snr_min"])
+        conc_max = float(DEFAULTS["shape_conc_max"])
+        fmin = float(DEFAULTS["shape_fwhm_min"])
+        fmax = float(DEFAULTS["shape_fwhm_max"])
+        search = int(DEFAULTS["det_center_search"])
+        use_snr = self.snr_check.isChecked()
         n = 0
         for res in self._results:
             a_path = res.get("a_path")
@@ -1302,20 +1473,31 @@ class MainWindow(QMainWindow):
                 self._log(f"重算SNR失败(读取文件): {ex}")
                 continue
             for det in res.get("detections", []):
-                if det.get("status", "keep") not in ("keep", "low_snr"):
+                if det.get("status", "keep") not in ("keep", "low_snr", "spike"):
                     continue
                 try:
                     w = wcs_a.all_pix2world([[float(det["x"]), float(det["y"])]], 0)[0]
                     bxy = wcs_b.all_world2pix([[float(w[0]), float(w[1])]], 0)[0]
-                    snr = _aperture_snr(
-                        b_data, int(round(float(bxy[0]))), int(round(float(bxy[1]))),
-                        r, R)
+                    bxi = int(round(float(bxy[0])))
+                    byi = int(round(float(bxy[1])))
+                    snr, conc, sig = _det_metrics(b_data, bxi, byi, r, R, search)
                 except Exception:
                     continue
                 det["snr"] = float(snr)
-                det["status"] = "low_snr" if snr < smin else "keep"
+                det["conc"] = float(conc)
+                det["fwhm"] = float(2.355 * sig)
+                if use_snr:
+                    fwhm = det["fwhm"]
+                    if snr < smin:
+                        det["status"] = "low_snr"
+                    elif (conc > conc_max
+                          or (fmin > 0 and fwhm < fmin)
+                          or (fmax > 0 and fwhm > fmax)):
+                        det["status"] = "spike"
+                    else:
+                        det["status"] = "keep"
                 n += 1
-        self._log(f"重算SNR过滤: 处理 {n} 个检测（SNR下限 {smin}）")
+        self._log(f"重算SNR/形状过滤: 处理 {n} 个检测（SNR下限 {smin}, conc上限 {conc_max}）")
         self._rebuild_table()
         self._refresh_preview()
         for res in self._results:
@@ -1825,6 +2007,77 @@ class MainWindow(QMainWindow):
                     e["tile_x"], e["tile_y"],
                 ])
         self._log(f"已导出 CSV: {path}")
+
+    def _export_web_zip(self) -> None:
+        """导出网页 ZIP（参考原版；输出根目录同原版，文件名带 V4）。"""
+        target = self._current_path()
+        if target:
+            jsons = results_io.scan_results(target)
+            if jsons:
+                loaded = self._load_jsons(jsons)
+                self._log(f"导出前加载 {loaded} 个结果 (来自 {target})")
+        if not self._results:
+            QMessageBox.information(self, "提示", "没有可导出的结果")
+            return
+        keep_only = not self.show_filtered_check.isChecked()
+        try:
+            n, zip_path, out_dir = web_export.export_results_web(
+                self._results,
+                out_root=DEFAULTS["web_zip_root"],
+                patch_size=int(DEFAULTS["web_patch_size"]),
+                keep_only=keep_only,
+                tag=str(DEFAULTS["web_zip_tag"]),
+                log=self._log,
+            )
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        self._log(f"已导出网页ZIP: {zip_path} ({n} 个目标)")
+        QMessageBox.information(
+            self, "完成", f"已导出 {n} 个目标:\n{zip_path}")
+
+    def _open_conc_viewer(self) -> None:
+        """打开 conc 验证窗口：读取选中检测处的原始 B 局部块。"""
+        entry = self._selected_entry()
+        if entry is None:
+            QMessageBox.information(self, "提示", "请先在检测结果里选择一条")
+            return
+        res = entry["_result"]
+        det = entry["_det"]
+        a_path = res.get("a_path")
+        b_path = res.get("b_path")
+        if not a_path or not b_path:
+            QMessageBox.information(self, "提示", "该结果缺少 A/B 文件路径")
+            return
+        try:
+            wcs_a = self._fits_cache.get(a_path)[2]
+            b_data = self._fits_cache.get(b_path)[1]
+            wcs_b = self._fits_cache.get(b_path)[2]
+            wpt = wcs_a.all_pix2world([[float(det["x"]), float(det["y"])]], 0)[0]
+            bxy = wcs_b.all_world2pix([[float(wpt[0]), float(wpt[1])]], 0)[0]
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.critical(self, "错误", f"读取/WCS 失败: {ex}")
+            return
+        bx = int(round(float(bxy[0])))
+        by = int(round(float(bxy[1])))
+        size = 64
+        half = size // 2
+        h, w = b_data.shape
+        x0, y0 = bx - half, by - half
+        x1, y1 = x0 + size, y0 + size
+        xs, ys, xe, ye = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+        sub = np.asarray(b_data[ys:ye, xs:xe], dtype=np.float32)
+        if sub.size == 0:
+            QMessageBox.information(self, "提示", "该位置超出 B 范围")
+            return
+        pad = ((max(0, -y0), max(0, y1 - h)), (max(0, -x0), max(0, x1 - w)))
+        if any(pad[0]) or any(pad[1]):
+            sub = np.pad(sub, pad, mode="edge")
+        dlg = ConcDialog(
+            self, sub, bx - x0, by - y0,
+            int(DEFAULTS["aperture_radius"]), int(DEFAULTS["aperture_annulus"]),
+            int(DEFAULTS["det_center_search"]))
+        dlg.exec()
 
 
 def main() -> None:

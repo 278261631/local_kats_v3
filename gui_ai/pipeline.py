@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """处理流水线：定位 A 模板 -> 重投影 B -> 瓦片推理 -> 汇总检测。
 
 单文件：直接处理该 B。
@@ -144,31 +144,86 @@ def _blob_size(img: np.ndarray, xi: int, yi: int, win: int, thresh: float) -> in
     return int((lab == lab[cy, cx]).sum())
 
 
-def _aperture_snr(img: np.ndarray, xi: int, yi: int, r: int, R: int) -> float:
-    """孔径信噪比 = 孔径内(值-局部背景)之和 / (局部噪声 * sqrt(孔径像素数))。"""
+def _det_metrics(img: np.ndarray, xi: int, yi: int, r: int, R: int,
+                 search: int = 4):
+    """先在小窗口内重新定位局部峰值，再返回 (SNR, conc, sigma)。
+
+    - 重新定位可消除检测点 (x,y) 的 1~2px 偏差，避免 conc 被误压低；
+    - conc = 峰值净通量 / 孔径净通量；sigma 由孔径内二阶矩得到(FWHM=2.355σ)。
+    """
     h, w = img.shape
-    half = max(1, int(R))
+    half = max(1, int(R) + int(search))
     x0 = max(0, xi - half)
     y0 = max(0, yi - half)
     x1 = min(w, xi + half + 1)
     y1 = min(h, yi + half + 1)
     sub = np.asarray(img[y0:y1, x0:x1], dtype=np.float32)
+    if sub.size == 0:
+        return 0.0, 0.0, 0.0
     yy, xx = np.mgrid[y0:y1, x0:x1]
     d2 = (xx - xi) ** 2 + (yy - yi) ** 2
-    ap = d2 <= float(r) ** 2
     ann = (d2 > float(r) ** 2) & (d2 <= float(R) ** 2)
-    av = sub[ap]
-    av = av[np.isfinite(av)]
     bv = sub[ann]
     bv = bv[np.isfinite(bv)]
-    if av.size == 0 or bv.size < 5:
-        return 0.0
+    if bv.size < 5:
+        return 0.0, 0.0, 0.0
     bg = float(np.median(bv))
-    sig = 1.4826 * float(np.median(np.abs(bv - bg)))
-    if sig <= 0:
-        return 0.0
-    flux = float(np.sum(av - bg))
-    return flux / (sig * (av.size ** 0.5))
+
+    # 在 search 半径内重新定位峰值
+    m = (d2 <= float(search) ** 2) & np.isfinite(sub)
+    if not m.any():
+        return 0.0, 0.0, 0.0
+    py, px = np.unravel_index(int(np.argmax(np.where(m, sub, -np.inf))), sub.shape)
+    gpx = float(xx[py, px])
+    gpy = float(yy[py, px])
+    peak = float(sub[py, px]) - bg
+
+    d2p = (xx - gpx) ** 2 + (yy - gpy) ** 2
+    app = d2p <= float(r) ** 2
+    ap = sub[app]
+    ap = ap[np.isfinite(ap)]
+    if ap.size == 0:
+        return 0.0, 0.0, 0.0
+    flux = float(np.sum(ap - bg))
+    conc = peak / flux if flux > 1e-6 else 0.0
+
+    wgt = np.clip(sub[app] - bg, 0.0, None)
+    if wgt.sum() > 0:
+        axx = xx[app].astype(np.float64)
+        ayy = yy[app].astype(np.float64)
+        cxm = float((wgt * axx).sum() / wgt.sum())
+        cym = float((wgt * ayy).sum() / wgt.sum())
+        var = float((wgt * ((axx - cxm) ** 2 + (ayy - cym) ** 2)).sum() / wgt.sum())
+        sigma = var ** 0.5 if var > 0 else 0.0
+    else:
+        sigma = 0.0
+
+    # SNR：以峰值点为中心的外环估噪声
+    ann2 = (d2p > float(r) ** 2) & (d2p <= float(R) ** 2)
+    bv2 = sub[ann2]
+    bv2 = bv2[np.isfinite(bv2)]
+    if bv2.size >= 5:
+        bg2 = float(np.median(bv2))
+        sig2 = 1.4826 * float(np.median(np.abs(bv2 - bg2)))
+        if sig2 > 0:
+            flux2 = float(np.sum(ap - bg2))
+            snr = flux2 / (sig2 * (ap.size ** 0.5))
+        else:
+            snr = 0.0
+    else:
+        snr = 0.0
+    return float(snr), float(conc), float(sigma)
+
+
+def _aperture_snr(img: np.ndarray, xi: int, yi: int, r: int, R: int,
+                  search: int = 4) -> float:
+    return _det_metrics(img, xi, yi, r, R, search)[0]
+
+
+def _shape_metrics(img: np.ndarray, xi: int, yi: int, r: int, R: int,
+                   search: int = 4):
+    _, conc, sig = _det_metrics(img, xi, yi, r, R, search)
+    return conc, sig
 
 
 def _block_mean_nan(arr: np.ndarray, factor: int) -> np.ndarray:
@@ -220,6 +275,10 @@ def process_b_file(
     aperture_radius: int = 3,
     aperture_annulus: int = 6,
     aperture_snr_min: float = 4.0,
+    det_center_search: int = 4,
+    shape_conc_max: float = 0.5,
+    shape_fwhm_min: float = 0.8,
+    shape_fwhm_max: float = 0.0,
     edge_band: int = 5,
     boundary_scale: int = 4,
     isolated_filter: bool = True,
@@ -447,8 +506,9 @@ def process_b_file(
                 xi = min(w - 1, max(0, int(round(fx))))
                 yi = min(h - 1, max(0, int(round(fy))))
                 status = pk.get("status", "keep")
-                asnr = _aperture_snr(
-                    b_filled, xi, yi, aperture_radius, aperture_annulus)
+                asnr, conc, sig = _det_metrics(
+                    b_filled, xi, yi, aperture_radius, aperture_annulus,
+                    det_center_search)
                 if status == "keep":
                     if not valid[yi, xi]:
                         status = "b_uncovered"
@@ -460,9 +520,14 @@ def process_b_file(
                           or (band_b2 is not None and band_b2[yi, xi])):
                         status = "edge"
                     elif snr_filter:
+                        fwhm = 2.355 * sig
                         if ((shaded is not None and shaded[yi, xi]) or tile_noisy
                                 or asnr < aperture_snr_min):
                             status = "low_snr"
+                        elif (conc > shape_conc_max
+                              or (shape_fwhm_min > 0 and fwhm < shape_fwhm_min)
+                              or (shape_fwhm_max > 0 and fwhm > shape_fwhm_max)):
+                            status = "spike"
                     if status == "keep" and isolated_filter:
                         blobs = _blob_size(
                             b_filled, xi, yi, isolated_win,
@@ -477,6 +542,8 @@ def process_b_file(
                         "cls": int(pk["cls"]),
                         "status": status,
                         "snr": float(asnr),
+                        "conc": float(conc),
+                        "fwhm": float(2.355 * sig),
                         "dx": float(r["dx"]),
                         "dy": float(r["dy"]),
                         "roll": float(r["roll"]),
