@@ -119,6 +119,8 @@ def _det_status_color(status: str) -> QColor:
 _SAT_RGB = (255, 170, 0)
 # 边缘过滤带颜色
 _EDGE_BAND_RGB = (255, 60, 160)
+# 最终计算边框颜色
+_FINAL_RGB = (0, 255, 120)
 # B 覆盖区（WCS 对齐后）边框颜色
 _COVER_EDGE_RGB = (255, 230, 0)
 # A 模板有效区（星空/空白）边界
@@ -847,6 +849,12 @@ class MainWindow(QMainWindow):
         self.snr_check = QCheckBox("按局部SNR/形状过滤(含暗边、亮尖峰)")
         self.snr_check.setChecked(DEFAULTS["snr_filter"])
         form.addRow("", self.snr_check)
+        self.snr_min_spin = QDoubleSpinBox()
+        self.snr_min_spin.setRange(0.0, 100000.0)
+        self.snr_min_spin.setDecimals(1)
+        self.snr_min_spin.setSingleStep(1.0)
+        self.snr_min_spin.setValue(float(DEFAULTS["aperture_snr_min"]))
+        form.addRow("SNR下限", self.snr_min_spin)
         self.isolated_check = QCheckBox("排除孤立点(宇宙线/热像素)")
         self.isolated_check.setChecked(DEFAULTS["isolated_filter"])
         form.addRow("", self.isolated_check)
@@ -988,6 +996,9 @@ class MainWindow(QMainWindow):
         self.edge_check = QCheckBox("显示边缘过滤带")
         self.edge_check.setChecked(True)
         self.edge_check.stateChanged.connect(lambda _=0: self._refresh_preview())
+        self.final_check = QCheckBox("显示最终边框")
+        self.final_check.setChecked(True)
+        self.final_check.stateChanged.connect(lambda _=0: self._refresh_preview())
 
         crow1 = QHBoxLayout()
         crow1.addWidget(self.show_filtered_check)
@@ -1001,6 +1012,7 @@ class MainWindow(QMainWindow):
         crow2.addWidget(self.validpoly_b_check)
         crow2.addWidget(self.validpoly_b2_check)
         crow2.addWidget(self.edge_check)
+        crow2.addWidget(self.final_check)
         crow2.addStretch(1)
         pw.addLayout(crow2)
 
@@ -1023,7 +1035,8 @@ class MainWindow(QMainWindow):
             + "　　|　　<b>叠加：</b>"
             + _swatch(_SAT_RGB) + " 卫星掩码　"
             + _swatch(_COVER_EDGE_RGB) + " B覆盖边框　"
-            + _swatch(_EDGE_BAND_RGB) + " 边缘过滤带"
+            + _swatch(_EDGE_BAND_RGB) + " 边缘过滤带　"
+            + _swatch(_FINAL_RGB) + " 最终边框"
             + "　　|　　<b>有效区边界/查询：</b>"
             + _swatch(_A_VALID_COLOR) + " A有效区　"
             + _swatch(_B_VALID_COLOR) + " B有效区　"
@@ -1248,7 +1261,7 @@ class MainWindow(QMainWindow):
             "noise_k": float(DEFAULTS["noise_k"]),
             "aperture_radius": int(DEFAULTS["aperture_radius"]),
             "aperture_annulus": int(DEFAULTS["aperture_annulus"]),
-            "aperture_snr_min": float(DEFAULTS["aperture_snr_min"]),
+            "aperture_snr_min": float(self.snr_min_spin.value()),
             "det_center_search": int(DEFAULTS["det_center_search"]),
             "edge_band": int(self.edge_spin.value()),
             "isolated_filter": bool(self.isolated_check.isChecked()),
@@ -1453,7 +1466,7 @@ class MainWindow(QMainWindow):
             return
         r = int(DEFAULTS["aperture_radius"])
         R = int(DEFAULTS["aperture_annulus"])
-        smin = float(DEFAULTS["aperture_snr_min"])
+        smin = float(self.snr_min_spin.value())
         conc_max = float(DEFAULTS["shape_conc_max"])
         fmin = float(DEFAULTS["shape_fwhm_min"])
         fmax = float(DEFAULTS["shape_fwhm_max"])
@@ -1744,6 +1757,7 @@ class MainWindow(QMainWindow):
         show_validpoly_b = self.validpoly_b_check.isChecked()
         show_validpoly_b2 = self.validpoly_b2_check.isChecked()
         show_edge = self.edge_check.isChecked()
+        show_final = self.final_check.isChecked()
         show_all = self.show_filtered_check.isChecked()
 
         entry = self._selected_entry()
@@ -1819,6 +1833,10 @@ class MainWindow(QMainWindow):
             e = align2d(res["edge_prev"])
             a_rgb = overlay_ob(a_rgb, e[:, :, None], {0: _EDGE_BAND_RGB})
             b_rgb = overlay_ob(b_rgb, e[:, :, None], {0: _EDGE_BAND_RGB})
+        if show_final and res.get("final_prev") is not None:
+            fe = _mask_edge(align2d(res["final_prev"]) > 0)
+            a_rgb = paint_mask(a_rgb, fe, _FINAL_RGB)
+            b_rgb = paint_mask(b_rgb, fe, _FINAL_RGB)
         if show_cov and cov is not None:
             edge = _mask_edge(align2d(cov) > 0)
             a_rgb = paint_mask(a_rgb, edge, _COVER_EDGE_RGB)
@@ -2024,7 +2042,7 @@ class MainWindow(QMainWindow):
             n, zip_path, out_dir = web_export.export_results_web(
                 self._results,
                 out_root=DEFAULTS["web_zip_root"],
-                patch_size=int(DEFAULTS["web_patch_size"]),
+                patch_size=int(self.crop_spin.value()),
                 keep_only=keep_only,
                 tag=str(DEFAULTS["web_zip_tag"]),
                 log=self._log,

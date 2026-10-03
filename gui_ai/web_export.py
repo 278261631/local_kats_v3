@@ -23,6 +23,7 @@ from native_crop import FitsCache, load_native_pair_crops
 
 #: 拉伸强度参数 (p_low, p_high, gamma, asinh_scale)
 _LEVELS = {
+    "linear": (1.0, 99.5, 1.0, 0.0),   # 与预览裁切一致
     "low": (5.0, 99.5, 1.0, 3.0),
     "medium": (2.0, 99.8, 0.9, 5.0),
     "high": (0.5, 99.95, 0.75, 8.0),
@@ -203,7 +204,7 @@ def export_results_web(
     results: List[Dict],
     out_root: str,
     patch_size: int = 256,
-    hist_level: str = "high",
+    hist_level: str = "linear",
     keep_only: bool = True,
     tag: str = "V4",
     snr_split: float = 10.0,

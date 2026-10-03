@@ -88,14 +88,20 @@ def filled_region(mask: np.ndarray, clean: int = 5, largest: bool = True) -> np.
 
 
 def inner_band(mask: np.ndarray, width: int) -> np.ndarray:
-    """掩码的"内边带"（距边界 width 像素内的区域，bool）。"""
+    """掩码的"内边带"（距边界 width 像素内的区域，bool）。
+
+    腐蚀前四周补 0，使**图像边框**也算作边界——否则有效区一直延伸到
+    画面边（左/下常见）时不会有内边界，导致那里的命中漏过滤。
+    """
     m = np.asarray(mask).astype(np.uint8)
     w = int(width)
     if w <= 0 or m.size == 0:
         return np.zeros(m.shape, dtype=bool)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * w + 1, 2 * w + 1))
-    er = cv2.erode(m, k)
-    return (m.astype(bool) & ~er.astype(bool))
+    mp = cv2.copyMakeBorder(m, w, w, w, w, cv2.BORDER_CONSTANT, value=0)
+    er = cv2.erode(mp, k)
+    band = (mp.astype(bool) & ~er.astype(bool))
+    return band[w:-w, w:-w]
 
 
 def background_stats(data: np.ndarray, valid: np.ndarray):

@@ -313,6 +313,7 @@ def process_b_file(
         "sat_prev": None,
         "cov_prev": None,
         "edge_prev": None,
+        "final_prev": None,
         "a_valid_polys": None,
         "b_valid_polys": None,
         "b2_valid_polys": None,
@@ -426,6 +427,12 @@ def process_b_file(
             if band_any is not None:
                 result["edge_prev"] = _downscale_mask_any(
                     band_any, preview_max_side)
+            # 最终计算边框：A∩B 有效区 再去掉内边带后的核心区
+            usable = filled_region(valid)
+            if valid_overlap_filter and a_valid is not None:
+                usable = usable & filled_region(a_valid)
+            core = usable & ~inner_band(usable, int(edge_band))
+            result["final_prev"] = _downscale_mask(core, preview_max_side)
         except Exception as ex:  # noqa: BLE001
             log(f"边带计算失败: {ex}")
 

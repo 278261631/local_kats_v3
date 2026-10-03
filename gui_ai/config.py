@@ -55,13 +55,13 @@ DEFAULTS = {
     "noise_k": 3.0,     # 瓦片噪声超过 k*全局sigma 视为噪声区
     "aperture_radius": 3,     # 孔径半径(px)，约等于PSF半径
     "aperture_annulus": 6,    # 背景环外半径(px)
-    "aperture_snr_min": 4.0,  # 孔径信噪比下限
+    "aperture_snr_min": 9.0,  # 孔径信噪比下限
     "det_center_search": 5,   # 在检测点周围重新定位峰值的搜索半径(px)
     # 形状判据（并入 SNR 过滤：剔除亮孤立尖峰，保留 PSF 星点）
     "shape_conc_max": 0.5,   # 集中度上限，超过判为尖峰
     "shape_fwhm_min": 0.8,   # FWHM 下限(px)，低于判为尖峰/过小
     "shape_fwhm_max": 0.0,   # FWHM 上限(px)，0=不限
-    "edge_band": 5,     # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
+    "edge_band": 15,    # A/B/B二级 有效区边界内边带宽度(px)，命中落在带内也过滤
     # 孤立点(宇宙线/热像素)过滤（默认关闭）
     "isolated_filter": False,
     "isolated_win": 7,      # 检测点周围窗口(px)
