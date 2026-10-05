@@ -553,99 +553,153 @@ class QueryWorker(QThread):
 
 
 class ConcDialog(QDialog):
-    """验证 conc：显示原始 FITS 局部块，手动拉伸，叠加孔径/峰值。"""
+    """验证 conc：A|B 原始局部块，分别手动拉伸；B 可 180° 翻转。"""
 
-    def __init__(self, parent, patch: np.ndarray, cx: int, cy: int,
+    def __init__(self, parent, patches: Dict, cx: int, cy: int,
                  r: int, R: int, search: int) -> None:
         super().__init__(parent)
-        self.setWindowTitle("验证 conc（原始数据 + 手动拉伸）")
-        self.patch = np.asarray(patch, dtype=np.float32)
+        self.setWindowTitle("验证 conc（A|B 原始数据 + 分别拉伸）")
+        self.patches = {k: np.asarray(v, dtype=np.float32) for k, v in patches.items()}
         self.cx, self.cy = int(cx), int(cy)
         self.r, self.R, self.search = int(r), int(R), int(search)
+        self.patch = self.patches.get("B", next(iter(self.patches.values())))
+        self._loading = False
+        self.st: Dict[str, Dict] = {}
+        for k, p in self.patches.items():
+            fin = p[np.isfinite(p)]
+            vmin = float(np.nanmin(fin)) if fin.size else 0.0
+            vmax = float(np.nanmax(fin)) if fin.size else 1.0
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            lo = float(np.percentile(fin, 1.0)) if fin.size else vmin
+            hi = float(np.percentile(fin, 99.5)) if fin.size else vmax
+            if hi <= lo:
+                hi = lo + 1.0
+            self.st[k] = {"lo": lo, "hi": hi, "gamma": 1.0, "asinh": False,
+                          "vmin": vmin, "vmax": vmax}
 
-        finite = self.patch[np.isfinite(self.patch)]
-        lo = float(np.percentile(finite, 1.0)) if finite.size else 0.0
-        hi = float(np.percentile(finite, 99.5)) if finite.size else 1.0
-        if hi <= lo:
-            hi = lo + 1.0
-
-        self.img = QLabel()
-        self.img.setMinimumSize(560, 560)
-        self.img.setAlignment(Qt.AlignCenter)
-        self.img.setStyleSheet("background:#000;")
-
-        self.black = QDoubleSpinBox()
-        self.black.setRange(-1e12, 1e12)
-        self.black.setDecimals(1)
-        self.black.setValue(lo)
-        self.white = QDoubleSpinBox()
-        self.white.setRange(-1e12, 1e12)
-        self.white.setDecimals(1)
-        self.white.setValue(hi)
-        self.gamma = QDoubleSpinBox()
-        self.gamma.setRange(0.1, 5.0)
-        self.gamma.setSingleStep(0.1)
-        self.gamma.setValue(1.0)
-        self.asinh = QCheckBox("asinh")
+        self.flip_b = QCheckBox("B翻转(180°)")
+        self.flip_b.setChecked(True)
+        self.flip_b.stateChanged.connect(lambda _=0: self.update_img())
         self.overlay = QCheckBox("显示标注")
         self.overlay.setChecked(False)
-
-        # 数据范围（用于黑/白滑块）
-        self._vmin = float(np.nanmin(finite)) if finite.size else 0.0
-        self._vmax = float(np.nanmax(finite)) if finite.size else 1.0
-        if self._vmax <= self._vmin:
-            self._vmax = self._vmin + 1.0
-        self.black_slider = QSlider(Qt.Horizontal)
-        self.black_slider.setRange(0, 1000)
-        self.black_slider.setValue(self._to_slider(lo))
-        self.white_slider = QSlider(Qt.Horizontal)
-        self.white_slider.setRange(0, 1000)
-        self.white_slider.setValue(self._to_slider(hi))
-
-        for wd in (self.black, self.white, self.gamma):
-            wd.valueChanged.connect(lambda _=0: self.update_img())
-        self.asinh.stateChanged.connect(lambda _=0: self.update_img())
         self.overlay.stateChanged.connect(lambda _=0: self.update_img())
-        self.black_slider.valueChanged.connect(
-            lambda s: self.black.setValue(self._from_slider(s)))
-        self.white_slider.valueChanged.connect(
-            lambda s: self.white.setValue(self._from_slider(s)))
-        self.black.valueChanged.connect(
-            lambda v: self.black_slider.setValue(self._to_slider(v)))
-        self.white.valueChanged.connect(
-            lambda v: self.white_slider.setValue(self._to_slider(v)))
+        top = QHBoxLayout()
+        top.addWidget(self.flip_b)
+        top.addWidget(self.overlay)
+        top.addStretch(1)
+
+        row = QHBoxLayout()
+        for k, title in (("A", "A (参考)"), ("B", "B (检测)")):
+            if k in self.patches:
+                row.addWidget(self._panel(title, k), 1)
 
         self.info = QLabel("")
         self.info.setStyleSheet("font-family: Consolas, monospace;")
-
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("黑点"))
-        r1.addWidget(self.black)
-        r1.addWidget(self.black_slider, 1)
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("白点"))
-        r2.addWidget(self.white)
-        r2.addWidget(self.white_slider, 1)
-        r3 = QHBoxLayout()
-        r3.addWidget(QLabel("gamma"))
-        r3.addWidget(self.gamma)
-        r3.addWidget(self.asinh)
-        r3.addWidget(self.overlay)
-        r3.addStretch(1)
-
         lay = QVBoxLayout(self)
-        lay.addWidget(self.img, 1)
-        lay.addLayout(r1)
-        lay.addLayout(r2)
-        lay.addLayout(r3)
+        lay.addLayout(top)
+        lay.addLayout(row, 1)
         lay.addWidget(self.info)
         self.update_img()
 
-    def _to_slider(self, v: float) -> int:
-        return int(round(1000.0 * (v - self._vmin) / (self._vmax - self._vmin)))
+    def _panel(self, title: str, key: str) -> QWidget:
+        box = QGroupBox(title)
+        v = QVBoxLayout(box)
+        img = QLabel()
+        img.setMinimumSize(360, 360)
+        img.setAlignment(Qt.AlignCenter)
+        img.setStyleSheet("background:#000;")
+        setattr(self, "img" + key, img)
+        s = self.st[key]
+        black = QDoubleSpinBox(); black.setRange(-1e12, 1e12); black.setDecimals(1)
+        black.setValue(s["lo"])
+        white = QDoubleSpinBox(); white.setRange(-1e12, 1e12); white.setDecimals(1)
+        white.setValue(s["hi"])
+        gamma = QDoubleSpinBox(); gamma.setRange(0.1, 5.0); gamma.setSingleStep(0.1)
+        gamma.setValue(1.0)
+        asinh = QCheckBox("asinh")
+        bsl = QSlider(Qt.Horizontal); bsl.setRange(0, 1000)
+        bsl.setValue(self._to_slider(key, s["lo"]))
+        wsl = QSlider(Qt.Horizontal); wsl.setRange(0, 1000)
+        wsl.setValue(self._to_slider(key, s["hi"]))
 
-    def _from_slider(self, s: int) -> float:
-        return self._vmin + (self._vmax - self._vmin) * float(s) / 1000.0
+        def on_black(val):
+            if self._loading:
+                return
+            s["lo"] = float(val)
+            self._loading = True
+            bsl.setValue(self._to_slider(key, float(val)))
+            self._loading = False
+            self.update_img()
+
+        def on_white(val):
+            if self._loading:
+                return
+            s["hi"] = float(val)
+            self._loading = True
+            wsl.setValue(self._to_slider(key, float(val)))
+            self._loading = False
+            self.update_img()
+
+        def on_gamma(val):
+            if self._loading:
+                return
+            s["gamma"] = float(val)
+            self.update_img()
+
+        def on_asinh(_=0):
+            if self._loading:
+                return
+            s["asinh"] = bool(asinh.isChecked())
+            self.update_img()
+
+        black.valueChanged.connect(on_black)
+        white.valueChanged.connect(on_white)
+        gamma.valueChanged.connect(on_gamma)
+        asinh.stateChanged.connect(on_asinh)
+        bsl.valueChanged.connect(
+            lambda val: (not self._loading) and black.setValue(self._from_slider(key, val)))
+        wsl.valueChanged.connect(
+            lambda val: (not self._loading) and white.setValue(self._from_slider(key, val)))
+
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("黑点")); r1.addWidget(black); r1.addWidget(bsl, 1)
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("白点")); r2.addWidget(white); r2.addWidget(wsl, 1)
+        r3 = QHBoxLayout()
+        r3.addWidget(QLabel("gamma")); r3.addWidget(gamma); r3.addWidget(asinh)
+        r3.addStretch(1)
+        v.addWidget(img, 1)
+        v.addLayout(r1)
+        v.addLayout(r2)
+        v.addLayout(r3)
+        return box
+
+    def _to_slider(self, key: str, v: float) -> int:
+        s = self.st[key]
+        return int(round(1000.0 * (v - s["vmin"]) / (s["vmax"] - s["vmin"])))
+
+    def _from_slider(self, key: str, sl: int) -> float:
+        s = self.st[key]
+        return s["vmin"] + (s["vmax"] - s["vmin"]) * float(sl) / 1000.0
+
+    def _stretch(self, patch: np.ndarray, key: str) -> np.ndarray:
+        s = self.st[key]
+        lo, hi, g = s["lo"], s["hi"], s["gamma"]
+        if hi <= lo:
+            hi = lo + 1.0
+        n = np.clip((np.nan_to_num(patch, nan=lo) - lo) / (hi - lo), 0.0, 1.0)
+        if abs(g - 1.0) > 1e-6:
+            n = np.power(n, g)
+        if s["asinh"]:
+            n = np.arcsinh(n * 8.0) / np.arcsinh(8.0)
+        return (np.clip(n, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+    @staticmethod
+    def _qimg(u8: np.ndarray) -> QImage:
+        h, w = u8.shape
+        return QImage(np.ascontiguousarray(u8).data, w, h, w,
+                      QImage.Format_Grayscale8).copy().convertToFormat(QImage.Format_RGB888)
 
     def _peak_xy(self):
         h, w = self.patch.shape
@@ -659,41 +713,55 @@ class ConcDialog(QDialog):
         return int(px), int(py)
 
     def update_img(self):
-        lo, hi, g = self.black.value(), self.white.value(), self.gamma.value()
-        if hi <= lo:
-            hi = lo + 1.0
-        n = np.clip((np.nan_to_num(self.patch, nan=lo) - lo) / (hi - lo), 0.0, 1.0)
-        if abs(g - 1.0) > 1e-6:
-            n = np.power(n, g)
-        if self.asinh.isChecked():
-            n = np.arcsinh(n * 8.0) / np.arcsinh(8.0)
-        u8 = (np.clip(n, 0.0, 1.0) * 255.0).astype(np.uint8)
-        h, w = u8.shape
-        qimg = QImage(np.ascontiguousarray(u8).data, w, h, w,
-                      QImage.Format_Grayscale8).copy().convertToFormat(QImage.Format_RGB888)
         gpx, gpy = self._peak_xy()
-        if self.overlay.isChecked():
-            p = QPainter(qimg)
-            p.setPen(QPen(QColor(0, 255, 0), 1))
-            p.drawEllipse(self.cx - self.r, self.cy - self.r, 2 * self.r, 2 * self.r)
-            p.setPen(QPen(QColor(255, 200, 0), 1))
-            p.drawEllipse(self.cx - self.R, self.cy - self.R, 2 * self.R, 2 * self.R)
-            p.setPen(QPen(QColor(0, 200, 255), 1))
-            p.drawLine(self.cx - 6, self.cy, self.cx + 6, self.cy)
-            p.drawLine(self.cx, self.cy - 6, self.cx, self.cy + 6)
-            p.setPen(QPen(QColor(255, 60, 60), 1))
-            p.drawLine(gpx - 7, gpy, gpx + 7, gpy)
-            p.drawLine(gpx, gpy - 7, gpx, gpy + 7)
-            p.end()
-        self.img.setPixmap(QPixmap.fromImage(qimg).scaled(
-            self.img.width(), self.img.height(),
-            Qt.KeepAspectRatio, Qt.FastTransformation))
+        show = self.overlay.isChecked()
+        if "A" in self.patches:
+            qA = self._qimg(self._stretch(self.patches["A"], "A"))
+            if show:
+                pa = QPainter(qA)
+                pa.setPen(QPen(QColor(0, 200, 255), 1))
+                pa.drawLine(self.cx - 6, self.cy, self.cx + 6, self.cy)
+                pa.drawLine(self.cx, self.cy - 6, self.cx, self.cy + 6)
+                pa.end()
+            self.imgA.setPixmap(QPixmap.fromImage(qA).scaled(
+                self.imgA.width(), self.imgA.height(),
+                Qt.KeepAspectRatio, Qt.FastTransformation))
+        if "B" in self.patches:
+            if self.flip_b.isChecked():
+                bsrc = self.patches["B"][::-1, ::-1]
+                hB, wB = bsrc.shape
+                fcx, fcy = wB - 1 - self.cx, hB - 1 - self.cy
+                fgpx, fgpy = wB - 1 - gpx, hB - 1 - gpy
+            else:
+                bsrc = self.patches["B"]
+                hB, wB = bsrc.shape
+                fcx, fcy = self.cx, self.cy
+                fgpx, fgpy = gpx, gpy
+            qB = self._qimg(self._stretch(bsrc, "B"))
+            if show:
+                pb = QPainter(qB)
+                pb.setPen(QPen(QColor(0, 255, 0), 1))
+                pb.drawEllipse(fcx - self.r, fcy - self.r, 2 * self.r, 2 * self.r)
+                pb.setPen(QPen(QColor(255, 200, 0), 1))
+                pb.drawEllipse(fcx - self.R, fcy - self.R, 2 * self.R, 2 * self.R)
+                pb.setPen(QPen(QColor(0, 200, 255), 1))
+                pb.drawLine(fcx - 6, fcy, fcx + 6, fcy)
+                pb.drawLine(fcx, fcy - 6, fcx, fcy + 6)
+                pb.setPen(QPen(QColor(255, 60, 60), 1))
+                pb.drawLine(fgpx - 7, fgpy, fgpx + 7, fgpy)
+                pb.drawLine(fgpx, fgpy - 7, fgpx, fgpy + 7)
+                pb.end()
+            self.imgB.setPixmap(QPixmap.fromImage(qB).scaled(
+                self.imgB.width(), self.imgB.height(),
+                Qt.KeepAspectRatio, Qt.FastTransformation))
         snr, conc, sig = _det_metrics(
             self.patch, self.cx, self.cy, self.r, self.R, self.search)
+        h, w = self.patch.shape
         pv = float(self.patch[gpy, gpx]) if 0 <= gpy < h and 0 <= gpx < w else 0.0
+        sb = self.st["B"] if "B" in self.st else {"lo": 0, "hi": 0}
         self.info.setText(
-            f"conc={conc:.3f}  SNR={snr:.2f}  FWHM={2.355*sig:.2f}px  "
-            f"峰值={pv:.0f}  黑/白={lo:.0f}/{hi:.0f}  中心=({self.cx},{self.cy}) 峰值点=({gpx},{gpy})")
+            f"conc={conc:.3f}  SNR={snr:.2f}  FWHM={2.355*sig:.2f}px  峰值B={pv:.0f}  "
+            f"中心B=({self.cx},{self.cy}) 峰值点=({gpx},{gpy})  B黑白={sb['lo']:.0f}/{sb['hi']:.0f}")
 
 
 class MainWindow(QMainWindow):
@@ -884,6 +952,8 @@ class MainWindow(QMainWindow):
         self.export_web_btn.clicked.connect(self._export_web_zip)
         self.conc_btn = QPushButton("验证conc")
         self.conc_btn.clicked.connect(self._open_conc_viewer)
+        self.train_btn = QPushButton("导出训练FITS")
+        self.train_btn.clicked.connect(self._export_train_fits)
         self.load_btn = QPushButton("加载已有结果")
         self.load_btn.clicked.connect(self._load_results_from_node)
         self.query_btn = QPushButton("查询变星/MPC")
@@ -910,6 +980,7 @@ class MainWindow(QMainWindow):
         row4.addWidget(self.export_btn)
         row4.addWidget(self.export_web_btn)
         row4.addWidget(self.conc_btn)
+        row4.addWidget(self.train_btn)
         row4.addStretch(1)
         lay.addLayout(row4)
 
@@ -1089,10 +1160,14 @@ class MainWindow(QMainWindow):
         self.daily_btn.clicked.connect(self._build_daily_summary)
         self.daily_export_btn = QPushButton("导出总表 CSV")
         self.daily_export_btn.clicked.connect(self._export_daily_csv)
-        self.daily_info = QLabel("（扫描选中目录下所有 *.gui_ai.json 汇总）")
+        self.daily_zero_check = QCheckBox("仅 var=0 & mpc=0")
+        self.daily_zero_check.setChecked(False)
+        self.daily_zero_check.stateChanged.connect(lambda _=0: self._build_daily_summary())
+        self.daily_info = QLabel("（扫描选中目录下所有 *.gui_ai.json 汇总；仅命中）")
         self.daily_info.setStyleSheet("color:#666;")
         drow.addWidget(self.daily_btn)
         drow.addWidget(self.daily_export_btn)
+        drow.addWidget(self.daily_zero_check)
         drow.addWidget(self.daily_info)
         drow.addStretch(1)
         dv.addLayout(drow)
@@ -1407,6 +1482,7 @@ class MainWindow(QMainWindow):
     def _build_daily_summary(self) -> None:
         target = self._current_path() or self.root_edit.text().strip()
         jsons = results_io.scan_results(target)
+        zero_only = self.daily_zero_check.isChecked()
         self._daily_rows = []
         self._daily_meta = []
         for j in jsons:
@@ -1417,6 +1493,10 @@ class MainWindow(QMainWindow):
                 continue
             fname = os.path.basename(d.get("b_path") or j)
             for det in d.get("detections", []):
+                if det.get("status", "keep") != "keep":
+                    continue  # 总表只汇总命中
+                if zero_only and not (det.get("var_count") == 0 and det.get("mpc_count") == 0):
+                    continue
                 st = det.get("status", "keep")
                 self._daily_rows.append([
                     info["date"], info["tel"], info["region"], fname,
@@ -1435,8 +1515,9 @@ class MainWindow(QMainWindow):
             for c, v in enumerate(row):
                 self.daily_table.setItem(r, c, QTableWidgetItem(str(v)))
         self.daily_info.setText(
-            f"（{len(jsons)} 个结果文件, {len(self._daily_rows)} 条检测）")
-        self._log(f"每日总表: {len(jsons)} 个结果文件, {len(self._daily_rows)} 条检测")
+            f"（{len(jsons)} 个结果文件, 命中 {len(self._daily_rows)} 条"
+            + ("，仅 var=0 & mpc=0" if zero_only else "") + "）")
+        self._log(f"每日总表: {len(jsons)} 个结果文件, 命中 {len(self._daily_rows)} 条")
 
     def _export_daily_csv(self) -> None:
         if not self._daily_rows:
@@ -2070,6 +2151,7 @@ class MainWindow(QMainWindow):
             return
         try:
             wcs_a = self._fits_cache.get(a_path)[2]
+            a_data = self._fits_cache.get(a_path)[1]
             b_data = self._fits_cache.get(b_path)[1]
             wcs_b = self._fits_cache.get(b_path)[2]
             wpt = wcs_a.all_pix2world([[float(det["x"]), float(det["y"])]], 0)[0]
@@ -2077,26 +2159,126 @@ class MainWindow(QMainWindow):
         except Exception as ex:  # noqa: BLE001
             QMessageBox.critical(self, "错误", f"读取/WCS 失败: {ex}")
             return
-        bx = int(round(float(bxy[0])))
-        by = int(round(float(bxy[1])))
         size = 64
-        half = size // 2
-        h, w = b_data.shape
-        x0, y0 = bx - half, by - half
-        x1, y1 = x0 + size, y0 + size
-        xs, ys, xe, ye = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
-        sub = np.asarray(b_data[ys:ye, xs:xe], dtype=np.float32)
-        if sub.size == 0:
-            QMessageBox.information(self, "提示", "该位置超出 B 范围")
+
+        def crop(data, cx, cy):
+            half = size // 2
+            h, w = data.shape
+            x0, y0 = int(round(cx)) - half, int(round(cy)) - half
+            x1, y1 = x0 + size, y0 + size
+            xs, ys, xe, ye = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+            out = np.asarray(data[ys:ye, xs:xe], dtype=np.float32)
+            if out.size == 0:
+                return None
+            pad = ((max(0, -y0), max(0, y1 - h)), (max(0, -x0), max(0, x1 - w)))
+            if any(pad[0]) or any(pad[1]):
+                out = np.pad(out, pad, mode="edge")
+            return out
+
+        a_patch = crop(a_data, float(det["x"]), float(det["y"]))
+        b_patch = crop(b_data, float(bxy[0]), float(bxy[1]))
+        if a_patch is None or b_patch is None:
+            QMessageBox.information(self, "提示", "该位置超出数据范围")
             return
-        pad = ((max(0, -y0), max(0, y1 - h)), (max(0, -x0), max(0, x1 - w)))
-        if any(pad[0]) or any(pad[1]):
-            sub = np.pad(sub, pad, mode="edge")
         dlg = ConcDialog(
-            self, sub, bx - x0, by - y0,
+            self, {"A": a_patch, "B": b_patch}, size // 2, size // 2,
             int(DEFAULTS["aperture_radius"]), int(DEFAULTS["aperture_annulus"]),
             int(DEFAULTS["det_center_search"]))
         dlg.exec()
+
+    def _export_train_fits(self) -> None:
+        """导出中心16×16的A/B原始数据，按 var=0&mpc=0 / var>0或mpc>0 分两类。"""
+        target = self._current_path()
+        if target:
+            jsons = results_io.scan_results(target)
+            if jsons:
+                loaded = self._load_jsons(jsons)
+                self._log(f"导出训练FITS前加载 {loaded} 个结果 (来自 {target})")
+        if not self._results:
+            QMessageBox.information(self, "提示", "没有可导出的结果")
+            return
+        from astropy.io import fits
+
+        size = int(DEFAULTS["train_patch"])
+        half = size // 2
+        base = Path(DEFAULTS["train_export_dir"])
+        (base / "var0_mpc0").mkdir(parents=True, exist_ok=True)
+        (base / "var_or_mpc").mkdir(parents=True, exist_ok=True)
+
+        def crop16(data, cx, cy):
+            h, w = data.shape
+            x0, y0 = int(round(cx)) - half, int(round(cy)) - half
+            x1, y1 = x0 + size, y0 + size
+            xs, ys, xe, ye = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+            out = np.asarray(data[ys:ye, xs:xe])
+            if out.size == 0:
+                return None
+            pad = ((max(0, -y0), max(0, y1 - h)), (max(0, -x0), max(0, x1 - w)))
+            if any(pad[0]) or any(pad[1]):
+                out = np.pad(out, pad, mode="edge")
+            return out
+
+        n1 = n2 = n_skip = 0
+        for res in self._results:
+            a_path = res.get("a_path")
+            b_path = res.get("b_path")
+            if not a_path or not b_path:
+                continue
+            try:
+                wcs_a = self._fits_cache.get(a_path)[2]
+                a_data = self._fits_cache.get(a_path)[1]
+                wcs_b = self._fits_cache.get(b_path)[2]
+                b_data = self._fits_cache.get(b_path)[1]
+            except Exception:
+                continue
+            stem = web_export.sanitize_name(Path(b_path).stem) if b_path else "unknown"
+            for i, d in enumerate(res.get("detections", [])):
+                vc = d.get("var_count", -1)
+                mc = d.get("mpc_count", -1)
+                if vc == 0 and mc == 0:
+                    grp = "var0_mpc0"
+                elif vc > 0 or mc > 0:
+                    grp = "var_or_mpc"
+                else:
+                    n_skip += 1
+                    continue
+                try:
+                    wpt = wcs_a.all_pix2world([[float(d["x"]), float(d["y"])]], 0)[0]
+                    bxy = wcs_b.all_world2pix([[float(wpt[0]), float(wpt[1])]], 0)[0]
+                except Exception:
+                    n_skip += 1
+                    continue
+                a_crop = crop16(a_data, d["x"], d["y"])
+                b_crop = crop16(b_data, float(bxy[0]), float(bxy[1]))
+                if a_crop is None or b_crop is None:
+                    n_skip += 1
+                    continue
+                hdu0 = fits.PrimaryHDU(np.asarray(a_crop))
+                hdu1 = fits.ImageHDU(np.asarray(b_crop), name="B")
+                hdr = hdu0.header
+                hdr["VARC"] = int(vc)
+                hdr["MPCC"] = int(mc)
+                hdr["STATUS"] = str(d.get("status", ""))
+                hdr["SCORE"] = float(d.get("score", 0.0))
+                snr = d.get("snr")
+                if snr is not None:
+                    hdr["SNR"] = float(snr)
+                hdr["PIXX"] = float(d["x"])
+                hdr["PIXY"] = float(d["y"])
+                out = base / grp / f"{stem}_{i:04d}_16.fits"
+                try:
+                    fits.HDUList([hdu0, hdu1]).writeto(str(out), overwrite=True)
+                except Exception:
+                    n_skip += 1
+                    continue
+                if grp == "var0_mpc0":
+                    n1 += 1
+                else:
+                    n2 += 1
+        self._log(f"训练FITS导出: var0&mpc0={n1}, var>0或mpc>0={n2}, 跳过={n_skip} -> {base}")
+        QMessageBox.information(
+            self, "完成",
+            f"已导出:\nvar=0&mpc=0: {n1}\nvar>0或mpc>0: {n2}\n跳过: {n_skip}\n目录: {base}")
 
 
 def main() -> None:

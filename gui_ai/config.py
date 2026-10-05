@@ -90,6 +90,9 @@ DEFAULTS = {
     "web_zip_tag": "V4",
     "web_patch_size": 512,
     "web_group_radius_px": 100,  # 同天区(gyX+Ky)内按B图像素聚类半径
+    # 训练数据导出
+    "train_export_dir": str(BASE_DIR / "ai_train_16pix"),
+    "train_patch": 16,   # 中心裁剪边长(px)
 }
 
 
