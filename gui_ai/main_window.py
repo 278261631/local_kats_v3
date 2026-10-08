@@ -82,8 +82,23 @@ import query_servers
 import results_io
 import web_export
 
-_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll", "tile_x", "tile_y"]
-_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll"]
+_AB_CLASSES = list(DEFAULTS.get("ab_classes", ["noise", "pixelshift", "target"]))
+_AB_HEADERS = ["分类"] + [f"P({c})" for c in _AB_CLASSES]
+
+
+def _ab_cells(d: dict) -> list:
+    """检测的 A/B 分类单元格：类别 + 各类别概率（缺失显示 -）。"""
+    probs = d.get("ab_probs") or {}
+    label = d.get("ab_class")
+    cells = [label if label else "-"]
+    for c in _AB_CLASSES:
+        v = probs.get(c)
+        cells.append("-" if v is None else f"{float(v):.2f}")
+    return cells
+
+
+_COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll", "tile_x", "tile_y"] + _AB_HEADERS
+_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll"] + _AB_HEADERS
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
@@ -98,6 +113,7 @@ _STATUS_TEXT = {
     "isolated": "孤立点",
     "spike": "亮尖峰",
     "dedup": "重复",
+    "ab_reject": "非目标",
 }
 _STATUS_COLOR = {
     "satellite": QColor(255, 170, 80),
@@ -108,6 +124,7 @@ _STATUS_COLOR = {
     "isolated": QColor(200, 120, 120),
     "spike": QColor(220, 90, 90),
     "dedup": QColor(160, 160, 160),
+    "ab_reject": QColor(180, 140, 255),
 }
 
 
@@ -334,6 +351,7 @@ class ProcessWorker(QThread):
                 return
             self.log.emit(f"待处理 B 文件: {len(files)} 个")
             model = None
+            ab_model = None
 
             total = len(files)
             for i, f in enumerate(files, 1):
@@ -363,6 +381,16 @@ class ProcessWorker(QThread):
                     )
                     self.log.emit(
                         f"模型已加载 (device={model.device}, size={model.model_size})")
+                if self.params.get("ab_filter") and ab_model is None:
+                    from ab_classify import ABModel
+                    ab_model = ABModel(
+                        self.params.get("ab_model_dir"),
+                        device=self.params["device"],
+                    )
+                    self.log.emit(
+                        f"A/B分类器已加载 (类别={ab_model.classes}, "
+                        f"noise<={self.params.get('ab_noise_max')}, "
+                        f"pixelshift<={self.params.get('ab_pixelshift_max')})")
                 try:
                     res = process_b_file(
                         f,
@@ -393,6 +421,12 @@ class ProcessWorker(QThread):
                         shape_fwhm_max=self.params.get("shape_fwhm_max", 0.0),
                         median_filter=self.params.get("median_filter", False),
                         median_ksize=self.params.get("median_ksize", 3),
+                        ab_model=ab_model,
+                        ab_filter=bool(self.params.get("ab_filter", False)),
+                        ab_keep_classes=self.params.get("ab_keep_classes", ()),
+                        ab_noise_max=float(self.params.get("ab_noise_max", 0.8)),
+                        ab_pixelshift_max=float(self.params.get("ab_pixelshift_max", 0.6)),
+                        ab_patch=int(self.params.get("ab_patch", 16)),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -768,7 +802,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("gui_ai - WCS 重投影 + PairRegNet 瞬变检测")
-        self.resize(1500, 950)
+        self.resize(1500, 860)
 
         self.worker: Optional[ProcessWorker] = None
         self.query_worker: Optional[QueryWorker] = None
@@ -804,6 +838,10 @@ class MainWindow(QMainWindow):
             bool(s.get("fill_invalid_with_a", DEFAULTS["fill_invalid_with_a"])))
         self.valid_overlap_check.setChecked(
             bool(s.get("valid_overlap_filter", DEFAULTS["valid_overlap_filter"])))
+        self.ab_filter_check.setChecked(bool(s.get("ab_filter", DEFAULTS["ab_filter"])))
+        self.ab_noise_spin.setValue(float(s.get("ab_noise_max", DEFAULTS["ab_noise_max"])))
+        self.ab_shift_spin.setValue(
+            float(s.get("ab_pixelshift_max", DEFAULTS["ab_pixelshift_max"])))
         self.show_filtered_check.setChecked(bool(s.get("show_filtered", False)))
         self.sat_check.setChecked(bool(s.get("show_sat", True)))
         self.cover_check.setChecked(bool(s.get("show_cover", True)))
@@ -824,6 +862,9 @@ class MainWindow(QMainWindow):
             "crop_size": int(self.crop_spin.value()),
             "fill_invalid_with_a": bool(self.fill_check.isChecked()),
             "valid_overlap_filter": bool(self.valid_overlap_check.isChecked()),
+            "ab_filter": bool(self.ab_filter_check.isChecked()),
+            "ab_noise_max": float(self.ab_noise_spin.value()),
+            "ab_pixelshift_max": float(self.ab_shift_spin.value()),
             "show_filtered": bool(self.show_filtered_check.isChecked()),
             "show_sat": bool(self.sat_check.isChecked()),
             "show_cover": bool(self.cover_check.isChecked()),
@@ -847,8 +888,16 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
 
-        root.addWidget(self._build_left_panel(), 0)
+        # 左侧参数较多，放入滚动区，避免撑高窗口；高度可自由压缩
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFixedWidth(440)
+        left_scroll.setWidget(self._build_left_panel())
+        root.addWidget(left_scroll, 0)
         root.addWidget(self._build_right_panel(), 1)
 
     def _build_left_panel(self) -> QWidget:
@@ -929,6 +978,24 @@ class MainWindow(QMainWindow):
         self.median_check = QCheckBox("B中值滤波(对比用)")
         self.median_check.setChecked(DEFAULTS["median_filter"])
         form.addRow("", self.median_check)
+        self.ab_filter_check = QCheckBox("A/B分类过滤")
+        self.ab_filter_check.setChecked(bool(DEFAULTS["ab_filter"]))
+        self.ab_filter_check.setToolTip(
+            "用 ab16/models_ab 的 A/B 16x16 分类器过滤检测："
+            "剔除噪声/像移概率超限的检测")
+        form.addRow("", self.ab_filter_check)
+        self.ab_noise_spin = QDoubleSpinBox()
+        self.ab_noise_spin.setRange(0.0, 1.0)
+        self.ab_noise_spin.setSingleStep(0.05)
+        self.ab_noise_spin.setDecimals(2)
+        self.ab_noise_spin.setValue(float(DEFAULTS["ab_noise_max"]))
+        form.addRow("AB噪声概率上限", self.ab_noise_spin)
+        self.ab_shift_spin = QDoubleSpinBox()
+        self.ab_shift_spin.setRange(0.0, 1.0)
+        self.ab_shift_spin.setSingleStep(0.05)
+        self.ab_shift_spin.setDecimals(2)
+        self.ab_shift_spin.setValue(float(DEFAULTS["ab_pixelshift_max"]))
+        form.addRow("AB像移概率上限", self.ab_shift_spin)
         self.edge_spin = QSpinBox()
         self.edge_spin.setRange(0, 200)
         self.edge_spin.setValue(int(DEFAULTS["edge_band"]))
@@ -1013,7 +1080,7 @@ class MainWindow(QMainWindow):
         self.preview_b = ClickableLabel("B")
         for lbl in (self.preview_a, self.preview_b):
             lbl.setAlignment(Qt.AlignCenter)
-            lbl.setMinimumHeight(300)
+            lbl.setMinimumHeight(200)
             lbl.setStyleSheet("background:#111; color:#888;")
             lbl.setCursor(Qt.PointingHandCursor)
             lbl.clicked.connect(self._on_preview_click)
@@ -1182,8 +1249,11 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(preview_wrap)
         splitter.addWidget(tabs)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        # 下方面板（检测结果/日志/小图墙/总表）给更大空间
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([320, 480])
+        splitter.setChildrenCollapsible(False)
         return splitter
 
     # --------------------------------------------------------------- events
@@ -1349,6 +1419,12 @@ class MainWindow(QMainWindow):
             "median_filter": bool(self.median_check.isChecked()),
             "median_ksize": int(DEFAULTS["median_ksize"]),
             "boundary_scale": int(DEFAULTS["boundary_scale"]),
+            "ab_filter": bool(self.ab_filter_check.isChecked()),
+            "ab_model_dir": str(DEFAULTS["ab_model_dir"]),
+            "ab_keep_classes": list(DEFAULTS["ab_keep_classes"]),
+            "ab_noise_max": float(self.ab_noise_spin.value()),
+            "ab_pixelshift_max": float(self.ab_shift_spin.value()),
+            "ab_patch": int(DEFAULTS["ab_patch"]),
             "amp": bool(DEFAULTS["amp"]),
         }
 
@@ -1416,7 +1492,7 @@ class MainWindow(QMainWindow):
             "-" if d.get("conc") is None else f"{d.get('conc'):.2f}",
             f"{d['dx']:+.2f}", f"{d['dy']:+.2f}", f"{d['roll']:+.2f}",
             str(d["tile_x"]), str(d["tile_y"]),
-        ]
+        ] + _ab_cells(d)
         for c, v in enumerate(vals):
             item = QTableWidgetItem(v)
             if c == 1 and status in _STATUS_COLOR:
@@ -1508,7 +1584,7 @@ class MainWindow(QMainWindow):
                     "-" if det.get("conc") is None else f"{det.get('conc'):.2f}",
                     f"{det.get('dx', 0):+.2f}", f"{det.get('dy', 0):+.2f}",
                     f"{det.get('roll', 0):+.2f}",
-                ])
+                ] + _ab_cells(det))
                 self._daily_meta.append({"json": j, "det": det})
         self.daily_table.setRowCount(len(self._daily_rows))
         for r, row in enumerate(self._daily_rows):
@@ -2096,7 +2172,8 @@ class MainWindow(QMainWindow):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["file", "status", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"])
+            w.writerow(["file", "status", "x", "y", "score", "dx", "dy", "roll", "tile_x", "tile_y"]
+                       + ["ab_class"] + [f"P({c})" for c in _AB_CLASSES])
             for e in self._row_map:
                 w.writerow([
                     os.path.basename(e.get("_result", {}).get("b_path") or ""),
@@ -2104,7 +2181,7 @@ class MainWindow(QMainWindow):
                     f"{e['x']:.2f}", f"{e['y']:.2f}", f"{e['score']:.4f}",
                     f"{e['dx']:.3f}", f"{e['dy']:.3f}", f"{e['roll']:.3f}",
                     e["tile_x"], e["tile_y"],
-                ])
+                ] + _ab_cells(e))
         self._log(f"已导出 CSV: {path}")
 
     def _export_web_zip(self) -> None:

@@ -70,6 +70,17 @@ DEFAULTS = {
     # 预处理：对 B 做中值滤波（默认开）
     "median_filter": True,
     "median_ksize": 3,
+    # A/B 16x16 分类过滤（ab16/models_ab）
+    # 规则：剔除 P(noise)>ab_noise_max 或 P(pixelshift)>ab_pixelshift_max 的检测；
+    #      ab_keep_classes 非空时再额外要求预测类在其中（默认空=只用阈值）。
+    "ab_filter": False,
+    "ab_model_dir": str(BASE_DIR / "ab16" / "models_ab"),
+    "ab_noise_max": 0.8,
+    "ab_pixelshift_max": 0.6,
+    "ab_keep_classes": [],
+    "ab_patch": 16,
+    # 分类类别顺序（与 best.pt 的 classes 一致，用于界面/CSV 列）
+    "ab_classes": ["noise", "pixelshift", "target"],
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,

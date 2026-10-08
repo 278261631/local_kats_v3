@@ -4,3 +4,4 @@ astropy
 scipy
 torch
 opencv-python
+scikit-learn

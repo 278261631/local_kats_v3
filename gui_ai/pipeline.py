@@ -257,6 +257,30 @@ def _upsample_mask(mask_small: np.ndarray, factor: int, shape) -> np.ndarray:
     return out.astype(bool)
 
 
+def _crop_native(data: np.ndarray, cx: float, cy: float, size: int) -> np.ndarray:
+    """从原生 (H,W) 帧裁 size×size（越界边缘填充）；返回 float32。
+
+    与 main_window 导出训练 FITS 的裁切逻辑一致，保证 A/B 分类器输入分布相同。
+    """
+    h, w = data.shape
+    half = size // 2
+    x0, y0 = int(round(cx)) - half, int(round(cy)) - half
+    x1, y1 = x0 + size, y0 + size
+    xs, ys, xe, ye = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+    if xe <= xs or ye <= ys:
+        return np.zeros((size, size), dtype=np.float32)
+    out = np.asarray(data[ys:ye, xs:xe], dtype=np.float32)
+    pad = ((max(0, -y0), max(0, y1 - h)), (max(0, -x0), max(0, x1 - w)))
+    if any(pad[0]) or any(pad[1]):
+        out = np.pad(out, pad, mode="edge")
+    if out.shape != (size, size):
+        fixed = np.zeros((size, size), dtype=np.float32)
+        ih, iw = min(size, out.shape[0]), min(size, out.shape[1])
+        fixed[:ih, :iw] = out[:ih, :iw]
+        out = fixed
+    return out
+
+
 def process_b_file(
     b_path: str,
     model: PairModel,
@@ -287,6 +311,12 @@ def process_b_file(
     isolated_min_px: int = 2,
     median_filter: bool = False,
     median_ksize: int = 3,
+    ab_model=None,
+    ab_filter: bool = False,
+    ab_keep_classes: list = (),
+    ab_noise_max: float = 0.8,
+    ab_pixelshift_max: float = 0.6,
+    ab_patch: int = 16,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -581,6 +611,46 @@ def process_b_file(
             else:
                 kept.append(d)
     dets.sort(key=lambda d: -d["score"])
+
+    # A/B 16x16 分类过滤：只保留目标类（默认 target），其余标记 ab_reject
+    if ab_filter and ab_model is not None and kept:
+        a_crops: List[np.ndarray] = []
+        b_crops: List[np.ndarray] = []
+        snrs: List[float] = []
+        for d in kept:
+            x, y = float(d["x"]), float(d["y"])
+            try:
+                wpt = wcs_a.all_pix2world([[x, y]], 0)[0]
+                bx, by = wcs_b.all_world2pix([[float(wpt[0]), float(wpt[1])]], 0)[0]
+            except Exception:  # noqa: BLE001
+                bx, by = x, y
+            a_crops.append(_crop_native(a_data, x, y, int(ab_patch)))
+            b_crops.append(_crop_native(b_data, float(bx), float(by), int(ab_patch)))
+            snrs.append(float(d.get("snr", 0.0) or 0.0))
+        try:
+            preds = ab_model.classify(a_crops, b_crops, snrs)
+            keep_set = set(ab_keep_classes)
+            n_ab = 0
+            for d, p in zip(kept, preds):
+                d["ab_class"] = p["label"]
+                d["ab_probs"] = p["probs"]
+                probs = p["probs"]
+                reject = (float(probs.get("noise", 0.0)) > float(ab_noise_max)
+                          or float(probs.get("pixelshift", 0.0)) > float(ab_pixelshift_max))
+                if keep_set and p["label"] not in keep_set:
+                    reject = True
+                if reject:
+                    d["status"] = "ab_reject"
+                else:
+                    n_ab += 1
+            log(
+                f"A/B分类: 保留 {n_ab}/{len(kept)} "
+                f"(noise<={float(ab_noise_max):g}, pixelshift<={float(ab_pixelshift_max):g}"
+                + (f", 类∈{sorted(keep_set)}" if keep_set else "") + ")"
+            )
+        except Exception as ex:  # noqa: BLE001
+            log(f"A/B分类失败: {ex}")
+
     result["detections"] = dets
     result["n_total"] = len(dets)
     result["n_keep"] = sum(1 for d in dets if d["status"] == "keep")

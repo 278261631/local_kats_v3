@@ -285,6 +285,8 @@ def export_results_web(
                     "mpc_count": d.get("mpc_count", -1),
                     "radec": "" if ra is None else f"{ra:.6f}, {dec:.6f}",
                     "xy": f"{d.get('x', 0):.0f},{d.get('y', 0):.0f}",
+                    "ab_class": d.get("ab_class", ""),
+                    "ab_probs": d.get("ab_probs", {}),
                 })
 
         _cluster_by_pixel(items, group_radius_px)

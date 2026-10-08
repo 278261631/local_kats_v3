@@ -79,6 +79,13 @@ def main() -> int:
         return 0
 
     model = None
+    ab_model = None
+    ab_filter = bool(st.get("ab_filter", DEFAULTS["ab_filter"]))
+    ab_keep = st.get("ab_keep_classes", DEFAULTS["ab_keep_classes"])
+    ab_noise_max = float(st.get("ab_noise_max", DEFAULTS["ab_noise_max"]))
+    ab_shift_max = float(st.get("ab_pixelshift_max", DEFAULTS["ab_pixelshift_max"]))
+    if ab_filter:
+        print(f"A/B分类过滤: 开启 (noise<={ab_noise_max}, pixelshift<={ab_shift_max})")
     n_ok = n_skip = n_fail = 0
     t_start = time.perf_counter()
     for i, f in enumerate(files, 1):
@@ -93,6 +100,11 @@ def main() -> int:
             if model is None:
                 model = PairModel(model_dir, device=device,
                                   det_threshold=threshold, batch_size=batch)
+            if ab_filter and ab_model is None:
+                from ab_classify import ABModel
+                ab_model = ABModel(
+                    st.get("ab_model_dir", DEFAULTS["ab_model_dir"]), device=device)
+                print(f"A/B分类器已加载 (类别={ab_model.classes})")
             res = process_b_file(
                 f, model, template_root=template_root, tile_size=tile,
                 overlap=overlap, dedup_radius=float(DEFAULTS["dedup_radius"]),
@@ -114,6 +126,12 @@ def main() -> int:
                 shape_fwhm_max=float(st.get("shape_fwhm_max", DEFAULTS["shape_fwhm_max"])),
                 median_filter=bool(st.get("median_filter", DEFAULTS["median_filter"])),
                 median_ksize=int(st.get("median_ksize", DEFAULTS["median_ksize"])),
+                ab_model=ab_model,
+                ab_filter=ab_filter,
+                ab_keep_classes=ab_keep,
+                ab_noise_max=ab_noise_max,
+                ab_pixelshift_max=ab_shift_max,
+                ab_patch=int(st.get("ab_patch", DEFAULTS["ab_patch"])),
             )
             if res.get("error"):
                 n_fail += 1
