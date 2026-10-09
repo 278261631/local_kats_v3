@@ -220,8 +220,13 @@ def export_results_web(
 
     cache = FitsCache(max_items=2)
     items: List[Dict] = []
+    n_anomaly = 0
     try:
         for res in results:
+            if res.get("anomaly"):
+                n_anomaly += 1
+                log(f"跳过异常图像(整文件): {Path(res.get('b_path') or '').name}")
+                continue
             a_path = res.get("a_path")
             b_path = res.get("b_path")
             dets = [d for d in res.get("detections", [])
@@ -292,6 +297,8 @@ def export_results_web(
         _cluster_by_pixel(items, group_radius_px)
         n_hi = sum(1 for it in items
                    if it.get("_snr") is not None and it["_snr"] >= snr_split)
+        if n_anomaly:
+            log(f"已跳过 {n_anomaly} 个整文件异常图像")
         summary = (f"同天区(GYx+Ky)按B图像素聚类(半径{group_radius_px:g}px)；"
                    f"仅 var=0 且 mpc=0；状态={'仅命中' if keep_only else '全部'}；"
                    f"SNR≥{snr_split:g} 优先，其余折叠")

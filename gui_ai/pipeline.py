@@ -317,6 +317,7 @@ def process_b_file(
     ab_noise_max: float = 0.8,
     ab_pixelshift_max: float = 0.6,
     ab_patch: int = 16,
+    anomaly_min_keep: int = 40,
     log_cb: LogCb = None,
 ) -> Dict:
     """处理单个 B 文件，返回结果字典（含预览缩略图与检测列表）。"""
@@ -654,6 +655,27 @@ def process_b_file(
     result["detections"] = dets
     result["n_total"] = len(dets)
     result["n_keep"] = sum(1 for d in dets if d["status"] == "keep")
+
+    # 文件级统计 + 整文件异常判定（n_keep >= 阈值 视为图像异常）
+    keeps = [d for d in dets if d["status"] == "keep"]
+    k_conc = [float(d["conc"]) for d in keeps if d.get("conc") is not None]
+    k_fwhm = [float(d["fwhm"]) for d in keeps if d.get("fwhm") is not None]
+    k_snr = [float(d["snr"]) for d in keeps if d.get("snr") is not None]
+    area_mpx = (float(w) * float(h) / 1e6) if (w and h) else 0.0
+    result["file_stats"] = {
+        "n_keep": result["n_keep"],
+        "n_total": result["n_total"],
+        "density": float(result["n_total"] / area_mpx) if area_mpx > 0 else 0.0,
+        "keep_conc_med": float(np.median(k_conc)) if k_conc else None,
+        "keep_fwhm_med": float(np.median(k_fwhm)) if k_fwhm else None,
+        "keep_snr_med": float(np.median(k_snr)) if k_snr else None,
+        "ab_reject": sum(1 for d in dets if d.get("status") == "ab_reject"),
+    }
+    result["anomaly"] = bool(result["n_keep"] >= int(anomaly_min_keep))
+    result["anomaly_min_keep"] = int(anomaly_min_keep)
+    if result["anomaly"]:
+        log(f"[整文件异常] 命中 {result['n_keep']} >= {int(anomaly_min_keep)}，"
+            f"标记为异常图像 ({os.path.basename(b_path)})")
     if poses:
         arr = np.asarray(poses, dtype=np.float64)
         result["mean_dx"] = float(np.mean(np.abs(arr[:, 0])))

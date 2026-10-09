@@ -48,7 +48,13 @@ def main() -> int:
     if not results:
         print("没有找到结果 (*.gui_ai.json)")
         return 0
-    tasks, n_no_epoch = query_core.build_tasks(results)
+    anomaly_min = (int(st.get("file_anomaly_min_keep", DEFAULTS["file_anomaly_min_keep"]))
+                   if st.get("file_anomaly_filter", DEFAULTS["file_anomaly_filter"]) else 0)
+    if anomaly_min > 0:
+        n_anom = sum(1 for r in results
+                     if int(r.get("n_keep", 0) or 0) >= anomaly_min)
+        print(f"整文件异常过滤: 开启 (n_keep >= {anomaly_min})，跳过文件 {n_anom} 个")
+    tasks, n_no_epoch = query_core.build_tasks(results, anomaly_min_keep=anomaly_min)
     print(f"命中检测(可查): {len(tasks)}  (无观测时间 {n_no_epoch})")
     print("=" * 70)
 

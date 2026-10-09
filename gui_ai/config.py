@@ -81,6 +81,9 @@ DEFAULTS = {
     "ab_patch": 16,
     # 分类类别顺序（与 best.pt 的 classes 一致，用于界面/CSV 列）
     "ab_classes": ["noise", "pixelshift", "target"],
+    # 整文件异常过滤：命中的检测数 n_keep >= 阈值 视为整幅图像异常（整文件过滤）
+    "file_anomaly_filter": False,
+    "file_anomaly_min_keep": 40,
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,

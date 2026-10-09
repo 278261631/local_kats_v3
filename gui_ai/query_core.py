@@ -62,12 +62,22 @@ def _hits_to_pix(hits, wcs) -> list:
     return out
 
 
-def build_tasks(results: list, cache: FitsCache | None = None) -> tuple:
-    """返回 (tasks, n_no_epoch)。tasks: (det, wcs, epoch, ra, dec)。"""
+def build_tasks(results: list, cache: FitsCache | None = None,
+                anomaly_min_keep: int = 0) -> tuple:
+    """返回 (tasks, n_no_epoch)。tasks: (det, wcs, epoch, ra, dec)。
+
+    anomaly_min_keep>0 时，命中的检测数 ≥ 该值的文件视为整文件异常，跳过查询
+    （其命中检测的 var_count/mpc_count 置 -1）。
+    """
     cache = cache or FitsCache(max_items=2)
     tasks = []
     n_no_epoch = 0
     for res in results:
+        if anomaly_min_keep > 0 and int(res.get("n_keep", 0) or 0) >= int(anomaly_min_keep):
+            for det in res.get("detections", []):
+                if det.get("status", "keep") == "keep":
+                    det["var_count"] = det["mpc_count"] = -1
+            continue
         a_path = res.get("a_path")
         b_path = res.get("b_path")
         wcs = None

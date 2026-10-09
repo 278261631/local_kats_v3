@@ -84,8 +84,10 @@ def main() -> int:
     ab_keep = st.get("ab_keep_classes", DEFAULTS["ab_keep_classes"])
     ab_noise_max = float(st.get("ab_noise_max", DEFAULTS["ab_noise_max"]))
     ab_shift_max = float(st.get("ab_pixelshift_max", DEFAULTS["ab_pixelshift_max"]))
+    anomaly_min_keep = int(st.get("file_anomaly_min_keep", DEFAULTS["file_anomaly_min_keep"]))
     if ab_filter:
         print(f"A/B分类过滤: 开启 (noise<={ab_noise_max}, pixelshift<={ab_shift_max})")
+    print(f"整文件异常判定: n_keep >= {anomaly_min_keep}")
     n_ok = n_skip = n_fail = 0
     t_start = time.perf_counter()
     for i, f in enumerate(files, 1):
@@ -132,6 +134,7 @@ def main() -> int:
                 ab_noise_max=ab_noise_max,
                 ab_pixelshift_max=ab_shift_max,
                 ab_patch=int(st.get("ab_patch", DEFAULTS["ab_patch"])),
+                anomaly_min_keep=anomaly_min_keep,
             )
             if res.get("error"):
                 n_fail += 1
@@ -139,8 +142,9 @@ def main() -> int:
                 continue
             results_io.save_result(res, st)
             n_ok += 1
+            mark = "  [异常图像]" if res.get("anomaly") else ""
             print(f"{prefix} {name[:60]}  命中 {res['n_keep']}/{res['n_total']}"
-                  f"  {time.perf_counter()-t0:.1f}s")
+                  f"  {time.perf_counter()-t0:.1f}s{mark}")
         except Exception as ex:  # noqa: BLE001
             n_fail += 1
             print(f"{prefix} {name[:60]}  失败: {ex}")

@@ -427,6 +427,7 @@ class ProcessWorker(QThread):
                         ab_noise_max=float(self.params.get("ab_noise_max", 0.8)),
                         ab_pixelshift_max=float(self.params.get("ab_pixelshift_max", 0.6)),
                         ab_patch=int(self.params.get("ab_patch", 16)),
+                        anomaly_min_keep=int(self.params.get("anomaly_min_keep", 40)),
                         log_cb=self.log.emit,
                     )
                 except Exception as ex:  # noqa: BLE001
@@ -842,6 +843,10 @@ class MainWindow(QMainWindow):
         self.ab_noise_spin.setValue(float(s.get("ab_noise_max", DEFAULTS["ab_noise_max"])))
         self.ab_shift_spin.setValue(
             float(s.get("ab_pixelshift_max", DEFAULTS["ab_pixelshift_max"])))
+        self.file_anomaly_check.setChecked(
+            bool(s.get("file_anomaly_filter", DEFAULTS["file_anomaly_filter"])))
+        self.file_anomaly_spin.setValue(
+            int(s.get("file_anomaly_min_keep", DEFAULTS["file_anomaly_min_keep"])))
         self.show_filtered_check.setChecked(bool(s.get("show_filtered", False)))
         self.sat_check.setChecked(bool(s.get("show_sat", True)))
         self.cover_check.setChecked(bool(s.get("show_cover", True)))
@@ -865,6 +870,8 @@ class MainWindow(QMainWindow):
             "ab_filter": bool(self.ab_filter_check.isChecked()),
             "ab_noise_max": float(self.ab_noise_spin.value()),
             "ab_pixelshift_max": float(self.ab_shift_spin.value()),
+            "file_anomaly_filter": bool(self.file_anomaly_check.isChecked()),
+            "file_anomaly_min_keep": int(self.file_anomaly_spin.value()),
             "show_filtered": bool(self.show_filtered_check.isChecked()),
             "show_sat": bool(self.sat_check.isChecked()),
             "show_cover": bool(self.cover_check.isChecked()),
@@ -996,6 +1003,17 @@ class MainWindow(QMainWindow):
         self.ab_shift_spin.setDecimals(2)
         self.ab_shift_spin.setValue(float(DEFAULTS["ab_pixelshift_max"]))
         form.addRow("AB像移概率上限", self.ab_shift_spin)
+        self.file_anomaly_check = QCheckBox("整文件异常过滤(命中数≥阈值)")
+        self.file_anomaly_check.setChecked(bool(DEFAULTS["file_anomaly_filter"]))
+        self.file_anomaly_check.setToolTip(
+            "某文件命中的检测数 ≥ 阈值时判为图像异常，整文件不显示/不导出")
+        self.file_anomaly_check.stateChanged.connect(lambda _=0: self._rebuild_table())
+        form.addRow("", self.file_anomaly_check)
+        self.file_anomaly_spin = QSpinBox()
+        self.file_anomaly_spin.setRange(1, 100000)
+        self.file_anomaly_spin.setValue(int(DEFAULTS["file_anomaly_min_keep"]))
+        self.file_anomaly_spin.valueChanged.connect(lambda _=0: self._rebuild_table())
+        form.addRow("异常命中数阈值", self.file_anomaly_spin)
         self.edge_spin = QSpinBox()
         self.edge_spin.setRange(0, 200)
         self.edge_spin.setValue(int(DEFAULTS["edge_band"]))
@@ -1017,17 +1035,10 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self._export_csv)
         self.export_web_btn = QPushButton("导出网页ZIP(V4)")
         self.export_web_btn.clicked.connect(self._export_web_zip)
-        self.conc_btn = QPushButton("验证conc")
-        self.conc_btn.clicked.connect(self._open_conc_viewer)
         self.train_btn = QPushButton("导出训练FITS")
         self.train_btn.clicked.connect(self._export_train_fits)
         self.load_btn = QPushButton("加载已有结果")
         self.load_btn.clicked.connect(self._load_results_from_node)
-        self.query_btn = QPushButton("查询变星/MPC")
-        self.query_btn.clicked.connect(self._run_queries)
-        self.query_pause_btn = QPushButton("暂停查询")
-        self.query_pause_btn.setEnabled(False)
-        self.query_pause_btn.clicked.connect(self._toggle_query_pause)
         self.refilter_btn = QPushButton("重算SNR/形状过滤")
         self.refilter_btn.clicked.connect(self._refilter_snr)
 
@@ -1039,35 +1050,19 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.load_btn)
         row2.addWidget(self.refilter_btn)
         lay.addLayout(row2)
-        row3 = QHBoxLayout()
-        row3.addWidget(self.query_btn)
-        row3.addWidget(self.query_pause_btn)
-        lay.addLayout(row3)
         row4 = QHBoxLayout()
         row4.addWidget(self.export_btn)
         row4.addWidget(self.export_web_btn)
-        row4.addWidget(self.conc_btn)
         row4.addWidget(self.train_btn)
+        self.anomaly_btn = QPushButton("导出异常文件清单")
+        self.anomaly_btn.clicked.connect(self._export_anomaly_list)
+        row4.addWidget(self.anomaly_btn)
         row4.addStretch(1)
         lay.addLayout(row4)
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
         lay.addWidget(self.progress)
-
-        qgrp = QGroupBox("查询进度")
-        qgl = QVBoxLayout(qgrp)
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("变星 VSX:"))
-        self.var_progress = QProgressBar()
-        r1.addWidget(self.var_progress)
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("MPC:"))
-        self.mpc_progress = QProgressBar()
-        r2.addWidget(self.mpc_progress)
-        qgl.addLayout(r1)
-        qgl.addLayout(r2)
-        lay.addWidget(qgrp)
 
         return panel
 
@@ -1107,6 +1102,10 @@ class MainWindow(QMainWindow):
         self.crop_spin.setValue(DEFAULTS["crop_size"])
         self.crop_spin.valueChanged.connect(lambda _=0: self._refresh_preview())
         vrow.addWidget(self.crop_spin)
+        vrow.addSpacing(12)
+        self.conc_btn = QPushButton("验证conc")
+        self.conc_btn.clicked.connect(self._open_conc_viewer)
+        vrow.addWidget(self.conc_btn)
         hint = QLabel("（Tab切换；全图点击十字→裁切；双击任意处→看该处局部对比）")
         hint.setStyleSheet("color:#666;")
         vrow.addWidget(hint)
@@ -1183,6 +1182,29 @@ class MainWindow(QMainWindow):
             + _swatch(_MPC_COLOR) + " MPC"
         )
         pw.addWidget(legend)
+
+        # 变星/MPC 查询：进度(当前/总数) + 按钮（移到右侧）
+        qbar = QHBoxLayout()
+        qbar.addWidget(QLabel("变星 VSX:"))
+        self.var_progress = QProgressBar()
+        self.var_progress.setFormat("%v/%m")
+        self.var_progress.setMinimumWidth(140)
+        qbar.addWidget(self.var_progress, 1)
+        qbar.addSpacing(12)
+        qbar.addWidget(QLabel("MPC:"))
+        self.mpc_progress = QProgressBar()
+        self.mpc_progress.setFormat("%v/%m")
+        self.mpc_progress.setMinimumWidth(140)
+        qbar.addWidget(self.mpc_progress, 1)
+        qbar.addSpacing(12)
+        self.query_btn = QPushButton("查询变星/MPC")
+        self.query_btn.clicked.connect(self._run_queries)
+        self.query_pause_btn = QPushButton("暂停查询")
+        self.query_pause_btn.setEnabled(False)
+        self.query_pause_btn.clicked.connect(self._toggle_query_pause)
+        qbar.addWidget(self.query_btn)
+        qbar.addWidget(self.query_pause_btn)
+        pw.addLayout(qbar)
 
         tabs = QTabWidget()
         self.table = QTableWidget(0, len(_COLUMNS))
@@ -1425,6 +1447,7 @@ class MainWindow(QMainWindow):
             "ab_noise_max": float(self.ab_noise_spin.value()),
             "ab_pixelshift_max": float(self.ab_shift_spin.value()),
             "ab_patch": int(DEFAULTS["ab_patch"]),
+            "anomaly_min_keep": int(self.file_anomaly_spin.value()),
             "amp": bool(DEFAULTS["amp"]),
         }
 
@@ -1503,11 +1526,22 @@ class MainWindow(QMainWindow):
         entry["_det"] = d
         self._row_map.append(entry)
 
+    def _file_is_anomaly(self, res: Dict) -> bool:
+        """整文件异常判定：命中的检测数 >= 阈值。"""
+        try:
+            thr = int(self.file_anomaly_spin.value())
+        except Exception:
+            thr = int(DEFAULTS["file_anomaly_min_keep"])
+        return int(res.get("n_keep", 0) or 0) >= thr
+
     def _rebuild_table(self) -> None:
         self.table.setRowCount(0)
         self._row_map.clear()
         show_all = self.show_filtered_check.isChecked()
+        file_filter = self.file_anomaly_check.isChecked()
         for res in self._results:
+            if file_filter and self._file_is_anomaly(res):
+                continue
             for d in res["detections"]:
                 if not show_all and d.get("status", "keep") != "keep":
                     continue
@@ -1517,6 +1551,13 @@ class MainWindow(QMainWindow):
     def _on_file_done(self, res: Dict) -> None:
         self._results.append(res)
         show_all = self.show_filtered_check.isChecked()
+        file_filter = self.file_anomaly_check.isChecked()
+        if file_filter and self._file_is_anomaly(res):
+            self._log(
+                f"  [整文件异常] 命中 {res.get('n_keep')} ≥ "
+                f"{int(self.file_anomaly_spin.value())}，已跳过该文件全部检测")
+            self._refresh_preview()
+            return
         for d in res["detections"]:
             if not show_all and d.get("status", "keep") != "keep":
                 continue
@@ -1568,6 +1609,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 continue
             fname = os.path.basename(d.get("b_path") or j)
+            if (self.file_anomaly_check.isChecked()
+                    and int(d.get("n_keep", 0) or 0) >= int(self.file_anomaly_spin.value())):
+                continue  # 整文件异常，跳过
             for det in d.get("detections", []):
                 if det.get("status", "keep") != "keep":
                     continue  # 总表只汇总命中
@@ -1737,8 +1781,20 @@ class MainWindow(QMainWindow):
             return
         # 组织候选任务（仅命中的检测，需能定位 WCS）
         skip_done = bool(self.query_skip_check.isChecked())
+        file_filter = self.file_anomaly_check.isChecked()
+        try:
+            anomaly_thr = int(self.file_anomaly_spin.value())
+        except Exception:
+            anomaly_thr = int(DEFAULTS["file_anomaly_min_keep"])
         tasks = []
+        n_anom_skip = 0
         for res in self._results:
+            if file_filter and int(res.get("n_keep", 0) or 0) >= anomaly_thr:
+                for det in res.get("detections", []):
+                    if det.get("status", "keep") == "keep":
+                        det["var_count"] = det["mpc_count"] = -1
+                n_anom_skip += 1
+                continue
             wcs = self._safe_wcs(res.get("a_path"))
             epoch = self._safe_epoch_mjd(res.get("b_path"))
             for det in res.get("detections", []):
@@ -1756,6 +1812,8 @@ class MainWindow(QMainWindow):
                         det["mpc_count"] = -1
                 except Exception:
                     det["var_count"] = det["mpc_count"] = -1
+        if n_anom_skip:
+            self._log(f"整文件异常跳过查询: {n_anom_skip} 个文件（命中 ≥ {anomaly_thr}）")
 
         cfg = {
             "radius": float(DEFAULTS["query_radius_arcsec"]),
@@ -2183,6 +2241,39 @@ class MainWindow(QMainWindow):
                     e["tile_x"], e["tile_y"],
                 ] + _ab_cells(e))
         self._log(f"已导出 CSV: {path}")
+
+    def _export_anomaly_list(self) -> None:
+        """导出整文件异常清单（命中数 >= 阈值）。"""
+        thr = int(self.file_anomaly_spin.value())
+        rows = []
+        for res in self._results:
+            if not self._file_is_anomaly(res):
+                continue
+            fs = res.get("file_stats") or {}
+            rows.append([
+                os.path.basename(res.get("b_path") or ""),
+                res.get("n_keep"), res.get("n_total"),
+                f"{fs.get('density', 0):.1f}" if fs.get('density') is not None else "-",
+                "-" if fs.get("keep_conc_med") is None else f"{fs['keep_conc_med']:.3f}",
+                "-" if fs.get("keep_fwhm_med") is None else f"{fs['keep_fwhm_med']:.2f}",
+                "-" if fs.get("keep_snr_med") is None else f"{fs['keep_snr_med']:.1f}",
+                fs.get("ab_reject", "-"),
+                res.get("a_path") or "", res.get("b_path") or "",
+            ])
+        if not rows:
+            QMessageBox.information(self, "提示", f"没有命中数 ≥ {thr} 的异常文件")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出异常文件清单", "gui_ai_anomaly_files.csv", "CSV (*.csv)")
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["file", "n_keep", "n_total", "density", "keep_conc_med",
+                        "keep_fwhm_med", "keep_snr_med", "ab_reject", "a_path", "b_path"])
+            w.writerows(rows)
+        self._log(f"已导出异常文件清单 {len(rows)} 个: {path}")
+        QMessageBox.information(self, "完成", f"异常文件 {len(rows)} 个，阈值 n_keep ≥ {thr}\n{path}")
 
     def _export_web_zip(self) -> None:
         """导出网页 ZIP（参考原版；输出根目录同原版，文件名带 V4）。"""
