@@ -73,7 +73,7 @@ DEFAULTS = {
     # A/B 16x16 分类过滤（ab16/models_ab）
     # 规则：剔除 P(noise)>ab_noise_max 或 P(pixelshift)>ab_pixelshift_max 的检测；
     #      ab_keep_classes 非空时再额外要求预测类在其中（默认空=只用阈值）。
-    "ab_filter": False,
+    "ab_filter": True,
     "ab_model_dir": str(BASE_DIR / "ab16" / "models_ab"),
     "ab_noise_max": 0.8,
     "ab_pixelshift_max": 0.6,
@@ -82,7 +82,7 @@ DEFAULTS = {
     # 分类类别顺序（与 best.pt 的 classes 一致，用于界面/CSV 列）
     "ab_classes": ["noise", "pixelshift", "target"],
     # 整文件异常过滤：命中的检测数 n_keep >= 阈值 视为整幅图像异常（整文件过滤）
-    "file_anomaly_filter": False,
+    "file_anomaly_filter": True,
     "file_anomaly_min_keep": 40,
     # 变星(VSX)本地服务
     "vsx_host": "localhost",

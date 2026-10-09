@@ -82,6 +82,20 @@ import query_servers
 import results_io
 import web_export
 
+class NoWheelSpinBox(QSpinBox):
+    """数值框：忽略鼠标滚轮，避免鼠标经过时误改数值。"""
+
+    def wheelEvent(self, event):  # noqa: N802
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """小数数值框：忽略鼠标滚轮，避免鼠标经过时误改数值。"""
+
+    def wheelEvent(self, event):  # noqa: N802
+        event.ignore()
+
+
 _AB_CLASSES = list(DEFAULTS.get("ab_classes", ["noise", "pixelshift", "target"]))
 _AB_HEADERS = ["分类"] + [f"P({c})" for c in _AB_CLASSES]
 
@@ -646,11 +660,11 @@ class ConcDialog(QDialog):
         img.setStyleSheet("background:#000;")
         setattr(self, "img" + key, img)
         s = self.st[key]
-        black = QDoubleSpinBox(); black.setRange(-1e12, 1e12); black.setDecimals(1)
+        black = NoWheelDoubleSpinBox(); black.setRange(-1e12, 1e12); black.setDecimals(1)
         black.setValue(s["lo"])
-        white = QDoubleSpinBox(); white.setRange(-1e12, 1e12); white.setDecimals(1)
+        white = NoWheelDoubleSpinBox(); white.setRange(-1e12, 1e12); white.setDecimals(1)
         white.setValue(s["hi"])
-        gamma = QDoubleSpinBox(); gamma.setRange(0.1, 5.0); gamma.setSingleStep(0.1)
+        gamma = NoWheelDoubleSpinBox(); gamma.setRange(0.1, 5.0); gamma.setSingleStep(0.1)
         gamma.setValue(1.0)
         asinh = QCheckBox("asinh")
         bsl = QSlider(Qt.Horizontal); bsl.setRange(0, 1000)
@@ -934,7 +948,8 @@ class MainWindow(QMainWindow):
         src_lay.addWidget(self.sel_label)
         lay.addWidget(src, 1)
 
-        params = QGroupBox("参数")
+        params = QGroupBox("参数（点击展开）")
+        params.setCheckable(True)
         form = QFormLayout(params)
         self.template_edit = QLineEdit(DEFAULTS["template_root"])
         form.addRow("模板根目录", self.template_edit)
@@ -944,23 +959,23 @@ class MainWindow(QMainWindow):
         self.device_combo.addItems(["auto", "cpu", "cuda"])
         self.device_combo.setCurrentText(DEFAULTS["device"])
         form.addRow("设备", self.device_combo)
-        self.tile_spin = QSpinBox()
+        self.tile_spin = NoWheelSpinBox()
         self.tile_spin.setRange(64, 1024)
         self.tile_spin.setValue(DEFAULTS["tile_size"])
         form.addRow("瓦片边长", self.tile_spin)
-        self.overlap_spin = QDoubleSpinBox()
+        self.overlap_spin = NoWheelDoubleSpinBox()
         self.overlap_spin.setRange(0.0, 0.9)
         self.overlap_spin.setSingleStep(0.05)
         self.overlap_spin.setDecimals(2)
         self.overlap_spin.setValue(DEFAULTS["overlap"])
         form.addRow("overlap 比例", self.overlap_spin)
-        self.thresh_spin = QDoubleSpinBox()
+        self.thresh_spin = NoWheelDoubleSpinBox()
         self.thresh_spin.setRange(0.0, 1.0)
         self.thresh_spin.setSingleStep(0.05)
         self.thresh_spin.setDecimals(2)
         self.thresh_spin.setValue(DEFAULTS["det_threshold"])
         form.addRow("检测阈值", self.thresh_spin)
-        self.batch_spin = QSpinBox()
+        self.batch_spin = NoWheelSpinBox()
         self.batch_spin.setRange(1, 128)
         self.batch_spin.setValue(DEFAULTS["batch_size"])
         form.addRow("批大小", self.batch_spin)
@@ -973,7 +988,7 @@ class MainWindow(QMainWindow):
         self.snr_check = QCheckBox("按局部SNR/形状过滤(含暗边、亮尖峰)")
         self.snr_check.setChecked(DEFAULTS["snr_filter"])
         form.addRow("", self.snr_check)
-        self.snr_min_spin = QDoubleSpinBox()
+        self.snr_min_spin = NoWheelDoubleSpinBox()
         self.snr_min_spin.setRange(0.0, 100000.0)
         self.snr_min_spin.setDecimals(1)
         self.snr_min_spin.setSingleStep(1.0)
@@ -991,13 +1006,13 @@ class MainWindow(QMainWindow):
             "用 ab16/models_ab 的 A/B 16x16 分类器过滤检测："
             "剔除噪声/像移概率超限的检测")
         form.addRow("", self.ab_filter_check)
-        self.ab_noise_spin = QDoubleSpinBox()
+        self.ab_noise_spin = NoWheelDoubleSpinBox()
         self.ab_noise_spin.setRange(0.0, 1.0)
         self.ab_noise_spin.setSingleStep(0.05)
         self.ab_noise_spin.setDecimals(2)
         self.ab_noise_spin.setValue(float(DEFAULTS["ab_noise_max"]))
         form.addRow("AB噪声概率上限", self.ab_noise_spin)
-        self.ab_shift_spin = QDoubleSpinBox()
+        self.ab_shift_spin = NoWheelDoubleSpinBox()
         self.ab_shift_spin.setRange(0.0, 1.0)
         self.ab_shift_spin.setSingleStep(0.05)
         self.ab_shift_spin.setDecimals(2)
@@ -1009,12 +1024,12 @@ class MainWindow(QMainWindow):
             "某文件命中的检测数 ≥ 阈值时判为图像异常，整文件不显示/不导出")
         self.file_anomaly_check.stateChanged.connect(lambda _=0: self._rebuild_table())
         form.addRow("", self.file_anomaly_check)
-        self.file_anomaly_spin = QSpinBox()
+        self.file_anomaly_spin = NoWheelSpinBox()
         self.file_anomaly_spin.setRange(1, 100000)
         self.file_anomaly_spin.setValue(int(DEFAULTS["file_anomaly_min_keep"]))
         self.file_anomaly_spin.valueChanged.connect(lambda _=0: self._rebuild_table())
         form.addRow("异常命中数阈值", self.file_anomaly_spin)
-        self.edge_spin = QSpinBox()
+        self.edge_spin = NoWheelSpinBox()
         self.edge_spin.setRange(0, 200)
         self.edge_spin.setValue(int(DEFAULTS["edge_band"]))
         form.addRow("边缘过滤(px)", self.edge_spin)
@@ -1024,6 +1039,16 @@ class MainWindow(QMainWindow):
         self.query_skip_check = QCheckBox("查询跳过已完成")
         self.query_skip_check.setChecked(DEFAULTS["query_skip_done"])
         form.addRow("", self.query_skip_check)
+
+        def _toggle_params(checked: bool) -> None:
+            for i in range(form.count()):
+                w = form.itemAt(i).widget()
+                if w is not None:
+                    w.setVisible(checked)
+
+        params.toggled.connect(_toggle_params)
+        params.setChecked(False)   # 默认折叠
+        _toggle_params(False)
         lay.addWidget(params)
 
         self.run_btn = QPushButton("开始处理")
@@ -1096,7 +1121,7 @@ class MainWindow(QMainWindow):
         vrow.addWidget(self.view_combo)
         vrow.addSpacing(12)
         vrow.addWidget(QLabel("裁切像素:"))
-        self.crop_spin = QSpinBox()
+        self.crop_spin = NoWheelSpinBox()
         self.crop_spin.setRange(32, 4096)
         self.crop_spin.setSingleStep(64)
         self.crop_spin.setValue(DEFAULTS["crop_size"])
