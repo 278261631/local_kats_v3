@@ -2596,22 +2596,34 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _export_train_fits(self) -> None:
-        """导出中心16×16的A/B原始数据，按 var=0&mpc=0 / var>0或mpc>0 分两类。"""
+        """导出中心16×16 A/B 训练数据到 ai_train_16pix_m：
+        - var>0 或 mpc>0   -> var_or_mpc/（原方法）
+        - var=0 且 mpc=0   -> 按人工标注 manual_class 分目录（未标注 -> unlabeled/）
+        只读 JSON（不加载预览 npz），并跳过整文件异常图像。
+        """
+        export_results = None
         target = self._current_path()
         if target:
             jsons = results_io.scan_results(target)
             if jsons:
-                loaded = self._load_jsons(jsons)
-                self._log(f"导出训练FITS前加载 {loaded} 个结果 (来自 {target})")
-        if not self._results:
+                export_results = []
+                for j in jsons:
+                    try:
+                        export_results.append(
+                            results_io.load_result(j, with_preview=False))
+                    except Exception:
+                        continue
+                self._log(f"导出训练FITS前加载 {len(export_results)} 个结果 (来自 {target})")
+        if not export_results:
+            export_results = self._results
+        if not export_results:
             QMessageBox.information(self, "提示", "没有可导出的结果")
             return
         from astropy.io import fits
 
         size = int(DEFAULTS["train_patch"])
         half = size // 2
-        base = Path(DEFAULTS["train_export_dir"])
-        (base / "var0_mpc0").mkdir(parents=True, exist_ok=True)
+        base = Path(DEFAULTS["train_export_dir_m"])
         (base / "var_or_mpc").mkdir(parents=True, exist_ok=True)
 
         def crop16(data, cx, cy):
@@ -2627,8 +2639,13 @@ class MainWindow(QMainWindow):
                 out = np.pad(out, pad, mode="edge")
             return out
 
-        n1 = n2 = n_skip = 0
-        for res in self._results:
+        n_or = 0
+        n_by_manual: Dict[str, int] = {}
+        n_anomaly = n_skip = 0
+        for res in export_results:
+            if res.get("anomaly"):
+                n_anomaly += 1
+                continue
             a_path = res.get("a_path")
             b_path = res.get("b_path")
             if not a_path or not b_path:
@@ -2644,10 +2661,11 @@ class MainWindow(QMainWindow):
             for i, d in enumerate(res.get("detections", [])):
                 vc = d.get("var_count", -1)
                 mc = d.get("mpc_count", -1)
-                if vc == 0 and mc == 0:
-                    grp = "var0_mpc0"
-                elif vc > 0 or mc > 0:
+                manual = str(d.get("manual_class", "") or "").strip()
+                if vc > 0 or mc > 0:
                     grp = "var_or_mpc"
+                elif vc == 0 and mc == 0:
+                    grp = manual if manual else "unlabeled"
                 else:
                     n_skip += 1
                     continue
@@ -2667,6 +2685,7 @@ class MainWindow(QMainWindow):
                 hdr = hdu0.header
                 hdr["VARC"] = int(vc)
                 hdr["MPCC"] = int(mc)
+                hdr["MANUAL"] = manual
                 hdr["STATUS"] = str(d.get("status", ""))
                 hdr["SCORE"] = float(d.get("score", 0.0))
                 snr = d.get("snr")
@@ -2674,20 +2693,28 @@ class MainWindow(QMainWindow):
                     hdr["SNR"] = float(snr)
                 hdr["PIXX"] = float(d["x"])
                 hdr["PIXY"] = float(d["y"])
-                out = base / grp / f"{stem}_{i:04d}_16.fits"
+                grp_dir = base / web_export.sanitize_name(grp)
+                grp_dir.mkdir(parents=True, exist_ok=True)
+                out = grp_dir / f"{stem}_{i:04d}_16.fits"
                 try:
                     fits.HDUList([hdu0, hdu1]).writeto(str(out), overwrite=True)
                 except Exception:
                     n_skip += 1
                     continue
-                if grp == "var0_mpc0":
-                    n1 += 1
+                if grp == "var_or_mpc":
+                    n_or += 1
                 else:
-                    n2 += 1
-        self._log(f"训练FITS导出: var0&mpc0={n1}, var>0或mpc>0={n2}, 跳过={n_skip} -> {base}")
+                    n_by_manual[grp] = n_by_manual.get(grp, 0) + 1
+        detail = "  ".join(f"{k}={v}" for k, v in sorted(n_by_manual.items()))
+        self._log(
+            f"训练FITS导出 -> {base}: var>0/mpc>0={n_or}；按标注 {detail}；"
+            f"异常文件跳过={n_anomaly}，检测跳过={n_skip}")
         QMessageBox.information(
             self, "完成",
-            f"已导出:\nvar=0&mpc=0: {n1}\nvar>0或mpc>0: {n2}\n跳过: {n_skip}\n目录: {base}")
+            f"已导出到: {base}\n"
+            f"var>0或mpc>0: {n_or}\n"
+            f"var=0&mpc=0(按人工标注): {detail or '无'}\n"
+            f"异常文件跳过: {n_anomaly}\n检测跳过: {n_skip}")
 
 
 def main() -> None:
