@@ -42,7 +42,7 @@ def main() -> int:
     if not os.path.isdir(root):
         print(f"[错误] 数据源目录不存在: {root}")
         return 2
-    results = query_core.load_all_results(root)
+    results = query_core.load_all_results(root, with_preview=False)
     print("=" * 70)
     print(f"数据源: {root}")
     print(f"结果文件: {len(results)}")
@@ -60,6 +60,8 @@ def main() -> int:
         tag=str(DEFAULTS["web_zip_tag"]),
         snr_split=args.snr_split,
         group_radius_px=gr,
+        manual_exclude=tuple(DEFAULTS.get(
+            "manual_reject_classes", ["m-noise", "m-pix-shift"])),
         log=print,
     )
     print(f"导出 {n} 个目标并打包。")

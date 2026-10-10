@@ -84,6 +84,12 @@ DEFAULTS = {
     # 整文件异常过滤：命中的检测数 n_keep >= 阈值 视为整幅图像异常（整文件过滤）
     "file_anomaly_filter": True,
     "file_anomaly_min_keep": 40,
+    # 每日总表手动分类（人工标注；勾选即过滤对应类别，默认勾选）
+    "manual_classes": ["m-target", "m-noise", "m-pix-shift"],
+    # 人工判为假阳性的类别（网页ZIP导出/其它下游统一排除）
+    "manual_reject_classes": ["m-noise", "m-pix-shift"],
+    "daily_hide_noise": True,
+    "daily_hide_shift": True,
     # 变星(VSX)本地服务
     "vsx_host": "localhost",
     "vsx_port": 5000,

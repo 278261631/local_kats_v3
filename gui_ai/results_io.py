@@ -74,8 +74,68 @@ def save_result(res: Dict, params: Dict | None = None) -> None:
         pass
 
 
-def load_result(json_path: str) -> Dict:
-    """由 json（+同名 npz）重建结果字典。"""
+def update_detection_field(json_path: str, x: float, y: float,
+                           field: str, value) -> bool:
+    """把某个检测的字段写回 json（按 x,y 定位，容差 1e-3）。返回是否命中。"""
+    p = Path(json_path)
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    found = False
+    for det in d.get("detections", []):
+        try:
+            if (abs(float(det.get("x", 0)) - float(x)) < 1e-3
+                    and abs(float(det.get("y", 0)) - float(y)) < 1e-3):
+                det[field] = value
+                found = True
+        except Exception:
+            continue
+    if found:
+        try:
+            p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            return False
+    return found
+
+
+def remove_detection(json_path: str, x: float, y: float) -> bool:
+    """从结果 json 移除某检测（按 x,y 定位），并更新 n_keep/n_total。返回是否命中。"""
+    p = Path(json_path)
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    dets = d.get("detections", [])
+    remain = []
+    removed = False
+    for det in dets:
+        try:
+            if (abs(float(det.get("x", 0)) - float(x)) < 1e-3
+                    and abs(float(det.get("y", 0)) - float(y)) < 1e-3):
+                removed = True
+                continue
+        except Exception:
+            pass
+        remain.append(det)
+    if not removed:
+        return False
+    d["detections"] = remain
+    d["n_total"] = len(remain)
+    d["n_keep"] = sum(1 for it in remain if it.get("status") == "keep")
+    try:
+        p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return False
+    return True
+
+
+def load_result(json_path: str, with_preview: bool = True) -> Dict:
+    """由 json（+同名 npz）重建结果字典。
+
+    ``with_preview=False`` 时跳过预览 npz（导出/查询等不需要预览数组的场景），
+    可避免读取大量预览数组（每个结果数 MB）。
+    """
     d = json.loads(Path(json_path).read_text(encoding="utf-8"))
     b = d.get("b_path")
     res: Dict = {
@@ -108,7 +168,7 @@ def load_result(json_path: str) -> Dict:
         "_loaded": True,
         "_saved_at": d.get("saved_at"),
     }
-    if b:
+    if b and with_preview:
         nz = result_npz_path(b)
         if os.path.exists(nz):
             try:

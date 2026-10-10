@@ -41,7 +41,7 @@ def main() -> int:
         print(f"[错误] 数据源目录不存在: {root}")
         return 2
 
-    results = query_core.load_all_results(root)
+    results = query_core.load_all_results(root, with_preview=False)
     print("=" * 70)
     print(f"数据源: {root}")
     print(f"结果文件: {len(results)}")

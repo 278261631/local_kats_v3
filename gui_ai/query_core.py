@@ -11,12 +11,12 @@ import results_io
 from native_crop import FitsCache
 
 
-def load_all_results(root: str) -> list:
+def load_all_results(root: str, with_preview: bool = True) -> list:
     jsons = results_io.scan_results(root)
     out = []
     for j in jsons:
         try:
-            out.append(results_io.load_result(j))
+            out.append(results_io.load_result(j, with_preview=with_preview))
         except Exception:
             continue
     return out

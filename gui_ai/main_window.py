@@ -112,7 +112,8 @@ def _ab_cells(d: dict) -> list:
 
 
 _COLUMNS = ["文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll", "tile_x", "tile_y"] + _AB_HEADERS
-_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll"] + _AB_HEADERS
+_DAILY_COLUMNS = ["日期", "系统", "天区", "文件", "状态", "变星", "MPC", "x", "y", "score", "SNR", "conc", "dx", "dy", "roll"] + _AB_HEADERS + ["手动分类"]
+_MANUAL_COL = len(_DAILY_COLUMNS) - 1
 # 掩码/峰值颜色
 _DET_COLOR = QColor(255, 60, 60)
 _SEL_COLOR = QColor(60, 255, 120)
@@ -861,6 +862,10 @@ class MainWindow(QMainWindow):
             bool(s.get("file_anomaly_filter", DEFAULTS["file_anomaly_filter"])))
         self.file_anomaly_spin.setValue(
             int(s.get("file_anomaly_min_keep", DEFAULTS["file_anomaly_min_keep"])))
+        self.hide_noise_check.setChecked(
+            bool(s.get("daily_hide_noise", DEFAULTS["daily_hide_noise"])))
+        self.hide_shift_check.setChecked(
+            bool(s.get("daily_hide_shift", DEFAULTS["daily_hide_shift"])))
         self.show_filtered_check.setChecked(bool(s.get("show_filtered", False)))
         self.sat_check.setChecked(bool(s.get("show_sat", True)))
         self.cover_check.setChecked(bool(s.get("show_cover", True)))
@@ -886,6 +891,8 @@ class MainWindow(QMainWindow):
             "ab_pixelshift_max": float(self.ab_shift_spin.value()),
             "file_anomaly_filter": bool(self.file_anomaly_check.isChecked()),
             "file_anomaly_min_keep": int(self.file_anomaly_spin.value()),
+            "daily_hide_noise": bool(self.hide_noise_check.isChecked()),
+            "daily_hide_shift": bool(self.hide_shift_check.isChecked()),
             "show_filtered": bool(self.show_filtered_check.isChecked()),
             "show_sat": bool(self.sat_check.isChecked()),
             "show_cover": bool(self.cover_check.isChecked()),
@@ -1137,6 +1144,27 @@ class MainWindow(QMainWindow):
         vrow.addStretch(1)
         pw.addLayout(vrow)
 
+        # 手动分类按钮（作用于当前选中的检测；结果写回 .gui_ai.json）
+        mbar = QHBoxLayout()
+        mbar.addWidget(QLabel("手动分类:"))
+        self.m_target_btn = QPushButton("m-target")
+        self.m_target_btn.clicked.connect(lambda: self._set_manual_class("m-target"))
+        self.m_noise_btn = QPushButton("m-noise")
+        self.m_noise_btn.clicked.connect(lambda: self._set_manual_class("m-noise"))
+        self.m_shift_btn = QPushButton("m-pix-shift")
+        self.m_shift_btn.clicked.connect(lambda: self._set_manual_class("m-pix-shift"))
+        for b in (self.m_target_btn, self.m_noise_btn, self.m_shift_btn):
+            mbar.addWidget(b)
+        self.manual_status = QLabel("（未选中检测）")
+        self.manual_status.setStyleSheet("color:#666;")
+        mbar.addWidget(self.manual_status)
+        mbar.addStretch(1)
+        self.remove_det_btn = QPushButton("移除当前检测")
+        self.remove_det_btn.setToolTip("从当前结果中删除选中的检测（写回 .gui_ai.json）")
+        self.remove_det_btn.clicked.connect(self._remove_current_detection)
+        mbar.addWidget(self.remove_det_btn)
+        pw.addLayout(mbar)
+
         self.show_filtered_check = QCheckBox("显示被过滤结果")
         self.show_filtered_check.setChecked(False)
         self.show_filtered_check.stateChanged.connect(lambda _=0: self._rebuild_table())
@@ -1277,11 +1305,21 @@ class MainWindow(QMainWindow):
         self.daily_zero_check = QCheckBox("仅 var=0 & mpc=0")
         self.daily_zero_check.setChecked(False)
         self.daily_zero_check.stateChanged.connect(lambda _=0: self._build_daily_summary())
+        self.hide_noise_check = QCheckBox("隐藏 m-noise")
+        self.hide_noise_check.setChecked(bool(DEFAULTS.get("daily_hide_noise", True)))
+        self.hide_noise_check.stateChanged.connect(
+            lambda _=0: self._apply_daily_manual_filter())
+        self.hide_shift_check = QCheckBox("隐藏 m-pix-shift")
+        self.hide_shift_check.setChecked(bool(DEFAULTS.get("daily_hide_shift", True)))
+        self.hide_shift_check.stateChanged.connect(
+            lambda _=0: self._apply_daily_manual_filter())
         self.daily_info = QLabel("（扫描选中目录下所有 *.gui_ai.json 汇总；仅命中）")
         self.daily_info.setStyleSheet("color:#666;")
         drow.addWidget(self.daily_btn)
         drow.addWidget(self.daily_export_btn)
         drow.addWidget(self.daily_zero_check)
+        drow.addWidget(self.hide_noise_check)
+        drow.addWidget(self.hide_shift_check)
         drow.addWidget(self.daily_info)
         drow.addStretch(1)
         dv.addLayout(drow)
@@ -1291,6 +1329,7 @@ class MainWindow(QMainWindow):
         self.daily_table.horizontalHeader().setStretchLastSection(True)
         self.daily_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.daily_table.cellDoubleClicked.connect(self._jump_daily_row)
+        self.daily_table.itemSelectionChanged.connect(self._on_daily_selected)
         dv.addWidget(self.daily_table)
         tabs.addTab(daily_wrap, "每日总表")
 
@@ -1653,7 +1692,7 @@ class MainWindow(QMainWindow):
                     "-" if det.get("conc") is None else f"{det.get('conc'):.2f}",
                     f"{det.get('dx', 0):+.2f}", f"{det.get('dy', 0):+.2f}",
                     f"{det.get('roll', 0):+.2f}",
-                ] + _ab_cells(det))
+                ] + _ab_cells(det) + [det.get("manual_class", "")])
                 self._daily_meta.append({"json": j, "det": det})
         self.daily_table.setRowCount(len(self._daily_rows))
         for r, row in enumerate(self._daily_rows):
@@ -1662,7 +1701,167 @@ class MainWindow(QMainWindow):
         self.daily_info.setText(
             f"（{len(jsons)} 个结果文件, 命中 {len(self._daily_rows)} 条"
             + ("，仅 var=0 & mpc=0" if zero_only else "") + "）")
+        self._apply_daily_manual_filter()
         self._log(f"每日总表: {len(jsons)} 个结果文件, 命中 {len(self._daily_rows)} 条")
+
+    def _on_daily_selected(self) -> None:
+        """每日总表选中行 -> 更新手动分类状态标签。"""
+        r = self.daily_table.currentRow()
+        if 0 <= r < len(self._daily_meta):
+            det = self._daily_meta[r].get("det") or {}
+            self.manual_status.setText(
+                f"当前: {det.get('manual_class') or '未分类'}")
+
+    def _update_manual_status(self, entry: Dict) -> None:
+        det = (entry or {}).get("_det") or {}
+        self.manual_status.setText(f"当前: {det.get('manual_class') or '未分类'}")
+
+    def _sync_daily_row(self, det: Dict, value: str) -> None:
+        """把某检测的手动分类同步到每日总表对应行。"""
+        x = det.get("x", 0)
+        y = det.get("y", 0)
+        changed = False
+        for r, meta in enumerate(self._daily_meta):
+            d2 = meta.get("det") or {}
+            try:
+                if (abs(float(d2.get("x", 0)) - float(x)) < 1e-3
+                        and abs(float(d2.get("y", 0)) - float(y)) < 1e-3):
+                    d2["manual_class"] = value
+                    if r < len(self._daily_rows):
+                        self._daily_rows[r][_MANUAL_COL] = value
+                    it = self.daily_table.item(r, _MANUAL_COL)
+                    if it is not None:
+                        it.setText(value)
+                    changed = True
+            except Exception:
+                continue
+        if changed:
+            self._apply_daily_manual_filter()
+
+    def _set_manual_class(self, value: str) -> None:
+        """对当前选中的检测（检测结果表或每日总表）写入手动分类。"""
+        entry = self._selected_entry()
+        if entry is not None:
+            res = entry.get("_result") or {}
+            det = entry.get("_det") or {}
+            b = res.get("b_path")
+            det["manual_class"] = value
+            ok = False
+            if b:
+                jp = results_io.result_json_path(b)
+                if os.path.exists(jp):
+                    try:
+                        ok = results_io.update_detection_field(
+                            jp, det.get("x", 0), det.get("y", 0),
+                            "manual_class", value)
+                    except Exception as ex:  # noqa: BLE001
+                        self._log(f"手动分类写回失败: {ex}")
+            self._log(
+                f"手动分类 {os.path.basename(b or '')} "
+                f"({det.get('x')},{det.get('y')}) -> {value}"
+                + ("" if ok else "  [写回失败/无结果文件]"))
+            self._update_manual_status(entry)
+            self._sync_daily_row(det, value)
+            self._select_next_detection()
+            return
+        r = self.daily_table.currentRow()
+        if 0 <= r < len(self._daily_meta):
+            meta = self._daily_meta[r]
+            det = meta.get("det") or {}
+            det["manual_class"] = value
+            ok = False
+            try:
+                ok = results_io.update_detection_field(
+                    meta["json"], det.get("x", 0), det.get("y", 0),
+                    "manual_class", value)
+            except Exception as ex:  # noqa: BLE001
+                self._log(f"手动分类写回失败: {ex}")
+            if r < len(self._daily_rows):
+                self._daily_rows[r][_MANUAL_COL] = value
+                it = self.daily_table.item(r, _MANUAL_COL)
+                if it is not None:
+                    it.setText(value)
+            self._log(
+                f"手动分类 {os.path.basename(meta.get('json', ''))} "
+                f"({det.get('x')},{det.get('y')}) -> {value}"
+                + ("" if ok else "  [写回失败]"))
+            self.manual_status.setText(f"当前: {value}")
+            self._apply_daily_manual_filter()
+            self._select_next_daily_row()
+            return
+        self._log("手动分类: 请先在检测结果表或每日总表中选中一条")
+
+    def _select_next_detection(self) -> None:
+        """移到检测结果表的下一条。"""
+        sm = self.table.selectionModel()
+        rows = sm.selectedRows() if sm else []
+        nxt = (rows[0].row() + 1) if rows else 0
+        if 0 <= nxt < self.table.rowCount():
+            self.table.selectRow(nxt)
+            it = self.table.item(nxt, 0)
+            if it is not None:
+                self.table.scrollToItem(it)
+
+    def _select_next_daily_row(self) -> None:
+        """移到每日总表的下一条可见行。"""
+        n = self.daily_table.rowCount()
+        r = self.daily_table.currentRow() + 1
+        while r < n and self.daily_table.isRowHidden(r):
+            r += 1
+        if r < n:
+            self.daily_table.selectRow(r)
+
+    def _remove_current_detection(self) -> None:
+        """移除当前选中的检测（内存 + 写回 .gui_ai.json）。"""
+        entry = self._selected_entry()
+        if entry is None:
+            self._log("移除检测: 请先在检测结果表选中一条")
+            return
+        res = entry.get("_result")
+        det = entry.get("_det")
+        if res is None or det is None:
+            return
+        x, y = det.get("x", 0), det.get("y", 0)
+        try:
+            res["detections"].remove(det)
+        except ValueError:
+            pass
+        res["n_total"] = len(res.get("detections", []))
+        res["n_keep"] = sum(
+            1 for d in res.get("detections", []) if d.get("status") == "keep")
+        b = res.get("b_path")
+        ok = False
+        if b:
+            jp = results_io.result_json_path(b)
+            if os.path.exists(jp):
+                try:
+                    ok = results_io.remove_detection(jp, x, y)
+                except Exception as ex:  # noqa: BLE001
+                    self._log(f"移除检测写回失败: {ex}")
+        self._manual_center = None
+        self._manual_result = None
+        self._rebuild_table()
+        self._log(
+            f"已移除检测 {os.path.basename(b or '')} ({x},{y})"
+            + ("" if ok else "  [结果文件未更新]"))
+
+    def _apply_daily_manual_filter(self) -> None:
+        """按勾选隐藏手动分类为 m-noise / m-pix-shift 的行。"""
+        reject = set()
+        if self.hide_noise_check.isChecked():
+            reject.add("m-noise")
+        if self.hide_shift_check.isChecked():
+            reject.add("m-pix-shift")
+        n = 0
+        for r in range(self.daily_table.rowCount()):
+            mc = self._daily_rows[r][_MANUAL_COL] if r < len(self._daily_rows) else ""
+            hidden = bool(reject and mc in reject)
+            self.daily_table.setRowHidden(r, hidden)
+            if hidden:
+                n += 1
+        if hasattr(self, "daily_info") and self.daily_table.rowCount() > 0:
+            cur = self.daily_info.text().split("  |隐藏")[0]
+            self.daily_info.setText(cur + (f"  |隐藏 {n} 条" if reject else ""))
 
     def _export_daily_csv(self) -> None:
         if not self._daily_rows:
@@ -1908,6 +2107,11 @@ class MainWindow(QMainWindow):
     def _on_row_selected(self) -> None:
         self._manual_center = None
         self._manual_result = None
+        entry = self._selected_entry()
+        if entry is not None:
+            self._update_manual_status(entry)
+        elif hasattr(self, "manual_status"):
+            self.manual_status.setText("（未选中检测）")
         self._refresh_preview()
 
     def _toggle_view(self) -> None:
@@ -2302,24 +2506,36 @@ class MainWindow(QMainWindow):
 
     def _export_web_zip(self) -> None:
         """导出网页 ZIP（参考原版；输出根目录同原版，文件名带 V4）。"""
+        # 只需 JSON（导出读原生裁块），不加载预览 npz；优先反映磁盘最新手动分类
+        export_results = None
         target = self._current_path()
         if target:
             jsons = results_io.scan_results(target)
             if jsons:
-                loaded = self._load_jsons(jsons)
-                self._log(f"导出前加载 {loaded} 个结果 (来自 {target})")
-        if not self._results:
+                export_results = []
+                for j in jsons:
+                    try:
+                        export_results.append(
+                            results_io.load_result(j, with_preview=False))
+                    except Exception:
+                        continue
+                self._log(f"导出前加载 {len(export_results)} 个结果 (来自 {target})")
+        if not export_results:
+            export_results = self._results
+        if not export_results:
             QMessageBox.information(self, "提示", "没有可导出的结果")
             return
         keep_only = not self.show_filtered_check.isChecked()
         try:
             n, zip_path, out_dir = web_export.export_results_web(
-                self._results,
+                export_results,
                 out_root=DEFAULTS["web_zip_root"],
                 patch_size=int(self.crop_spin.value()),
                 keep_only=keep_only,
                 tag=str(DEFAULTS["web_zip_tag"]),
                 group_radius_px=float(DEFAULTS["web_group_radius_px"]),
+                manual_exclude=tuple(DEFAULTS.get(
+                    "manual_reject_classes", ["m-noise", "m-pix-shift"])),
                 log=self._log,
             )
         except Exception as ex:  # noqa: BLE001

@@ -209,6 +209,7 @@ def export_results_web(
     tag: str = "V4",
     snr_split: float = 10.0,
     group_radius_px: float = 100.0,
+    manual_exclude: Tuple[str, ...] = ("m-noise", "m-pix-shift"),
     log=print,
 ) -> Tuple[int, Path, Path]:
     out_dir = Path(out_root) / f"out_zip_{datetime.now().strftime('%Y%m%d')}"
@@ -221,6 +222,8 @@ def export_results_web(
     cache = FitsCache(max_items=2)
     items: List[Dict] = []
     n_anomaly = 0
+    n_manual = 0
+    excl = set(manual_exclude or ())
     try:
         for res in results:
             if res.get("anomaly"):
@@ -229,9 +232,14 @@ def export_results_web(
                 continue
             a_path = res.get("a_path")
             b_path = res.get("b_path")
-            dets = [d for d in res.get("detections", [])
-                    if (not keep_only or d.get("status") == "keep")
-                    and d.get("var_count") == 0 and d.get("mpc_count") == 0]
+            dets = []
+            for d in res.get("detections", []):
+                if d.get("manual_class") in excl:  # 人工判为假阳性，排除
+                    n_manual += 1
+                    continue
+                if ((not keep_only or d.get("status") == "keep")
+                        and d.get("var_count") == 0 and d.get("mpc_count") == 0):
+                    dets.append(d)
             if not dets:
                 continue
             wcs_a = None
@@ -299,9 +307,12 @@ def export_results_web(
                    if it.get("_snr") is not None and it["_snr"] >= snr_split)
         if n_anomaly:
             log(f"已跳过 {n_anomaly} 个整文件异常图像")
+        if n_manual:
+            log(f"已排除 {n_manual} 个手动判为 {sorted(excl)} 的检测")
         summary = (f"同天区(GYx+Ky)按B图像素聚类(半径{group_radius_px:g}px)；"
                    f"仅 var=0 且 mpc=0；状态={'仅命中' if keep_only else '全部'}；"
-                   f"SNR≥{snr_split:g} 优先，其余折叠")
+                   + (f"已排除手动 {sorted(excl)}；" if excl else "")
+                   + f"SNR≥{snr_split:g} 优先，其余折叠")
         (stage / "index.html").write_text(
             _build_html(items, summary, patch_size, hist_level, snr_split),
             encoding="utf-8")
