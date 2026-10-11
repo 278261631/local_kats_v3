@@ -28,6 +28,9 @@ DEFAULTS = {
     "overlap": 0.10,
     # 预览"选中目标裁切"的裁切边长（原生像素）
     "crop_size": 256,
+    # AB 预览旁"中心 32px"对比小图的原生边长与显示边长(像素)
+    "zoom_patch": 32,
+    "zoom_disp": 150,
     # 检测阈值（sigmoid 分数）
     "det_threshold": 0.45,
     # 跨瓦片去重半径（原生像素）

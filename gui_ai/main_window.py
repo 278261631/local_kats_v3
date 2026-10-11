@@ -1114,6 +1114,21 @@ class MainWindow(QMainWindow):
             lbl.double_clicked.connect(self._on_preview_double_click)
             pl.addWidget(lbl, 1)
 
+        # 中心 32px 原生对比小图（A|B，最近邻放大）
+        zoom_box = QWidget()
+        zv = QVBoxLayout(zoom_box)
+        zv.setContentsMargins(0, 0, 0, 0)
+        zt = QLabel("中心 %dpx A|B" % int(DEFAULTS.get("zoom_patch", 32)))
+        zt.setAlignment(Qt.AlignCenter)
+        self.preview_zoom = QLabel("（选中目标后显示）")
+        self.preview_zoom.setAlignment(Qt.AlignCenter)
+        self.preview_zoom.setMinimumHeight(180)
+        self.preview_zoom.setFixedWidth(320)
+        self.preview_zoom.setStyleSheet("background:#111; color:#777;")
+        zv.addWidget(zt)
+        zv.addWidget(self.preview_zoom, 1)
+        pl.addWidget(zoom_box, 0)
+
         preview_wrap = QWidget()
         pw = QVBoxLayout(preview_wrap)
         pw.setContentsMargins(0, 0, 0, 0)
@@ -1260,6 +1275,7 @@ class MainWindow(QMainWindow):
         pw.addLayout(qbar)
 
         tabs = QTabWidget()
+        self.tabs = tabs
         self.table = QTableWidget(0, len(_COLUMNS))
         self.table.setHorizontalHeaderLabels(_COLUMNS)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -1331,7 +1347,7 @@ class MainWindow(QMainWindow):
         self.daily_table.cellDoubleClicked.connect(self._jump_daily_row)
         self.daily_table.itemSelectionChanged.connect(self._on_daily_selected)
         dv.addWidget(self.daily_table)
-        tabs.addTab(daily_wrap, "每日总表")
+        self._daily_tab_index = tabs.addTab(daily_wrap, "每日总表")
 
         splitter.addWidget(preview_wrap)
         splitter.addWidget(tabs)
@@ -1666,6 +1682,8 @@ class MainWindow(QMainWindow):
         zero_only = self.daily_zero_check.isChecked()
         self._daily_rows = []
         self._daily_meta = []
+        self._manual_result = None
+        self._manual_center = None
         for j in jsons:
             info = results_io.parse_path_info(j)
             try:
@@ -1704,13 +1722,42 @@ class MainWindow(QMainWindow):
         self._apply_daily_manual_filter()
         self._log(f"每日总表: {len(jsons)} 个结果文件, 命中 {len(self._daily_rows)} 条")
 
+    def _daily_result(self, json_path: str) -> Dict:
+        """按需加载并缓存某结果（含预览），供每日总表跳转显示 AB 裁切。"""
+        cache = getattr(self, "_daily_res_cache", None)
+        if cache is None:
+            cache = {}
+            self._daily_res_cache = cache
+        res = cache.get(json_path)
+        if res is None:
+            res = results_io.load_result(json_path)  # 带预览
+            if len(cache) >= 8:
+                cache.clear()
+            cache[json_path] = res
+        return res
+
+    def _show_daily_row_preview(self, r: int) -> None:
+        """把 AB 预览切到每日总表第 r 行对应的检测。"""
+        if not (0 <= r < len(self._daily_meta)):
+            return
+        meta = self._daily_meta[r]
+        det = meta.get("det") or {}
+        self.manual_status.setText(f"当前: {det.get('manual_class') or '未分类'}")
+        try:
+            res = self._daily_result(meta.get("json"))
+        except Exception:
+            return
+        if res.get("a_u8") is None or res.get("b_raw") is None:
+            return
+        self._manual_result = res
+        self._manual_center = (float(det.get("x", 0)), float(det.get("y", 0)))
+        self._refresh_preview()
+
     def _on_daily_selected(self) -> None:
-        """每日总表选中行 -> 更新手动分类状态标签。"""
+        """每日总表选中行 -> 更新状态标签并切换 AB 预览到该检测。"""
         r = self.daily_table.currentRow()
         if 0 <= r < len(self._daily_meta):
-            det = self._daily_meta[r].get("det") or {}
-            self.manual_status.setText(
-                f"当前: {det.get('manual_class') or '未分类'}")
+            self._show_daily_row_preview(r)
 
     def _update_manual_status(self, entry: Dict) -> None:
         det = (entry or {}).get("_det") or {}
@@ -1739,8 +1786,16 @@ class MainWindow(QMainWindow):
             self._apply_daily_manual_filter()
 
     def _set_manual_class(self, value: str) -> None:
-        """对当前选中的检测（检测结果表或每日总表）写入手动分类。"""
-        entry = self._selected_entry()
+        """对当前选中的检测写入手动分类。
+
+        目标按**当前所在标签页**选择：在“每日总表”页作用于总表当前行；
+        其它页作用于“检测结果”表当前行。避免在总表（如“仅 var=0 & mpc=0”）
+        操作时误改检测结果表里残留选中的另一行，导致跳到错误的行。
+        """
+        use_daily = (getattr(self, "_daily_tab_index", -1) >= 0
+                     and self.tabs.currentIndex() == self._daily_tab_index
+                     and self.daily_table.rowCount() > 0)
+        entry = None if use_daily else self._selected_entry()
         if entry is not None:
             res = entry.get("_result") or {}
             det = entry.get("_det") or {}
@@ -1765,6 +1820,8 @@ class MainWindow(QMainWindow):
             self._select_next_detection()
             return
         r = self.daily_table.currentRow()
+        if r < 0 and self.daily_table.rowCount() > 0:
+            r = 0
         if 0 <= r < len(self._daily_meta):
             meta = self._daily_meta[r]
             det = meta.get("det") or {}
@@ -1785,9 +1842,9 @@ class MainWindow(QMainWindow):
                 f"手动分类 {os.path.basename(meta.get('json', ''))} "
                 f"({det.get('x')},{det.get('y')}) -> {value}"
                 + ("" if ok else "  [写回失败]"))
-            self.manual_status.setText(f"当前: {value}")
             self._apply_daily_manual_filter()
             self._select_next_daily_row()
+            self._show_daily_row_preview(self.daily_table.currentRow())
             return
         self._log("手动分类: 请先在检测结果表或每日总表中选中一条")
 
@@ -1940,7 +1997,7 @@ class MainWindow(QMainWindow):
         self._refresh_preview()
         for res in self._results:
             try:
-                results_io.save_result(res, self._params())
+                results_io.save_result(res, self._params(), with_preview=False)
             except Exception:
                 pass
 
@@ -1993,13 +2050,19 @@ class MainWindow(QMainWindow):
         return out
 
     def _run_queries(self) -> None:
-        # 按选中节点（文件/文件夹）扫描已有结果并加载后再查询
-        target = self._current_path()
-        if target:
-            jsons = results_io.scan_results(target)
-            if jsons:
-                loaded = self._load_jsons(jsons)
-                self._log(f"查询前加载 {loaded} 个结果 (来自 {target})")
+        # 已加载结果（含预览）则直接复用；否则按选中节点轻量读取（不加载预览 npz）
+        if not self._results:
+            target = self._current_path()
+            if target:
+                jsons = results_io.scan_results(target)
+                for j in jsons:
+                    try:
+                        self._results.append(
+                            results_io.load_result(j, with_preview=False))
+                    except Exception:
+                        continue
+                if jsons:
+                    self._log(f"查询前轻量加载 {len(self._results)} 个结果 (来自 {target})")
         if not self._results:
             QMessageBox.information(self, "提示", "没有可查询的结果（请先选中已处理的文件/文件夹）")
             return
@@ -2088,9 +2151,10 @@ class MainWindow(QMainWindow):
         self.query_pause_btn.setText("暂停查询")
         self._rebuild_table()
         self._refresh_preview()
+        # 只改检测字段，不重写预览 npz（否则会重新压缩数百 MB，极慢）
         for res in self._results:
             try:
-                results_io.save_result(res, self._params())
+                results_io.save_result(res, self._params(), with_preview=False)
             except Exception:
                 pass
 
@@ -2151,6 +2215,9 @@ class MainWindow(QMainWindow):
         self.view_combo.setCurrentIndex(1)  # 触发刷新
 
     def _current_result(self) -> Optional[Dict]:
+        # 手动指定的结果（如每日总表跳转）优先，其次检测结果表选中项
+        if self._manual_result is not None:
+            return self._manual_result
         entry = self._selected_entry()
         if entry is not None:
             return entry["_result"]
@@ -2209,6 +2276,7 @@ class MainWindow(QMainWindow):
         mode_crop = (
             self.view_combo.currentIndex() == 1 and (entry is not None or manual is not None)
         )
+        zoom_pm = None
 
         if mode_crop:
             center = manual if manual is not None else (entry["x"], entry["y"])
@@ -2224,6 +2292,7 @@ class MainWindow(QMainWindow):
                 # 原生分辨率裁块（无降采样），A 线性、B 局部线性
                 a_gray = _linear_u8(a_crop)
                 b_gray = _linear_u8(b_crop)
+                zoom_pm = self._zoom_pixmap(a_crop, b_crop)
             except Exception as ex:  # noqa: BLE001
                 self._log(f"原生裁切失败，回退预览: {ex}")
             if a_gray is None:
@@ -2350,6 +2419,53 @@ class MainWindow(QMainWindow):
         self.preview_b.setPixmap(QPixmap.fromImage(b_img).scaled(
             self.preview_b.width(), self.preview_b.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        if zoom_pm is not None:
+            self.preview_zoom.setPixmap(zoom_pm.scaled(
+                self.preview_zoom.width(), self.preview_zoom.height(),
+                Qt.KeepAspectRatio, Qt.FastTransformation))
+        else:
+            self.preview_zoom.setText("（选中目标后显示）")
+
+    def _zoom_pixmap(self, a_crop: np.ndarray,
+                     b_crop: np.ndarray) -> Optional[QPixmap]:
+        """中心 zoom_patch×zoom_patch 原生裁块，A|B 最近邻放大对比。"""
+        if a_crop is None or b_crop is None:
+            return None
+        try:
+            import cv2
+            zsz = int(DEFAULTS.get("zoom_patch", 32))
+            disp = int(DEFAULTS.get("zoom_disp", 150))
+            ay, ax = a_crop.shape[0] // 2, a_crop.shape[1] // 2
+            half = zsz // 2
+
+            def cut(x):
+                h, w = x.shape[:2]
+                y0 = max(0, min(h - zsz, ay - half)) if h >= zsz else 0
+                x0 = max(0, min(w - zsz, ax - half)) if w >= zsz else 0
+                sub = np.asarray(x[y0:y0 + zsz, x0:x0 + zsz], dtype=np.float32)
+                return _linear_u8(sub)
+
+            a_u8 = cv2.resize(cut(a_crop), (disp, disp),
+                              interpolation=cv2.INTER_NEAREST)
+            b_u8 = cv2.resize(cut(b_crop), (disp, disp),
+                              interpolation=cv2.INTER_NEAREST)
+            ai = numpy_to_qimage(a_u8)
+            bi = numpy_to_qimage(b_u8)
+            c = disp // 2
+            cs, gp = max(6, disp // 8), max(2, disp // 20)
+            self._draw_crosshair(ai, c, c, _SEL_COLOR, size=cs, gap=gp)
+            self._draw_crosshair(bi, c, c, _SEL_COLOR, size=cs, gap=gp)
+            w = ai.width() + bi.width() + 2
+            comp = QImage(w, disp, QImage.Format_RGB888)
+            comp.fill(QColor(0, 0, 0))
+            p = QPainter(comp)
+            p.drawImage(0, 0, ai)
+            p.drawImage(ai.width() + 2, 0, bi)
+            p.end()
+            return QPixmap.fromImage(comp)
+        except Exception:
+            return None
 
     def _thumb_from_crops(self, a_crop: np.ndarray, b_crop: np.ndarray,
                           side: int = 128) -> QPixmap:
@@ -2545,14 +2661,34 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "完成", f"已导出 {n} 个目标:\n{zip_path}")
 
-    def _open_conc_viewer(self) -> None:
-        """打开 conc 验证窗口：读取选中检测处的原始 B 局部块。"""
+    def _current_detection(self):
+        """返回当前视图对应的 (res, det)。
+
+        优先使用“每日总表”跳转/预览指定的目标（`_manual_result/_manual_center`，
+        若该坐标附近有检测），否则用“检测结果”表当前选中行；都没有则 (None,None)。
+        """
         entry = self._selected_entry()
-        if entry is None:
-            QMessageBox.information(self, "提示", "请先在检测结果里选择一条")
+        if (self._manual_result is not None and self._manual_center is not None
+                and (entry is None or entry.get("_result") is not self._manual_result)):
+            res = self._manual_result
+            cx, cy = self._manual_center
+            best, bd = None, None
+            for d in res.get("detections", []):
+                dd = (d.get("x", 0) - cx) ** 2 + (d.get("y", 0) - cy) ** 2
+                if bd is None or dd < bd:
+                    bd, best = dd, d
+            if best is not None and bd is not None and bd <= 4.0:
+                return res, best
+        if entry is not None:
+            return entry["_result"], entry["_det"]
+        return None, None
+
+    def _open_conc_viewer(self) -> None:
+        """打开 conc 验证窗口：读取当前检测处的原始 B 局部块。"""
+        res, det = self._current_detection()
+        if res is None or det is None:
+            QMessageBox.information(self, "提示", "请先选中一条检测")
             return
-        res = entry["_result"]
-        det = entry["_det"]
         a_path = res.get("a_path")
         b_path = res.get("b_path")
         if not a_path or not b_path:

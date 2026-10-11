@@ -35,8 +35,13 @@ def result_npz_path(b_path: str) -> str:
     return str(b_path) + SUFFIX_NPZ
 
 
-def save_result(res: Dict, params: Dict | None = None) -> None:
-    """写出结果 json + 预览 npz（失败不抛）。"""
+def save_result(res: Dict, params: Dict | None = None,
+                with_preview: bool = True) -> None:
+    """写出结果 json（+预览 npz）。
+
+    ``with_preview=False`` 时只写 json，不重写 npz（查询/重算等只改检测字段、
+    预览数组未变的场景，可避免重新压缩数百 MB 预览）。
+    """
     b = res.get("b_path")
     if not b:
         return
@@ -68,7 +73,7 @@ def save_result(res: Dict, params: Dict | None = None) -> None:
             json.dumps(meta, ensure_ascii=False), encoding="utf-8"
         )
         arrays = {k: res[k] for k in _PREVIEW_KEYS if res.get(k) is not None}
-        if arrays:
+        if with_preview and arrays:
             np.savez_compressed(result_npz_path(b), **arrays)
     except Exception:
         pass
